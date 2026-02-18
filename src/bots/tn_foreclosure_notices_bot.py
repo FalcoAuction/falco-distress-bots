@@ -254,7 +254,8 @@ def run():
                 skipped_expired += 1
                 continue
 
-            falco_score = score_v2(dts)
+            has_contact = bool(lead.get("firm") or lead.get("auction_vendor"))
+            falco_score = score_v2(lead["county"], dts, has_contact)
             status_label = label(falco_score)
 
             lead_key = make_lead_key(
