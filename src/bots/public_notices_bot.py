@@ -11,7 +11,7 @@ from ..utils import (
     extract_trustee_or_attorney,
 )
 from ..notion_client import build_properties, create_lead, find_existing_by_url, update_lead
-from ..scoring import days_to_sale, detect_risk_flags, hard_kill, score_v2, label
+from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
 
 
 def run():
@@ -27,17 +27,15 @@ def run():
             continue
 
         soup = BeautifulSoup(html, "html.parser")
-
-        # Grab full page text (some notice portals don't put notices in clean <p> tags)
         full_text = " ".join(soup.get_text(" ", strip=True).split())
 
         candidates = []
 
-        # If the whole page contains trustee/estate keywords, take a large slice
+        # Whole-page candidate (helps for portals / index pages)
         if contains_any(full_text, TRUSTEE_KEYWORDS) or contains_any(full_text, ESTATE_KEYWORDS):
             candidates.append(full_text[:4000])
 
-        # Also scan blocks for smaller notice chunks
+        # Block scan
         for node in soup.find_all(["p", "li", "div", "article", "section"]):
             txt = " ".join(node.get_text(" ", strip=True).split())
             if len(txt) < 80:
@@ -45,14 +43,14 @@ def run():
             if contains_any(txt, TRUSTEE_KEYWORDS) or contains_any(txt, ESTATE_KEYWORDS):
                 candidates.append(txt[:2000])
 
-        # De-dupe candidate text chunks
+        # De-dupe candidates by first 240 chars
         deduped = []
         seen = set()
         for c in candidates:
-            key = c[:240]  # lightweight key
-            if key in seen:
+            k = c[:240]
+            if k in seen:
                 continue
-            seen.add(key)
+            seen.add(k)
             deduped.append(c)
 
         print(f"[PublicNoticesBot] {url} -> {len(deduped)} candidates")
@@ -75,12 +73,16 @@ def run():
             flags = detect_risk_flags(snippet)
             dts = days_to_sale(sale_date)
 
-            killed, kill_reason = hard_kill(dts, flags)
+            override_status, reason = triage(dts, flags)
 
-            if killed:
+            if override_status == "KILL":
                 status = "KILL"
                 score = 0
                 title = f"{distress_type} (KILL) ({county or 'TN'})"
+            elif override_status == "MONITOR":
+                score = score_v2(distress_type, county, dts, has_contact)
+                status = "MONITOR"
+                title = f"{distress_type} (MONITOR) ({county or 'TN'})"
             else:
                 score = score_v2(distress_type, county, dts, has_contact)
                 status = label(distress_type, county, dts, flags, score, has_contact)
@@ -96,14 +98,14 @@ def run():
                 address=address,
                 sale_date_iso=sale_date,
                 trustee_attorney=trustee_attorney,
-                contact_info=contact if contact else (kill_reason if killed else ""),
+                contact_info=contact if contact else reason,
                 raw_snippet=raw_snippet,
                 url=url,
                 score=score,
                 status=status,
             )
 
-            # Basic dedupe by URL (prevents spam but may overwrite when a page has many notices)
+            # Basic dedupe by URL (prevents spam but can overwrite if a page has many notices)
             existing_id = find_existing_by_url(url)
             if existing_id:
                 update_lead(existing_id, props)
