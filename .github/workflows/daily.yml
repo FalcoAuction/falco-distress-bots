@@ -1,0 +1,25 @@
+name: Falco Daily Distress Bots
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 12 * * *" # 12:00 UTC (~6am CT)
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Run bots
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python -m src.run_all
