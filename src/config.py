@@ -1,32 +1,34 @@
-# === Public Notice Seeds ===
-# IMPORTANT: Do NOT scrape the tnpublicnotice homepage.
-# Use search endpoints so results are already filtered.
+# src/config.py
 
+# Public notice sources we can scrape without logins/CAPTCHA:
+# tnlegalpub exposes notice listings + individual notice pages.
 SEED_URLS_PUBLIC_NOTICES = [
-    # Trustee sale keyword search
-    "https://www.tnpublicnotice.com/search?keyword=trustee%20sale",
-    # Foreclosure keyword search (optional)
-    "https://www.tnpublicnotice.com/search?keyword=foreclosure",
+    "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
 
-# === County Tax Seeds (pipeline pages for now) ===
-SEED_URLS_COUNTY_TAX = [
-    # Put your county tax / delinquent tax list pages here
-    # Example placeholders:
-    # "https://.../davidson/tax-sale",
-]
+# Hard limit so we don't crawl forever while stabilizing.
+# This is "pages of listings", not individual notices.
+PUBLIC_NOTICE_MAX_LIST_PAGES = 5
 
-# === Keyword Sets ===
+# Keywords used to identify foreclosure/trustee sale content
 TRUSTEE_KEYWORDS = [
-    "substitute trustee", "trustee sale", "notice of sale",
-    "foreclosure", "deed of trust", "power of sale"
+    "TRUSTEE'S SALE",
+    "TRUSTEE’S SALE",
+    "SUBSTITUTE TRUSTEE",
+    "SUBSTITUTE TRUSTEE’S",
+    "SUBSTITUTE TRUSTEE'S",
+    "NOTICE OF FORECLOSURE",
+    "FORECLOSURE SALE",
+    "NOTICE OF SUBSTITUTE TRUSTEE",
+    "NOTICE OF TRUSTEE",
+    "NOTICE OF SALE",
 ]
 
+# Optional: estate keyword bucket (keep if you use it elsewhere)
 ESTATE_KEYWORDS = [
-    "estate of", "probate", "executor", "administrator"
-]
-
-TAX_KEYWORDS = [
-    "tax sale", "delinquent", "delinquent tax", "back taxes",
-    "tax lien", "trustee tax"
+    "ESTATE OF",
+    "PROBATE",
+    "ADMINISTRATOR",
+    "EXECUTOR",
+    "PERSONAL REPRESENTATIVE",
 ]
