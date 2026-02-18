@@ -1,7 +1,7 @@
 from bs4 import BeautifulSoup
 from ..config import SEED_URLS_PUBLIC_NOTICES, TRUSTEE_KEYWORDS, ESTATE_KEYWORDS
-from ..utils import fetch, contains_any, find_date_iso, guess_county, extract_contact
-from ..notion_client import create_lead, build_properties
+from ..utils import fetch, contains_any, find_date_iso, guess_county, extract_contact, extract_address, extract_trustee_or_attorney
+from ..notion_client import build_properties, create_lead, find_existing_by_url, update_lead
 from ..scoring import days_to_sale, detect_risk_flags, hard_kill, score_v2, label
 
 def run():
@@ -50,6 +50,10 @@ def run():
                 score = score_v2(distress_type, county, dts, has_contact)
                 status = label(distress_type, county, dts, flags, score, has_contact)
                 title = f"{distress_type} ({status}) ({county or 'TN'})"
+                address = extract_address(snippet)
+trustee_attorney = extract_trustee_or_attorney(snippet)
+raw_snippet = snippet
+
 
             props = build_properties(
                 title=title,
@@ -63,6 +67,11 @@ def run():
                 status=status,
             )
 
-            create_lead(props)
+      existing_id = find_existing_by_url(url)
+if existing_id:
+    update_lead(existing_id, props)
+else:
+    create_lead(props)
+
 
     print("[PublicNoticesBot] Done.")
