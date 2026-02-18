@@ -4,7 +4,11 @@ import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
-from ..config import FORECLOSURE_TN_SEED_URL, FORECLOSURE_TN_MAX_PAGES
+from ..config import (
+    FORECLOSURE_TN_SEED_URL,
+    FORECLOSURE_TN_MAX_PAGES,
+    TARGET_COUNTIES,
+)
 from ..utils import fetch, make_lead_key
 from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
 from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
@@ -43,7 +47,6 @@ def _extract_table_rows(html: str, base_url: str) -> list[dict]:
         sale_date_raw = dates[0] if len(dates) >= 1 else ""
         cont_date_raw = dates[1] if len(dates) >= 2 else ""
 
-        # Remove date parts
         parts_wo_dates = [p for p in parts if p not in set(dates)]
 
         city = parts_wo_dates[0] if len(parts_wo_dates) > 0 else ""
@@ -70,6 +73,7 @@ def _extract_table_rows(html: str, base_url: str) -> list[dict]:
 
 def run():
     print(f"[ForeclosureTNBot] seed={FORECLOSURE_TN_SEED_URL}")
+    print(f"[ForeclosureTNBot] target_counties={TARGET_COUNTIES}")
 
     if not FORECLOSURE_TN_SEED_URL:
         print("[ForeclosureTNBot] No seed set.")
@@ -81,6 +85,7 @@ def run():
     skipped_expired = 0
     skipped_kill = 0
     skipped_no_date = 0
+    skipped_out_of_geo = 0
 
     monitor_written = 0
     green_written = 0
@@ -103,19 +108,28 @@ def run():
             break
 
         for r in rows:
-            # Prefer continuance date (usually the forward-looking scheduled date)
             sale_date_iso = r["continuance_date_iso"] or r["sale_date_iso"]
             if not sale_date_iso:
                 skipped_no_date += 1
                 continue
 
-            county = (r["county"] or "TN").strip()
+            county_raw = (r["county"] or "").strip()
+            county = county_raw.upper() if county_raw else "TN"
+
+            # ✅ GEO FILTER
+            # If county is missing, skip (we need confident geo for outreach)
+            if county == "TN":
+                skipped_out_of_geo += 1
+                continue
+            if TARGET_COUNTIES and county not in TARGET_COUNTIES:
+                skipped_out_of_geo += 1
+                continue
+
             address = (r["address"] or "").strip()
             trustee = (r["trustee"] or "").strip()
             listing_url = r["listing_url"]
 
             dts = days_to_sale(sale_date_iso)
-
             if dts is not None and dts < 0:
                 skipped_expired += 1
                 continue
@@ -129,7 +143,6 @@ def run():
             distress_type = "Foreclosure"
             score = score_v2(distress_type, county, dts, True)
 
-            # Status assignment rule-set
             if dts is not None and dts < 30:
                 status = "MONITOR"
             else:
@@ -182,6 +195,7 @@ def run():
         "[ForeclosureTNBot] summary "
         f"total_written={total_written} green_written={green_written} monitor_written={monitor_written} "
         f"created={created} updated={updated} "
-        f"skipped_no_date={skipped_no_date} skipped_expired={skipped_expired} skipped_kill={skipped_kill}"
+        f"skipped_out_of_geo={skipped_out_of_geo} skipped_no_date={skipped_no_date} "
+        f"skipped_expired={skipped_expired} skipped_kill={skipped_kill}"
     )
     print("[ForeclosureTNBot] Done.")
