@@ -2,6 +2,7 @@ from bs4 import BeautifulSoup
 from ..config import SEED_URLS_PUBLIC_NOTICES, TRUSTEE_KEYWORDS, ESTATE_KEYWORDS
 from ..utils import fetch, contains_any, find_date_iso, guess_county, extract_contact
 from ..notion_client import create_lead, build_properties
+from ..scoring import days_to_sale, detect_risk_flags, hard_kill, score_v2, label
 
 def run():
     if not SEED_URLS_PUBLIC_NOTICES:
@@ -27,7 +28,7 @@ def run():
 
         print(f"[PublicNoticesBot] {url} -> {len(candidates)} candidates")
 
-        for snippet in candidates[:40]:
+        for snippet in candidates[:50]:
             is_trustee = contains_any(snippet, TRUSTEE_KEYWORDS)
             is_estate = contains_any(snippet, ESTATE_KEYWORDS)
 
@@ -35,9 +36,20 @@ def run():
             sale_date = find_date_iso(snippet)
             county = guess_county(snippet)
             contact = extract_contact(snippet)
+            has_contact = bool(contact)
 
-            score = 88 if distress_type == "Trustee Sale" else 75
-            title = f"{distress_type} Lead ({county or 'TN'})"
+            flags = detect_risk_flags(snippet)
+            dts = days_to_sale(sale_date)
+
+            killed, kill_reason = hard_kill(dts, flags)
+            if killed:
+                status = "KILL"
+                score = 0
+                title = f"{distress_type} (KILL) ({county or 'TN'})"
+            else:
+                score = score_v2(distress_type, county, dts, has_contact)
+                status = label(distress_type, county, dts, flags, score, has_contact)
+                title = f"{distress_type} ({status}) ({county or 'TN'})"
 
             props = build_properties(
                 title=title,
@@ -45,9 +57,10 @@ def run():
                 distress_type=distress_type,
                 county=county,
                 sale_date_iso=sale_date,
-                contact_info=contact,
+                contact_info=contact if contact else (kill_reason if killed else ""),
                 url=url,
                 score=score,
+                status=status,
             )
 
             create_lead(props)
