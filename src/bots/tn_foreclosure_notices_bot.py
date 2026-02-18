@@ -16,18 +16,34 @@ from ..scoring import days_to_sale, score_v2, label
 from ..utils import fetch, make_lead_key
 
 BASE_URL = "https://tnforeclosurenotices.com/"
-SEARCH_URL = urljoin(BASE_URL, "search/")
-MAX_COUNTIES_CAP = 150  # safety cap
+COUNTY_URL_FMT = urljoin(BASE_URL, "results/counties/{slug}/")
+
+# Hardcoded county list to avoid relying on search-page link markup (which can be JS/weird anchors).
+COUNTY_NAMES = [
+    "Anderson","Bedford","Benton","Bledsoe","Blount","Bradley","Campbell","Cannon","Carroll","Carter",
+    "Cheatham","Chester","Claiborne","Clay","Cocke","Coffee","Crockett","Cumberland","Davidson","Decatur",
+    "DeKalb","Dickson","Dyer","Fayette","Fentress","Franklin","Gibson","Giles","Grainger","Greene",
+    "Grundy","Hamblen","Hamilton","Hancock","Hardeman","Hardin","Hawkins","Haywood","Henderson","Henry",
+    "Hickman","Houston","Humphreys","Jackson","Jefferson","Johnson","Knox","Lake","Lauderdale","Lawrence",
+    "Lewis","Lincoln","Loudon","Macon","Madison","Marion","Marshall","Maury","McMinn","McNairy",
+    "Meigs","Monroe","Montgomery","Moore","Morgan","Obion","Overton","Perry","Pickett","Polk",
+    "Putnam","Rhea","Roane","Robertson","Rutherford","Scott","Sequatchie","Sevier","Shelby","Smith",
+    "Stewart","Sullivan","Sumner","Tipton","Trousdale","Unicoi","Union","Van Buren","Warren","Washington",
+    "Wayne","Weakley","White","Williamson","Wilson",
+]
+
+
+def _slugify_county(name: str) -> str:
+    s = name.strip().lower()
+    s = s.replace(".", "")
+    s = re.sub(r"\s+", "-", s)
+    return s
 
 
 def _parse_date_tnfn(s: str):
     if not s:
         return None
-    s = s.strip()
-    s = s.strip("()")
-    # examples:
-    # "Tue 24, Mar 2026"
-    # "Tue 03, Mar 2026"
+    s = s.strip().strip("()")
     for fmt in ("%a %d, %b %Y", "%a %d, %B %Y", "%m/%d/%Y"):
         try:
             return datetime.strptime(s, fmt).date().isoformat()
@@ -36,21 +52,7 @@ def _parse_date_tnfn(s: str):
     return None
 
 
-def _extract_county_links(html: str):
-    soup = BeautifulSoup(html, "html.parser")
-    links = set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if "/results/counties/" in href:
-            links.add(urljoin(BASE_URL, href))
-    return list(links)
-
-
 def _extract_field(text: str, start_label: str, end_label: str | None):
-    """
-    Extracts value after `start_label` up to `end_label` (or end of string if None).
-    Labels are literal substrings like "Address:".
-    """
     start_idx = text.find(start_label)
     if start_idx == -1:
         return None
@@ -64,8 +66,6 @@ def _extract_field(text: str, start_label: str, end_label: str | None):
 
 
 def _parse_notice_line(line: str):
-    # Expect lines like:
-    # "Sale Notice: TNFN#13606  County: Sullivan  Original Sale Date: Tue 24, Mar 2026  Address: ...  Firm: ...  PP Sale Date: (Tue 24, Mar 2026) Sale Location: ... Sale Time: ... Auction Vendor: ..."
     if "Sale Notice:" not in line or "TNFN#" not in line:
         return None
 
@@ -77,13 +77,13 @@ def _parse_notice_line(line: str):
     county = _extract_field(line, "County:", "Original Sale Date:")
     orig_sale_raw = _extract_field(line, "Original Sale Date:", "Address:")
     address = _extract_field(line, "Address:", "Firm:")
+
     firm = _extract_field(line, "Firm:", "PP Sale Date:")
     if firm is None:
         firm = _extract_field(line, "Firm:", "Current Sale Date:")
     if firm is None:
         firm = _extract_field(line, "Firm:", "Sale Location:")
 
-    # Prefer PP Sale Date (current) when present, else Current Sale Date, else Original Sale Date
     pp_sale_raw = _extract_field(line, "PP Sale Date:", "Sale Location:")
     curr_sale_raw = _extract_field(line, "Current Sale Date:", "Sale Location:")
 
@@ -93,8 +93,6 @@ def _parse_notice_line(line: str):
 
     sale_date_iso = None
     if pp_sale_raw:
-        # usually "(Tue 03, Mar 2026)"
-        # grab the first date-like token inside
         mm = re.search(r"([A-Za-z]{3}\s+\d{1,2},\s+[A-Za-z]{3,9}\s+\d{4})", pp_sale_raw)
         sale_date_iso = _parse_date_tnfn(mm.group(1)) if mm else _parse_date_tnfn(pp_sale_raw)
     if not sale_date_iso and curr_sale_raw:
@@ -109,12 +107,11 @@ def _parse_notice_line(line: str):
         "notice_id": notice_id,
         "county": county.strip(),
         "sale_date": sale_date_iso,
-        "original_sale_raw": orig_sale_raw,
-        "address": address,
-        "firm": firm,
-        "sale_location": sale_location,
-        "sale_time": sale_time,
-        "auction_vendor": auction_vendor,
+        "address": address.strip(),
+        "firm": firm.strip() if firm else None,
+        "sale_location": sale_location.strip() if sale_location else None,
+        "sale_time": sale_time.strip() if sale_time else None,
+        "auction_vendor": auction_vendor.strip() if auction_vendor else None,
         "raw_text": line.strip(),
     }
 
@@ -122,6 +119,9 @@ def _parse_notice_line(line: str):
 def _parse_county_page(county_url: str):
     html = fetch(county_url)
     if not html:
+        return []
+
+    if "No results found" in html:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
@@ -139,23 +139,22 @@ def _parse_county_page(county_url: str):
 def run():
     print("TNForeclosureNoticeBot starting...")
 
-    search_html = fetch(SEARCH_URL)
-    if not search_html:
-        print("TNForeclosureNoticeBot: failed to fetch search page.")
-        return
-
-    county_links = _extract_county_links(search_html)
-    county_links = county_links[:MAX_COUNTIES_CAP]
-
     total_written = 0
     created = 0
     updated = 0
     skipped_expired = 0
     parsed_ok = 0
-    parsed_bad = 0
+    counties_hit = 0
 
-    for county_url in county_links:
+    for county_name in COUNTY_NAMES:
+        slug = _slugify_county(county_name)
+        county_url = COUNTY_URL_FMT.format(slug=slug)
+
         leads = _parse_county_page(county_url)
+        if not leads:
+            continue
+
+        counties_hit += 1
 
         for lead in leads:
             parsed_ok += 1
@@ -204,17 +203,8 @@ def run():
 
             total_written += 1
 
-        # if a county page has “Sale Notice” but we parsed none, count as bad parse
-        # (helps debug yield without spamming logs)
-        if not leads:
-            # quick check if page likely had no results
-            # (site shows "No results found..." on empty counties)
-            html = fetch(county_url) or ""
-            if "No results found" not in html:
-                parsed_bad += 1
-
     print(
         "TNForeclosureNoticeBot complete: "
         f"total_written={total_written} created={created} updated={updated} "
-        f"skipped_expired={skipped_expired} parsed_ok={parsed_ok} parsed_bad_pages={parsed_bad}"
+        f"skipped_expired={skipped_expired} parsed_ok={parsed_ok} counties_hit={counties_hit}"
     )
