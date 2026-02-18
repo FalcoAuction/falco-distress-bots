@@ -9,7 +9,7 @@
 # ============================================================
 
 # Leave empty list [] to allow STATEWIDE
-# Add counties like ["Davidson", "Williamson"] to restrict
+# Add counties like ["Davidson County", "Williamson County"] to restrict
 TARGET_COUNTIES = []
 
 
@@ -18,21 +18,15 @@ TARGET_COUNTIES = []
 # ============================================================
 
 SEED_URLS_PUBLIC_NOTICES = [
-    # WordPress foreclosure listing
     "https://tnlegalpub.com/notice_type/foreclosure/",
-
-    # TN Press Association foreclosure repository
     "https://www.foreclosurestn.com/",
-
-    # Statewide legal notices search hub
     "https://www.tnpublicnotice.com/Search.aspx",
 ]
 
 # Max pages to attempt per listing source
 PUBLIC_NOTICES_MAX_LIST_PAGES = 10
 
-# Minimum days until sale to write to Notion
-# Set to 0 to capture everything future-dated
+# Minimum days until sale to write to Notion (0 = any future)
 PUBLIC_NOTICES_MIN_DAYS_OUT = 0
 
 # Debug mode (prints verbose logs)
@@ -49,6 +43,20 @@ SEED_URLS_FORECLOSURE_TN = [
 
 
 # ============================================================
+# COUNTY TAX / CLERK & MASTER SEEDS (TaxPagesBot expects this)
+# ============================================================
+
+# Leave empty if you’re not using tax pages yet.
+# If empty, TaxPagesBot should ideally just print "no seeds" and exit.
+SEED_URLS_COUNTY_TAX = []
+
+# Example seeds you can add later:
+# SEED_URLS_COUNTY_TAX = [
+#     "https://www.examplecounty.gov/tax-sale",
+# ]
+
+
+# ============================================================
 # KEYWORD SIGNALS
 # ============================================================
 
@@ -59,6 +67,7 @@ TRUSTEE_KEYWORDS = [
     "trustee's sale",
     "foreclosure",
     "notice of foreclosure",
+    "notice of sale",
 ]
 
 ESTATE_KEYWORDS = [
@@ -72,14 +81,15 @@ TAX_KEYWORDS = [
     "tax sale",
     "delinquent tax",
     "clerk and master",
+    "trustee tax sale",
+    "sheriff sale",
 ]
 
 
 # ============================================================
-# SCORING CONFIG
+# SCORING CONFIG (optional knobs)
 # ============================================================
 
-# Days-to-sale thresholds used by scoring.py
 URGENT_DAYS_THRESHOLD = 7
 HOT_DAYS_THRESHOLD = 14
 
@@ -88,6 +98,5 @@ HOT_DAYS_THRESHOLD = 14
 # SAFETY LIMITS
 # ============================================================
 
-# Hard caps so we never crawl uncontrolled volume
 MAX_NOTICE_LINKS_PER_SOURCE = 200
 MAX_NOTICE_TEXT_CHARS = 8000
