@@ -11,7 +11,7 @@ from ..utils import (
     extract_trustee_or_attorney,
 )
 from ..notion_client import build_properties, create_lead, find_existing_by_url, update_lead
-from ..scoring import days_to_sale, detect_risk_flags, hard_kill, score_v2, label
+from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
 
 
 def run():
@@ -41,11 +41,16 @@ def run():
         flags = detect_risk_flags(text)
         dts = days_to_sale(sale_date)
 
-        killed, kill_reason = hard_kill(dts, flags)
-        if killed:
+        override_status, reason = triage(dts, flags)
+
+        if override_status == "KILL":
             status = "KILL"
             score = 0
             title = f"Tax (KILL) ({county or 'TN'})"
+        elif override_status == "MONITOR":
+            score = score_v2(distress_type, county, dts, has_contact)
+            status = "MONITOR"
+            title = f"Tax (MONITOR) ({county or 'TN'})"
         else:
             score = score_v2(distress_type, county, dts, has_contact)
             status = label(distress_type, county, dts, flags, score, has_contact)
@@ -57,7 +62,6 @@ def run():
 
             title = f"Tax ({status}) ({county or 'TN'})"
 
-        # ✅ THESE MUST BE HERE (inside the loop, after title is set)
         address = extract_address(text)
         trustee_attorney = extract_trustee_or_attorney(text)
         raw_snippet = text[:2000]
@@ -70,14 +74,13 @@ def run():
             address=address,
             sale_date_iso=sale_date,
             trustee_attorney=trustee_attorney,
-            contact_info=contact if contact else (kill_reason if killed else ""),
+            contact_info=contact if contact else reason,
             raw_snippet=raw_snippet,
             url=url,
             score=score,
             status=status,
         )
 
-        # ✅ Dedupe (note: URL dedupe is basic; we'll improve later)
         existing_id = find_existing_by_url(url)
         if existing_id:
             update_lead(existing_id, props)
