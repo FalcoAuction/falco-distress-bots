@@ -34,7 +34,7 @@ def build_properties(
     contact_info: str,
     raw_snippet: str,
     url: str,
-    score: Optional[int],
+    score: Optional[int],              # ✅ now optional
     status: str,
     lead_key: str,
     days_to_sale_num: Optional[int] = None,
@@ -54,7 +54,8 @@ def build_properties(
         "URL": {"url": url},
         "Lead Key": {"rich_text": rich(lead_key, 80)},
         "Days to Sale": {"number": days_to_sale_num} if days_to_sale_num is not None else None,
-        # IMPORTANT: Falco Score is optional now
+
+        # ✅ only included if not None (so updates won't clobber)
         "Falco Score": {"number": score} if score is not None else None,
     }
 
