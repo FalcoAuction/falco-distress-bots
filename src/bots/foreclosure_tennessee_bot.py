@@ -44,7 +44,7 @@ def run():
     print(f"[ForeclosureTNBot] seed={BASE_URL}")
 
     page = 1
-    max_pages = 15
+    max_pages = 20
 
     total_written = 0
     green = 0
@@ -92,7 +92,7 @@ def run():
 
             county = normalize_county(county_raw)
 
-            # Geo filter
+            # Statewide mode if TARGET_COUNTIES is empty
             if TARGET_COUNTIES and county not in TARGET_COUNTIES:
                 skipped_out_of_geo += 1
                 continue
@@ -106,7 +106,7 @@ def run():
                 except Exception:
                     pass
 
-            # Override with continuance if present
+            # Continuance override
             if continuance_str:
                 try:
                     dt = datetime.strptime(continuance_str, "%m/%d/%Y")
