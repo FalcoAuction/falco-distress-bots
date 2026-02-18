@@ -1,9 +1,10 @@
 import os
 import requests
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 NOTION_TOKEN = os.environ["NOTION_TOKEN"]
 DB_ID = os.environ["NOTION_DATABASE_ID"]
+
 
 def headers():
     return {
@@ -12,11 +13,13 @@ def headers():
         "Notion-Version": "2022-06-28",
     }
 
+
 def rich(text: str, limit=2000):
     return [{
         "type": "text",
         "text": {"content": (text or "")[:limit]}
     }]
+
 
 def build_properties(
     title: str,
@@ -33,6 +36,23 @@ def build_properties(
     status: str,
     lead_key: str,
 ) -> Dict[str, Any]:
+    """
+    IMPORTANT: Notion property names MUST match your DB exactly.
+    Confirmed DB fields:
+      - Property Name (title)
+      - Source (select)
+      - County (select)
+      - Distress Type (select)
+      - Address (text)
+      - Sale Date (date)
+      - Trustee/Attorney (text)
+      - Contact Info (text)
+      - Status (select)
+      - Falco Score (number)
+      - Raw Snippet (text)
+      - URL (url)
+      - Lead Key (text)
+    """
 
     props = {
         "Property Name": {"title": rich(title, 200)},
@@ -44,16 +64,18 @@ def build_properties(
         "Trustee/Attorney": {"rich_text": rich(trustee_attorney, 200)},
         "Contact Info": {"rich_text": rich(contact_info, 200)},
         "Status": {"select": {"name": status}},
-        "Falco Score": {"number": score},
-        "Raw Snippet": {"rich_text": rich(raw_snippet)},
+        "Falco Score": {"number": int(score) if score is not None else 0},
+        "Raw Snippet": {"rich_text": rich(raw_snippet, 2000)},
         "URL": {"url": url},
-        "Lead Key": {"rich_text": rich(lead_key, 50)},
+        # CRITICAL FIX: do NOT truncate lead_key to 50. Use stable short hash anyway.
+        "Lead Key": {"rich_text": rich(lead_key, 200)},
     }
 
     # Remove None fields (Notion rejects them)
     return {k: v for k, v in props.items() if v is not None}
 
-def create_lead(properties: Dict[str, Any]):
+
+def create_lead(properties: Dict[str, Any]) -> str:
     payload = {
         "parent": {"database_id": DB_ID},
         "properties": properties
@@ -69,7 +91,10 @@ def create_lead(properties: Dict[str, Any]):
     if r.status_code >= 300:
         raise RuntimeError(f"Notion create failed: {r.status_code} {r.text}")
 
-def update_lead(page_id: str, properties: Dict[str, Any]):
+    return r.json().get("id")
+
+
+def update_lead(page_id: str, properties: Dict[str, Any]) -> None:
     r = requests.patch(
         f"https://api.notion.com/v1/pages/{page_id}",
         headers=headers(),
@@ -80,7 +105,12 @@ def update_lead(page_id: str, properties: Dict[str, Any]):
     if r.status_code >= 300:
         raise RuntimeError(f"Notion update failed: {r.status_code} {r.text}")
 
-def find_existing_by_lead_key(lead_key: str):
+
+def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
+    """
+    CRITICAL: Do not silently fail; if Notion query errors, raise.
+    Silent failure = duplicates forever.
+    """
     if not lead_key:
         return None
 
@@ -99,7 +129,7 @@ def find_existing_by_lead_key(lead_key: str):
     )
 
     if r.status_code >= 300:
-        return None
+        raise RuntimeError(f"Notion query failed: {r.status_code} {r.text}")
 
     results = r.json().get("results", [])
     return results[0]["id"] if results else None
