@@ -25,6 +25,7 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
         if "/legal_notice/" in href:
             links.append(urljoin(base_url, href))
 
+    # De-dupe preserve order
     seen = set()
     out: list[str] = []
     for u in links:
@@ -35,17 +36,31 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
     return out
 
 
-def _find_next_page(list_html: str, base_url: str) -> str | None:
+def _find_next_page(list_html: str, current_url: str) -> str | None:
+    """
+    tnlegalpub uses pagination links like:
+      /notice_type/foreclosure/page/2/
+
+    We ONLY accept a "Next" link whose href contains "/page/" and
+    is different from the current_url (prevents infinite loops).
+    """
     soup = BeautifulSoup(list_html, "html.parser")
 
-    rel_next = soup.select_one('a[rel="next"][href]')
-    if rel_next and rel_next.get("href"):
-        return urljoin(base_url, rel_next["href"])
+    # Most WordPress themes use: a.next.page-numbers
+    a = soup.select_one("a.next.page-numbers[href]")
+    if a and a.get("href"):
+        nxt = urljoin(current_url, a["href"])
+        if nxt != current_url:
+            return nxt
 
+    # Fallback: any anchor whose text includes "Next" AND href contains "/page/"
     for a in soup.select("a[href]"):
         txt = (a.get_text(" ", strip=True) or "").lower()
-        if "next" in txt:
-            return urljoin(base_url, a["href"])
+        href = a.get("href", "")
+        if "next" in txt and "/page/" in href:
+            nxt = urljoin(current_url, href)
+            if nxt != current_url:
+                return nxt
 
     return None
 
@@ -76,7 +91,7 @@ def run():
     skipped_kill = 0
 
     wrote_count = 0
-    debug_prints_left = 5
+    debug_pages_left = 8
 
     seen_notice_urls = set()
 
@@ -86,6 +101,10 @@ def run():
 
         while next_url and pages_remaining > 0:
             pages_remaining -= 1
+
+            if debug_pages_left > 0:
+                print(f"[PublicNoticesBot][DEBUG] fetching listing={next_url}")
+                debug_pages_left -= 1
 
             try:
                 list_html = fetch(next_url)
@@ -131,7 +150,7 @@ def run():
                 flags = detect_risk_flags(text)
                 dts = days_to_sale(sale_date)
 
-                # Skip expired outright
+                # Skip expired
                 if dts is not None and dts < 0:
                     skipped_expired += 1
                     continue
@@ -143,7 +162,7 @@ def run():
 
                 score = score_v2(distress_type, county, dts, has_contact)
 
-                # If within 30 days, write MONITOR (do not skip)
+                # Write MONITOR if within 30 days
                 if dts is not None and dts < 30:
                     skipped_lt30 += 1
                     status = "MONITOR"
@@ -188,9 +207,8 @@ def run():
 
                 wrote_count += 1
 
-                if debug_prints_left > 0:
-                    print(f"[PublicNoticesBot][DEBUG] wrote status={status} sale_date={sale_date} dts={dts} county={county} url={notice_url}")
-                    debug_prints_left -= 1
+            # advance pagination
+            next_url = _find_next_page(list_html, current_url=next_url)
 
     print(
         "[PublicNoticesBot] summary "
