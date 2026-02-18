@@ -64,4 +64,142 @@ def _extract_notice_text(notice_html: str) -> str:
 
 
 def run():
-    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTIC_
+    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES}")
+
+    if not SEED_URLS_PUBLIC_NOTICES:
+        print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set yet.")
+        return
+
+    # Run-level counters for GitHub Actions logs
+    list_pages_fetched = 0
+    notice_links_found = 0
+    notice_pages_fetched_ok = 0
+    parsed_ok = 0
+
+    created = 0
+    updated = 0
+
+    skipped_short = 0
+    skipped_no_sale = 0
+    skipped_expired = 0
+    skipped_lt30 = 0
+    skipped_kill = 0
+
+    seen_notice_urls = set()
+
+    for seed_url in SEED_URLS_PUBLIC_NOTICES:
+        next_url = seed_url
+        pages_remaining = PUBLIC_NOTICE_MAX_LIST_PAGES
+
+        while next_url and pages_remaining > 0:
+            pages_remaining -= 1
+
+            try:
+                list_html = fetch(next_url)
+                list_pages_fetched += 1
+            except Exception as e:
+                print(f"[PublicNoticesBot] listing fetch failed {next_url}: {e}")
+                break
+
+            notice_urls = _extract_notice_links(list_html, base_url=next_url)
+            notice_links_found += len(notice_urls)
+            print(f"[PublicNoticesBot] listing {next_url} -> notices={len(notice_urls)}")
+
+            for notice_url in notice_urls:
+                if notice_url in seen_notice_urls:
+                    continue
+                seen_notice_urls.add(notice_url)
+
+                try:
+                    notice_html = fetch(notice_url)
+                    notice_pages_fetched_ok += 1
+                except Exception as e:
+                    print(f"[PublicNoticesBot] notice fetch failed {notice_url}: {e}")
+                    continue
+
+                text = _extract_notice_text(notice_html)
+                if len(text) < 400:
+                    skipped_short += 1
+                    continue
+
+                distress_type = "Trustee Sale" if "trustee" in text.lower() else "Foreclosure"
+
+                sale_date = find_date_iso(text)
+                if not sale_date:
+                    skipped_no_sale += 1
+                    continue
+
+                county = guess_county(text)
+                contact = extract_contact(text)
+                has_contact = bool(contact)
+                address = extract_address(text)
+                trustee = extract_trustee_or_attorney(text)
+
+                flags = detect_risk_flags(text)
+                dts = days_to_sale(sale_date)
+
+                if dts is not None and dts < 0:
+                    skipped_expired += 1
+                    continue
+
+                if dts is not None and dts < 30:
+                    skipped_lt30 += 1
+                    continue
+
+                override_status, reason = triage(dts, flags)
+                if override_status == "KILL":
+                    skipped_kill += 1
+                    continue
+
+                score = score_v2(distress_type, county, dts, has_contact)
+                status = "MONITOR" if override_status == "MONITOR" else label(
+                    distress_type, county, dts, flags, score, has_contact
+                )
+
+                title = f"{distress_type} ({status}) ({county or 'TN'})"
+
+                lead_key = make_lead_key(
+                    "TNLEGALPUB",
+                    notice_url,
+                    distress_type,
+                    county or "TN",
+                    sale_date,
+                )
+
+                props = build_properties(
+                    title=title,
+                    source="TN Legal Pub",
+                    distress_type=distress_type,
+                    county=county,
+                    address=address,
+                    sale_date_iso=sale_date,
+                    trustee_attorney=trustee,
+                    contact_info=contact if contact else (reason or ""),
+                    raw_snippet=text[:2000],
+                    url=notice_url,
+                    score=score,
+                    status=status,
+                    lead_key=lead_key,
+                )
+
+                existing_id = find_existing_by_lead_key(lead_key)
+                if existing_id:
+                    update_lead(existing_id, props)
+                    updated += 1
+                else:
+                    create_lead(props)
+                    created += 1
+
+                parsed_ok += 1
+
+            next_url = _find_next_page(list_html, base_url=next_url)
+
+    print(
+        "[PublicNoticesBot] summary "
+        f"list_pages_fetched={list_pages_fetched} notice_links_found={notice_links_found} "
+        f"notice_pages_fetched_ok={notice_pages_fetched_ok} parsed_ok={parsed_ok} "
+        f"created={created} updated={updated} "
+        f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
+        f"skipped_expired={skipped_expired} skipped_lt30={skipped_lt30} skipped_kill={skipped_kill}"
+    )
+    print("[PublicNoticesBot] Done.")
