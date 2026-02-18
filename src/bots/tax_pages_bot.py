@@ -2,69 +2,49 @@ from bs4 import BeautifulSoup
 
 from ..config import SEED_URLS_COUNTY_TAX, TAX_KEYWORDS
 from ..utils import (
-    fetch,
-    contains_any,
-    find_date_iso,
-    guess_county,
-    extract_contact,
-    extract_address,
-    extract_trustee_or_attorney,
+    fetch, contains_any, find_date_iso, guess_county,
+    extract_contact, extract_address, extract_trustee_or_attorney,
+    make_lead_key
 )
-from ..notion_client import build_properties, create_lead, find_existing_by_url, update_lead
+from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
 from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
 
 
 def run():
     if not SEED_URLS_COUNTY_TAX:
-        print("[TaxPagesBot] No SEED_URLS_COUNTY_TAX set yet.")
         return
 
     for url in SEED_URLS_COUNTY_TAX:
-        try:
-            html = fetch(url)
-        except Exception as e:
-            print(f"[TaxPagesBot] fetch failed {url}: {e}")
-            continue
-
+        html = fetch(url)
         soup = BeautifulSoup(html, "html.parser")
         text = soup.get_text(" ", strip=True)
 
         if not contains_any(text, TAX_KEYWORDS):
-            print(f"[TaxPagesBot] {url} -> no tax keywords found (still logging).")
+            continue
 
         distress_type = "Tax"
         sale_date = find_date_iso(text)
         county = guess_county(text)
         contact = extract_contact(text)
-        has_contact = bool(contact)
+        address = extract_address(text)
+        trustee = extract_trustee_or_attorney(text)
 
         flags = detect_risk_flags(text)
         dts = days_to_sale(sale_date)
-
         override_status, reason = triage(dts, flags)
 
         if override_status == "KILL":
             status = "KILL"
             score = 0
-            title = f"Tax (KILL) ({county or 'TN'})"
         elif override_status == "MONITOR":
-            score = score_v2(distress_type, county, dts, has_contact)
+            score = score_v2(distress_type, county, dts, bool(contact))
             status = "MONITOR"
-            title = f"Tax (MONITOR) ({county or 'TN'})"
         else:
-            score = score_v2(distress_type, county, dts, has_contact)
-            status = label(distress_type, county, dts, flags, score, has_contact)
+            score = score_v2(distress_type, county, dts, bool(contact))
+            status = label(distress_type, county, dts, flags, score, bool(contact))
 
-            # pipeline pages usually MONITOR
-            if not sale_date:
-                status = "MONITOR"
-                score = min(score, 45)
-
-            title = f"Tax ({status}) ({county or 'TN'})"
-
-        address = extract_address(text)
-        trustee_attorney = extract_trustee_or_attorney(text)
-        raw_snippet = text[:2000]
+        title = f"{distress_type} ({status}) ({county or 'TN'})"
+        lead_key = make_lead_key(distress_type, county, sale_date, address, trustee, url)
 
         props = build_properties(
             title=title,
@@ -73,18 +53,17 @@ def run():
             county=county,
             address=address,
             sale_date_iso=sale_date,
-            trustee_attorney=trustee_attorney,
+            trustee_attorney=trustee,
             contact_info=contact if contact else reason,
-            raw_snippet=raw_snippet,
+            raw_snippet=text[:2000],
             url=url,
             score=score,
             status=status,
+            lead_key=lead_key,
         )
 
-        existing_id = find_existing_by_url(url)
+        existing_id = find_existing_by_lead_key(lead_key)
         if existing_id:
             update_lead(existing_id, props)
         else:
             create_lead(props)
-
-    print("[TaxPagesBot] Done.")
