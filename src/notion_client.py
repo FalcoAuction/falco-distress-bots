@@ -34,11 +34,10 @@ def build_properties(
     contact_info: str,
     raw_snippet: str,
     url: str,
-    score: int,
+    score: Optional[int],
     status: str,
     lead_key: str,
     days_to_sale_num: Optional[int] = None,
-    priority: Optional[str] = None,
 ) -> Dict[str, Any]:
 
     props = {
@@ -51,14 +50,12 @@ def build_properties(
         "Trustee/Attorney": {"rich_text": rich(trustee_attorney, 200)},
         "Contact Info": {"rich_text": rich(contact_info, 200)},
         "Status": {"select": {"name": status}},
-        "Falco Score": {"number": score},
         "Raw Snippet": {"rich_text": rich(raw_snippet)},
         "URL": {"url": url},
         "Lead Key": {"rich_text": rich(lead_key, 80)},
-
-        # ✅ New (optional)
         "Days to Sale": {"number": days_to_sale_num} if days_to_sale_num is not None else None,
-        "Priority": {"select": {"name": priority}} if priority else None,
+        # IMPORTANT: Falco Score is optional now
+        "Falco Score": {"number": score} if score is not None else None,
     }
 
     return {k: v for k, v in props.items() if v is not None}
