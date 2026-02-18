@@ -2,65 +2,21 @@ import os
 import requests
 from typing import Dict, Any
 
-NOTION_TOKEN = os.environ["NOTION_TOKEN"].strip()
-DB_ID = os.environ["NOTION_DATABASE_ID"].strip()
-NOTION_VERSION = "2022-06-28"
+NOTION_TOKEN = os.environ["NOTION_TOKEN"]
+DB_ID = os.environ["NOTION_DATABASE_ID"]
 
 def headers():
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
-        "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28",
     }
 
-def rich(text: str, limit: int = 1800):
-    text = (text or "").strip()
-    if len(text) > limit:
-        text = text[:limit] + "…"
-    return [{"type": "text", "text": {"content": text}}] if text else []
-
-def create_lead(props: Dict[str, Any]):
-    payload = {"parent": {"database_id": DB_ID}, "properties": props}
-    r = requests.post(
-        "https://api.notion.com/v1/pages",
-        headers=headers(),
-        json=payload,
-        timeout=30
-    )
-    if r.status_code >= 300:
-        raise RuntimeError(f"Notion create failed: {r.status_code} {r.text}")
-def find_existing_by_url(url: str):
-    if not url:
-        return None
-    payload = {
-        "filter": {
-            "property": "URL",
-            "url": {"equals": url}
-        }
-    }
-    r = requests.post(
-        f"https://api.notion.com/v1/databases/{DB_ID}/query",
-        headers=headers(),
-        json=payload,
-        timeout=30
-    )
-    if r.status_code >= 300:
-        print(f"[Notion] query failed: {r.status_code} {r.text}")
-        return None
-
-    data = r.json()
-    results = data.get("results", [])
-    return results[0]["id"] if results else None
-
-def update_lead(page_id: str, props: Dict[str, Any]):
-    r = requests.patch(
-        f"https://api.notion.com/v1/pages/{page_id}",
-        headers=headers(),
-        json={"properties": props},
-        timeout=30
-    )
-    if r.status_code >= 300:
-        print(f"[Notion] update failed: {r.status_code} {r.text}")
+def rich(text: str, limit=2000):
+    return [{
+        "type": "text",
+        "text": {"content": (text or "")[:limit]}
+    }]
 
 def build_properties(
     title: str,
@@ -75,32 +31,75 @@ def build_properties(
     url: str,
     score: int,
     status: str,
+    lead_key: str,
 ) -> Dict[str, Any]:
-    props: Dict[str, Any] = {
-        "Property Name": {"title": [{"type": "text", "text": {"content": title[:180]}}]},
+
+    props = {
+        "Property Name": {"title": rich(title, 200)},
         "Source": {"select": {"name": source}},
+        "County": {"select": {"name": county}} if county else None,
         "Distress Type": {"select": {"name": distress_type}},
-        "Falco Score": {"number": int(score)},
+        "Address": {"rich_text": rich(address, 200)},
+        "Sale Date": {"date": {"start": sale_date_iso}} if sale_date_iso else None,
+        "Trustee/Attorney": {"rich_text": rich(trustee_attorney, 200)},
+        "Contact Info": {"rich_text": rich(contact_info, 200)},
         "Status": {"select": {"name": status}},
-        "Raw Snippet": {"rich_text": rich(raw_snippet, limit=1800)},
+        "Falco Score": {"number": score},
+        "Raw Snippet": {"rich_text": rich(raw_snippet)},
+        "URL": {"url": url},
+        "Lead Key": {"rich_text": rich(lead_key, 50)},
     }
 
-    if county:
-        props["County"] = {"select": {"name": county}}
+    # Remove None fields (Notion rejects them)
+    return {k: v for k, v in props.items() if v is not None}
 
-    if address:
-        props["Address"] = {"rich_text": rich(address, limit=180)}
+def create_lead(properties: Dict[str, Any]):
+    payload = {
+        "parent": {"database_id": DB_ID},
+        "properties": properties
+    }
 
-    if sale_date_iso:
-        props["Sale Date"] = {"date": {"start": sale_date_iso}}
+    r = requests.post(
+        "https://api.notion.com/v1/pages",
+        headers=headers(),
+        json=payload,
+        timeout=30
+    )
 
-    if trustee_attorney:
-        props["Trustee/Attorney"] = {"rich_text": rich(trustee_attorney, limit=180)}
+    if r.status_code >= 300:
+        raise RuntimeError(f"Notion create failed: {r.status_code} {r.text}")
 
-    if contact_info:
-        props["Contact Info"] = {"rich_text": rich(contact_info, limit=500)}
+def update_lead(page_id: str, properties: Dict[str, Any]):
+    r = requests.patch(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        headers=headers(),
+        json={"properties": properties},
+        timeout=30
+    )
 
-    if url:
-        props["URL"] = {"url": url}
+    if r.status_code >= 300:
+        raise RuntimeError(f"Notion update failed: {r.status_code} {r.text}")
 
-    return props
+def find_existing_by_lead_key(lead_key: str):
+    if not lead_key:
+        return None
+
+    payload = {
+        "filter": {
+            "property": "Lead Key",
+            "rich_text": {"equals": lead_key}
+        }
+    }
+
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{DB_ID}/query",
+        headers=headers(),
+        json=payload,
+        timeout=30
+    )
+
+    if r.status_code >= 300:
+        return None
+
+    results = r.json().get("results", [])
+    return results[0]["id"] if results else None
