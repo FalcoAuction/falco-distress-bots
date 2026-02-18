@@ -1,16 +1,15 @@
 # src/config.py
 
 # Public notice sources we can scrape without logins/CAPTCHA:
-# tnlegalpub exposes notice listings + individual notice pages.
+# tnlegalpub exposes listing pages + individual notice pages.
 SEED_URLS_PUBLIC_NOTICES = [
     "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
 
-# Hard limit so we don't crawl forever while stabilizing.
-# This is "pages of listings", not individual notices.
+# Hard limit while stabilizing: how many listing pages to paginate through per seed.
 PUBLIC_NOTICE_MAX_LIST_PAGES = 5
 
-# Keywords used to identify foreclosure/trustee sale content
+# Keywords (kept for compatibility with other code, even if not used in the new notice-level crawler)
 TRUSTEE_KEYWORDS = [
     "TRUSTEE'S SALE",
     "TRUSTEE’S SALE",
@@ -24,7 +23,6 @@ TRUSTEE_KEYWORDS = [
     "NOTICE OF SALE",
 ]
 
-# Optional: estate keyword bucket (keep if you use it elsewhere)
 ESTATE_KEYWORDS = [
     "ESTATE OF",
     "PROBATE",
