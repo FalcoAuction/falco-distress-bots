@@ -210,6 +210,20 @@ def _parse_county_html(html: str):
     return leads
 
 
+def _coerce_score(score_out):
+    # score_v2 may return: number OR (score, flags) OR {"score": x, ...}
+    if isinstance(score_out, (int, float)):
+        return float(score_out)
+    if isinstance(score_out, dict):
+        if "score" in score_out and isinstance(score_out["score"], (int, float)):
+            return float(score_out["score"])
+    if isinstance(score_out, (list, tuple)):
+        for v in score_out:
+            if isinstance(v, (int, float)):
+                return float(v)
+    return None
+
+
 def run():
     print("TNForeclosureNoticeBot starting...")
 
@@ -255,8 +269,13 @@ def run():
                 continue
 
             has_contact = bool(lead.get("firm") or lead.get("auction_vendor"))
-            flags = []  # positional; scoring.py expects a flags list here
-            falco_score = score_v2(lead["county"], dts, flags, has_contact)
+            flags = []
+            score_out = score_v2(lead["county"], dts, flags, has_contact)
+            falco_score = _coerce_score(score_out)
+            if falco_score is None:
+                # If scoring shape is unexpected, skip cleanly (avoids crashing run_all)
+                continue
+
             status_label = label(falco_score)
 
             lead_key = make_lead_key(
