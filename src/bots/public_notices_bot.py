@@ -1,13 +1,27 @@
 # src/bots/public_notices_bot.py
 
-from urllib.parse import urljoin
+import re
+from urllib.parse import urljoin, urlparse
+
 from bs4 import BeautifulSoup
 
-from ..config import SEED_URLS_PUBLIC_NOTICES, PUBLIC_NOTICE_MAX_LIST_PAGES
+from ..config import (
+    SEED_URLS_PUBLIC_NOTICES,
+    TRUSTEE_KEYWORDS,
+    ESTATE_KEYWORDS,
+    PUBLIC_NOTICES_MAX_LIST_PAGES,
+    PUBLIC_NOTICES_DEBUG,
+    PUBLIC_NOTICES_MIN_DAYS_OUT,
+)
 from ..utils import (
-    fetch, find_date_iso, guess_county,
-    extract_contact, extract_address, extract_trustee_or_attorney,
-    make_lead_key
+    fetch,
+    contains_any,
+    find_date_iso,
+    guess_county,
+    extract_contact,
+    extract_address,
+    extract_trustee_or_attorney,
+    make_lead_key,
 )
 from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
 from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
@@ -17,17 +31,37 @@ def _clean(txt: str) -> str:
     return " ".join((txt or "").split())
 
 
-def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
-    soup = BeautifulSoup(list_html, "html.parser")
-    links: list[str] = []
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if "/legal_notice/" in href:
-            links.append(urljoin(base_url, href))
+def _domain(url: str) -> str:
+    try:
+        return urlparse(url).netloc.lower()
+    except Exception:
+        return ""
 
-    # De-dupe preserve order
+
+def _log(msg: str):
+    if PUBLIC_NOTICES_DEBUG:
+        print(f"[PublicNoticesBot][DEBUG] {msg}")
+
+
+# ----------------------------
+# LINK EXTRACTORS PER SOURCE
+# ----------------------------
+
+def _extract_links_tnlegalpub(listing_html: str, listing_url: str) -> list[str]:
+    """
+    tnlegalpub foreclosure listings are WP-like paged:
+    /notice_type/foreclosure/page/2/
+    Articles are usually in <h2><a href="...">.
+    """
+    soup = BeautifulSoup(listing_html, "html.parser")
+    links = []
+    for a in soup.select("h2 a[href]"):
+        href = a.get("href")
+        if href:
+            links.append(urljoin(listing_url, href))
+    # de-dupe
+    out = []
     seen = set()
-    out: list[str] = []
     for u in links:
         if u in seen:
             continue
@@ -36,53 +70,140 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
     return out
 
 
-def _find_next_page(list_html: str, current_url: str) -> str | None:
+def _listing_pages_tnlegalpub(seed: str) -> list[str]:
+    pages = [seed]
+    for i in range(2, PUBLIC_NOTICES_MAX_LIST_PAGES + 1):
+        pages.append(seed.rstrip("/") + f"/page/{i}/")
+    return pages
+
+
+def _extract_links_generic(seed_html: str, seed_url: str) -> list[str]:
     """
-    tnlegalpub uses pagination links like:
-      /notice_type/foreclosure/page/2/
-
-    We ONLY accept a "Next" link whose href contains "/page/" and
-    is different from the current_url (prevents infinite loops).
+    Generic link extractor: collects links that *look* like notice pages.
+    Used for foreclosurestn.com and tnpublicnotice.com (best-effort).
     """
-    soup = BeautifulSoup(list_html, "html.parser")
-
-    # Most WordPress themes use: a.next.page-numbers
-    a = soup.select_one("a.next.page-numbers[href]")
-    if a and a.get("href"):
-        nxt = urljoin(current_url, a["href"])
-        if nxt != current_url:
-            return nxt
-
-    # Fallback: any anchor whose text includes "Next" AND href contains "/page/"
+    soup = BeautifulSoup(seed_html, "html.parser")
+    links = []
     for a in soup.select("a[href]"):
-        txt = (a.get_text(" ", strip=True) or "").lower()
-        href = a.get("href", "")
-        if "next" in txt and "/page/" in href:
-            nxt = urljoin(current_url, href)
-            if nxt != current_url:
-                return nxt
+        href = a.get("href") or ""
+        href_l = href.lower()
 
-    return None
+        # Heuristics: keep only likely notice/detail pages
+        if any(k in href_l for k in ["notice", "foreclosure", "publicnotice", "view", "listing"]):
+            full = urljoin(seed_url, href)
+            links.append(full)
+
+    # de-dupe and keep same-domain preference
+    seed_dom = _domain(seed_url)
+    out = []
+    seen = set()
+    for u in links:
+        if u in seen:
+            continue
+        seen.add(u)
+        out.append(u)
+
+    # prioritize same-domain links first
+    out.sort(key=lambda u: 0 if _domain(u) == seed_dom else 1)
+    return out
 
 
-def _extract_notice_text(notice_html: str) -> str:
-    soup = BeautifulSoup(notice_html, "html.parser")
-    return _clean(soup.get_text(" ", strip=True))
+def _seed_pages_foreclosurestn(seed: str) -> list[str]:
+    """
+    Best-effort paging attempts. If these 404, we just process page 1.
+    (We will refine once we see logs.)
+    """
+    pages = [seed]
+    # try common paging params
+    for i in range(2, min(PUBLIC_NOTICES_MAX_LIST_PAGES, 10) + 1):
+        pages.append(seed.rstrip("/") + f"/?page={i}")
+        pages.append(seed.rstrip("/") + f"/?paged={i}")
+        pages.append(seed.rstrip("/") + f"/page/{i}/")
+    # de-dupe
+    deduped = []
+    seen = set()
+    for p in pages:
+        if p in seen:
+            continue
+        seen.add(p)
+        deduped.append(p)
+    return deduped
+
+
+def _seed_pages_tnpublicnotice(seed: str) -> list[str]:
+    """
+    tnpublicnotice uses Search.aspx. We start with Search.aspx and (optionally)
+    try popular searches by adding querystring filters.
+
+    We do NOT bypass CAPTCHAs or logins.
+    """
+    base = "https://www.tnpublicnotice.com/Search.aspx"
+    pages = [
+        base,
+        # Best-effort: common filters via query string (safe if ignored)
+        base + "?q=foreclosure",
+        base + "?q=trustee",
+        base + "?q=substitute%20trustee%20sale",
+    ]
+    # de-dupe
+    out, seen = [], set()
+    for p in pages:
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    return out
+
+
+# ----------------------------
+# NOTICE PARSING + WRITE
+# ----------------------------
+
+def _parse_notice_page(notice_url: str, html: str) -> dict | None:
+    soup = BeautifulSoup(html, "html.parser")
+    text = _clean(soup.get_text(" ", strip=True))
+    if len(text) < 200:
+        return None
+
+    # must have at least some signal keywords
+    if not (contains_any(text, TRUSTEE_KEYWORDS) or contains_any(text, ESTATE_KEYWORDS)):
+        return None
+
+    sale_date = find_date_iso(text)
+    county = guess_county(text)
+    address = extract_address(text)
+    trustee = extract_trustee_or_attorney(text)
+    contact = extract_contact(text)
+
+    is_trustee = contains_any(text, TRUSTEE_KEYWORDS)
+    is_estate = contains_any(text, ESTATE_KEYWORDS)
+    distress_type = "Trustee Sale" if is_trustee else ("Estate" if is_estate else "Other")
+
+    return {
+        "notice_url": notice_url,
+        "text": text,
+        "snippet": text[:2000],
+        "sale_date": sale_date,
+        "county": county,
+        "address": address,
+        "trustee": trustee,
+        "contact": contact,
+        "distress_type": distress_type,
+    }
 
 
 def run():
-    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES}")
-
     if not SEED_URLS_PUBLIC_NOTICES:
-        print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set yet.")
+        print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set.")
         return
+
+    created = updated = 0
+    wrote_count = 0
 
     list_pages_fetched = 0
     notice_links_found = 0
     notice_pages_fetched_ok = 0
-
-    created = 0
-    updated = 0
+    parsed_ok = 0
 
     skipped_short = 0
     skipped_no_sale = 0
@@ -90,131 +211,138 @@ def run():
     skipped_lt30 = 0
     skipped_kill = 0
 
-    wrote_count = 0
-    debug_pages_left = 8
+    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES}")
 
-    seen_notice_urls = set()
+    for seed in SEED_URLS_PUBLIC_NOTICES:
+        dom = _domain(seed)
 
-    for seed_url in SEED_URLS_PUBLIC_NOTICES:
-        next_url = seed_url
-        pages_remaining = PUBLIC_NOTICE_MAX_LIST_PAGES
+        # build list pages per source
+        if "tnlegalpub.com" in dom:
+            list_pages = _listing_pages_tnlegalpub(seed)
+        elif "foreclosurestn.com" in dom:
+            list_pages = _seed_pages_foreclosurestn(seed)
+        elif "tnpublicnotice.com" in dom:
+            list_pages = _seed_pages_tnpublicnotice(seed)
+        else:
+            list_pages = [seed]
 
-        while next_url and pages_remaining > 0:
-            pages_remaining -= 1
+        # gather notice links from list pages
+        notice_links: list[str] = []
+        seen_links = set()
 
-            if debug_pages_left > 0:
-                print(f"[PublicNoticesBot][DEBUG] fetching listing={next_url}")
-                debug_pages_left -= 1
-
+        for lp in list_pages:
             try:
-                list_html = fetch(next_url)
+                _log(f"fetching listing={lp}")
+                html = fetch(lp)
                 list_pages_fetched += 1
             except Exception as e:
-                print(f"[PublicNoticesBot] listing fetch failed {next_url}: {e}")
+                _log(f"listing fetch failed {lp}: {e}")
+                continue
+
+            if "tnlegalpub.com" in dom:
+                links = _extract_links_tnlegalpub(html, lp)
+            else:
+                links = _extract_links_generic(html, lp)
+
+            if links:
+                _log(f"listing {lp} -> links={len(links)}")
+
+            for u in links:
+                if u in seen_links:
+                    continue
+                seen_links.add(u)
+                notice_links.append(u)
+
+            # keep the crawl bounded
+            if len(notice_links) >= 200:
                 break
 
-            notice_urls = _extract_notice_links(list_html, base_url=next_url)
-            notice_links_found += len(notice_urls)
-            print(f"[PublicNoticesBot] listing {next_url} -> notices={len(notice_urls)}")
+        notice_links_found += len(notice_links)
 
-            for notice_url in notice_urls:
-                if notice_url in seen_notice_urls:
-                    continue
-                seen_notice_urls.add(notice_url)
+        # fetch + parse each notice
+        for notice_url in notice_links:
+            try:
+                html = fetch(notice_url)
+                notice_pages_fetched_ok += 1
+            except Exception as e:
+                _log(f"notice fetch failed {notice_url}: {e}")
+                continue
 
-                try:
-                    notice_html = fetch(notice_url)
-                    notice_pages_fetched_ok += 1
-                except Exception as e:
-                    print(f"[PublicNoticesBot] notice fetch failed {notice_url}: {e}")
-                    continue
+            parsed = _parse_notice_page(notice_url, html)
+            if not parsed:
+                skipped_short += 1
+                continue
+            parsed_ok += 1
 
-                text = _extract_notice_text(notice_html)
-                if len(text) < 400:
-                    skipped_short += 1
-                    continue
+            sale_date = parsed["sale_date"]
+            if not sale_date:
+                skipped_no_sale += 1
+                continue
 
-                distress_type = "Trustee Sale" if "trustee" in text.lower() else "Foreclosure"
+            dts = days_to_sale(sale_date)
+            if dts is not None and dts < 0:
+                skipped_expired += 1
+                continue
 
-                sale_date = find_date_iso(text)
-                if not sale_date:
-                    skipped_no_sale += 1
-                    continue
+            # optional min-days-out gate
+            if dts is not None and dts < int(PUBLIC_NOTICES_MIN_DAYS_OUT):
+                skipped_lt30 += 1
+                continue
 
-                county = guess_county(text)
-                contact = extract_contact(text)
-                has_contact = bool(contact)
-                address = extract_address(text)
-                trustee = extract_trustee_or_attorney(text)
+            flags = detect_risk_flags(parsed["text"])
+            override_status, reason = triage(dts, flags)
 
-                flags = detect_risk_flags(text)
-                dts = days_to_sale(sale_date)
+            if override_status == "KILL":
+                skipped_kill += 1
+                continue
 
-                # Skip expired
-                if dts is not None and dts < 0:
-                    skipped_expired += 1
-                    continue
+            has_contact = bool(parsed["contact"])
+            score = score_v2(parsed["distress_type"], parsed["county"], dts, has_contact)
+            status = label(parsed["distress_type"], parsed["county"], dts, flags, score, has_contact)
 
-                override_status, reason = triage(dts, flags)
-                if override_status == "KILL":
-                    skipped_kill += 1
-                    continue
+            title = f"{parsed['distress_type']} ({status}) ({parsed['county'] or 'TN'})"
 
-                score = score_v2(distress_type, county, dts, has_contact)
+            lead_key = make_lead_key(
+                parsed["distress_type"],
+                parsed["county"],
+                sale_date,
+                parsed["address"],
+                parsed["trustee"],
+                parsed["notice_url"],
+            )
 
-                # Write MONITOR if within 30 days
-                if dts is not None and dts < 30:
-                    skipped_lt30 += 1
-                    status = "MONITOR"
-                else:
-                    status = "MONITOR" if override_status == "MONITOR" else label(
-                        distress_type, county, dts, flags, score, has_contact
-                    )
+            props = build_properties(
+                title=title,
+                source="Public Notice",
+                distress_type=parsed["distress_type"],
+                county=parsed["county"],
+                address=parsed["address"],
+                sale_date_iso=sale_date,
+                trustee_attorney=parsed["trustee"],
+                contact_info=(parsed["contact"] or reason),
+                raw_snippet=parsed["snippet"],
+                url=parsed["notice_url"],     # IMPORTANT: notice-level URL
+                score=score,
+                status=status,
+                lead_key=lead_key,
+                days_to_sale_num=dts,
+            )
 
-                title = f"{distress_type} ({status}) ({county or 'TN'})"
+            existing_id = find_existing_by_lead_key(lead_key)
+            if existing_id:
+                update_lead(existing_id, props)
+                updated += 1
+            else:
+                create_lead(props)
+                created += 1
 
-                lead_key = make_lead_key(
-                    "TNLEGALPUB",
-                    notice_url,
-                    distress_type,
-                    county or "TN",
-                    sale_date,
-                )
-
-                props = build_properties(
-                    title=title,
-                    source="TN Legal Pub",
-                    distress_type=distress_type,
-                    county=county,
-                    address=address,
-                    sale_date_iso=sale_date,
-                    trustee_attorney=trustee,
-                    contact_info=contact if contact else (reason or ""),
-                    raw_snippet=text[:2000],
-                    url=notice_url,
-                    score=score,
-                    status=status,
-                    lead_key=lead_key,
-                )
-
-                existing_id = find_existing_by_lead_key(lead_key)
-                if existing_id:
-                    update_lead(existing_id, props)
-                    updated += 1
-                else:
-                    create_lead(props)
-                    created += 1
-
-                wrote_count += 1
-
-            # advance pagination
-            next_url = _find_next_page(list_html, current_url=next_url)
+            wrote_count += 1
 
     print(
         "[PublicNoticesBot] summary "
         f"list_pages_fetched={list_pages_fetched} notice_links_found={notice_links_found} "
-        f"notice_pages_fetched_ok={notice_pages_fetched_ok} wrote_count={wrote_count} "
-        f"created={created} updated={updated} "
+        f"notice_pages_fetched_ok={notice_pages_fetched_ok} parsed_ok={parsed_ok} "
+        f"wrote_count={wrote_count} created={created} updated={updated} "
         f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
         f"skipped_expired={skipped_expired} skipped_lt30={skipped_lt30} skipped_kill={skipped_kill}"
     )
