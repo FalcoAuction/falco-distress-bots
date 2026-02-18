@@ -69,7 +69,6 @@ def _parse_date_tnfn(s: str):
             return datetime.strptime(s, fmt).date().isoformat()
         except Exception:
             continue
-    # try to rescue "Tue 24, Mar 2026" from surrounding text
     m = re.search(r"([A-Za-z]{3}\s+\d{1,2},\s+[A-Za-z]{3,9}\s+\d{4})", s)
     if m:
         return _parse_date_tnfn(m.group(1))
@@ -77,9 +76,6 @@ def _parse_date_tnfn(s: str):
 
 
 def _extract_field(text: str, start_label: str, end_labels: list[str] | None = None):
-    """
-    Extract value after start_label until the nearest next end label (or end of string).
-    """
     idx = text.find(start_label)
     if idx == -1:
         return None
@@ -102,7 +98,6 @@ def _extract_field(text: str, start_label: str, end_labels: list[str] | None = N
 
 
 def _pick_sale_date_iso(text: str):
-    # Prefer PP Sale Date (postponed/current), else Current Sale Date, else Original Sale Date
     pp = _extract_field(
         text,
         "PP Sale Date:",
@@ -127,7 +122,6 @@ def _pick_sale_date_iso(text: str):
 
 
 def _parse_notice_container_text(container_text: str):
-    # Must contain a TNFN id; labels may be spread out but text will include them.
     m = re.search(r"(TNFN#\d+)", container_text)
     if not m:
         return None
@@ -181,21 +175,18 @@ def _parse_notice_container_text(container_text: str):
 def _parse_county_html(html: str):
     if not html:
         return []
-
     if "No results found" in html:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
 
-    # Find any element text node containing TNFN# (id can be nested in many structures).
     hits = soup.find_all(string=re.compile(r"TNFN#\d+"))
     leads = []
     seen_ids = set()
 
     for node in hits:
-        # Walk up to a reasonable container (div/li/section/article/tr)
         container = node.parent
-        for _ in range(6):
+        for _ in range(8):
             if container is None:
                 break
             if container.name in ("div", "li", "section", "article", "tr", "tbody", "table"):
@@ -239,10 +230,10 @@ def run():
         slug = _slugify_county(county_name)
         county_url = COUNTY_URL_FMT.format(slug=slug)
 
-        status, html = _get(county_url, session=session)
-        if status == 200:
+        http_status, html = _get(county_url, session=session)
+        if http_status == 200:
             http_ok_pages += 1
-        elif status == 403:
+        elif http_status == 403:
             http_403 += 1
             continue
         else:
@@ -263,7 +254,7 @@ def run():
                 skipped_expired += 1
                 continue
 
-            falco_score = score_v2(dts, flags=[])
+            falco_score = score_v2(dts)
             status_label = label(falco_score)
 
             lead_key = make_lead_key(
