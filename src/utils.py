@@ -90,3 +90,18 @@ def make_lead_key(distress_type: str, county: str, sale_date_iso: str, address: 
         (url or "").strip().lower(),
     ])
     return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
+import hashlib
+import re
+
+
+def _norm_key_part(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def make_lead_key(*parts: str) -> str:
+    """
+    Returns a stable fixed-length Lead Key (SHA1 hex = 40 chars).
+    This prevents truncation mismatch and makes dedupe deterministic.
+    """
+    base = "|".join(_norm_key_part(p) for p in parts if p)
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()
