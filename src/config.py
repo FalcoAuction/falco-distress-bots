@@ -43,3 +43,17 @@ TAX_KEYWORDS = [
     "back taxes",
     "foreclosure",
 ]
+
+# Counties we care about for immediate outreach (edit anytime)
+TARGET_COUNTIES = [
+    "DAVIDSON",
+    "WILLIAMSON",
+    "RUTHERFORD",
+    "SUMNER",
+    "WILSON",
+    "DICKSON",
+    "MAURY",
+    "ROBERTSON",
+    "CHEATHAM",
+    "MONTGOMERY",
+]
