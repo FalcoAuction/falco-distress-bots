@@ -6,7 +6,7 @@
 SEED_URLS_PUBLIC_NOTICES = [
     "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
-PUBLIC_NOTICE_MAX_LIST_PAGES = 25  # go deeper so we actually hit future sale dates
+PUBLIC_NOTICE_MAX_LIST_PAGES = 25  # deeper crawl
 
 TRUSTEE_KEYWORDS = [
     "TRUSTEE'S SALE",
@@ -29,7 +29,7 @@ ESTATE_KEYWORDS = [
 # ForeclosureTennessee.com (active upstream feed)
 # -----------------------------
 FORECLOSURE_TN_SEED_URL = "https://foreclosuretennessee.com/"
-FORECLOSURE_TN_MAX_PAGES = 4  # site shows 4 pages / ~70 items
+FORECLOSURE_TN_MAX_PAGES = 4
 
 # -----------------------------
 # County Tax Pages (TaxPagesBot) - keep stable, empty for now
@@ -44,7 +44,10 @@ TAX_KEYWORDS = [
     "foreclosure",
 ]
 
-# Counties we care about for immediate outreach (edit anytime)
+# -----------------------------
+# Geo targeting (Nashville radius)
+# IMPORTANT: store UPPERCASE so comparisons are simple
+# -----------------------------
 TARGET_COUNTIES = [
     "DAVIDSON",
     "WILLIAMSON",
