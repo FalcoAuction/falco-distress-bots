@@ -1,12 +1,11 @@
 # src/bots/public_notices_bot.py
 
-import re
 from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from ..config import SEED_URLS_PUBLIC_NOTICES, PUBLIC_NOTICE_MAX_LIST_PAGES
 from ..utils import (
-    fetch, contains_any, find_date_iso, guess_county,
+    fetch, find_date_iso, guess_county,
     extract_contact, extract_address, extract_trustee_or_attorney,
     make_lead_key
 )
@@ -28,6 +27,7 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
         href = a.get("href", "")
         if "/legal_notice/" in href:
             links.append(urljoin(base_url, href))
+
     # de-dupe while preserving order
     seen = set()
     out = []
@@ -41,15 +41,14 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
 
 def _find_next_page(list_html: str, base_url: str) -> str | None:
     """
-    tnlegalpub uses a "Next →" link on listing pages.
+    Try rel=next, otherwise any link containing 'next'
     """
     soup = BeautifulSoup(list_html, "html.parser")
-    # Try rel=next first
+
     rel_next = soup.select_one('a[rel="next"][href]')
     if rel_next and rel_next.get("href"):
         return urljoin(base_url, rel_next["href"])
 
-    # Fallback: anchor text contains "Next"
     for a in soup.select("a[href]"):
         txt = (a.get_text(" ", strip=True) or "").lower()
         if "next" in txt:
@@ -59,21 +58,18 @@ def _find_next_page(list_html: str, base_url: str) -> str | None:
 
 
 def _extract_notice_text(notice_html: str) -> str:
-    """
-    Extract main notice text from tnlegalpub notice page.
-    We'll grab all visible text and rely on downstream parsing.
-    """
     soup = BeautifulSoup(notice_html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-    return _clean(text)
+    return _clean(soup.get_text(" ", strip=True))
 
 
 def run():
+    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES}")
+
     if not SEED_URLS_PUBLIC_NOTICES:
         print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set yet.")
         return
 
-    # Run-level counters for GitHub Actions logs
+    # Run-level counters (this will show in GitHub Actions logs)
     list_pages_fetched = 0
     notice_links_found = 0
     notice_pages_fetched_ok = 0
@@ -88,7 +84,6 @@ def run():
     skipped_lt30 = 0
     skipped_kill = 0
 
-    # Dedup within a run (prevents duplicate writes if a notice is seen twice via pagination)
     seen_notice_urls = set()
 
     for seed_url in SEED_URLS_PUBLIC_NOTICES:
@@ -97,6 +92,7 @@ def run():
 
         while next_url and pages_remaining > 0:
             pages_remaining -= 1
+
             try:
                 list_html = fetch(next_url)
                 list_pages_fetched += 1
@@ -125,9 +121,7 @@ def run():
                     skipped_short += 1
                     continue
 
-                # Distress classification
-                is_trustee = "trustee" in text.lower()
-                distress_type = "Trustee Sale" if is_trustee else "Foreclosure"
+                distress_type = "Trustee Sale" if "trustee" in text.lower() else "Foreclosure"
 
                 sale_date = find_date_iso(text)
                 if not sale_date:
@@ -163,10 +157,9 @@ def run():
 
                 title = f"{distress_type} ({status}) ({county or 'TN'})"
 
-                # ✅ Lead Key now stable + notice-level
                 lead_key = make_lead_key(
                     "TNLEGALPUB",
-                    notice_url,            # primary stable identifier
+                    notice_url,
                     distress_type,
                     county or "TN",
                     sale_date,
@@ -174,19 +167,3 @@ def run():
 
                 props = build_properties(
                     title=title,
-                    source="TN Legal Pub",
-                    distress_type=distress_type,
-                    county=county,
-                    address=address,
-                    sale_date_iso=sale_date,
-                    trustee_attorney=trustee,
-                    contact_info=contact if contact else (reason or ""),
-                    raw_snippet=text[:2000],
-                    url=notice_url,        # ✅ store the actual notice URL
-                    score=score,
-                    status=status,
-                    lead_key=lead_key,
-                )
-
-                existing_id = find_existing_by_lead_key(lead_key)
-                if existing_id:
