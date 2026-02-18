@@ -49,14 +49,4 @@ TAX_KEYWORDS = [
 # IMPORTANT: store UPPERCASE so comparisons are simple
 # -----------------------------
 TARGET_COUNTIES = [
-    "DAVIDSON",
-    "WILLIAMSON",
-    "RUTHERFORD",
-    "SUMNER",
-    "WILSON",
-    "DICKSON",
-    "MAURY",
-    "ROBERTSON",
-    "CHEATHAM",
-    "MONTGOMERY",
 ]
