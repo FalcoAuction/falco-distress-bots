@@ -25,7 +25,6 @@ def _parse_date_flex(s: str):
     s = s.strip()
     if not s or s.lower() in {"tbd", "unknown", "n/a", "-"}:
         return None
-
     fmts = ["%m/%d/%Y", "%m/%d/%y", "%B %d, %Y", "%b %d, %Y"]
     for fmt in fmts:
         try:
@@ -59,23 +58,13 @@ def _status_from_dts(dts: int | None):
 
 
 def _falco_score_from_status(dts: int | None, status: str | None) -> int:
-    """
-    Simple, stable score for this source:
-    - URGENT: 90–100
-    - HOT:    75–89
-    - GREEN:  55–74 (closer = higher)
-    """
     if dts is None or not status:
         return 0
-
     if status == "URGENT":
-        # dts 0..6 => 100..90
         return max(90, min(100, 100 - (dts * 2)))
     if status == "HOT":
-        # dts 7..13 => 89..77
         return max(75, min(89, 89 - ((dts - 7) * 2)))
     if status == "GREEN":
-        # dts 14..60+ => 74 downwards, cap at 55
         return max(55, min(74, 74 - int((max(14, dts) - 14) / 2)))
     return 0
 
@@ -91,22 +80,105 @@ def _extract_total_pages(soup: BeautifulSoup) -> int:
     return 1
 
 
-def _page_url(page: int) -> str:
-    return BASE_URL if page == 1 else f"{BASE_URL}page/{page}/"
+def _extract_rows(soup: BeautifulSoup):
+    return soup.select("table tbody tr")
+
+
+def _has_real_rows(soup: BeautifulSoup) -> bool:
+    rows = _extract_rows(soup)
+    if not rows:
+        return False
+    # ignore pagination junk row if present
+    for r in rows:
+        cols = [c.get_text(strip=True) for c in r.find_all("td")]
+        if len(cols) >= 8:
+            return True
+    return False
+
+
+def _get_page_html(url: str) -> str | None:
+    try:
+        return fetch(url)
+    except Exception:
+        return None
+
+
+def _candidate_page_urls(page_num: int, page_size: int = 20):
+    """
+    Common non-WP paging patterns. We'll probe these and pick the first that works.
+    page_num is 1-indexed.
+    """
+    # DataTables style (start/length)
+    start = (page_num - 1) * page_size
+    return [
+        # Query param paging
+        f"{BASE_URL}?page={page_num}",
+        f"{BASE_URL}?paged={page_num}",
+        f"{BASE_URL}?pg={page_num}",
+        # Offset paging
+        f"{BASE_URL}?start={start}&length={page_size}",
+        f"{BASE_URL}?offset={start}&limit={page_size}",
+        # Another common pattern
+        f"{BASE_URL}?p={page_num}",
+    ]
+
+
+def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int):
+    """
+    Try to find a working paging scheme by probing page 2.
+    Returns a function(page_num)->url, or None if no paging supported.
+    """
+    if total_pages <= 1:
+        return lambda n: BASE_URL
+
+    # Probe for the page size from the "Page size" select if present, else assume 20
+    page_size = 20
+    # not strictly needed; keep simple
+
+    probe_urls = _candidate_page_urls(2, page_size=page_size)
+
+    for u in probe_urls:
+        html = _get_page_html(u)
+        if not html:
+            continue
+        soup = BeautifulSoup(html, "html.parser")
+        if _has_real_rows(soup):
+            print(f"[ForeclosureTNBot] pagination_detected url_pattern_example={u}")
+            # Determine which pattern matched and build closure
+            if "?page=" in u:
+                return lambda n: f"{BASE_URL}?page={n}"
+            if "?paged=" in u:
+                return lambda n: f"{BASE_URL}?paged={n}"
+            if "?pg=" in u:
+                return lambda n: f"{BASE_URL}?pg={n}"
+            if "?start=" in u and "&length=" in u:
+                return lambda n: f"{BASE_URL}?start={(n-1)*page_size}&length={page_size}"
+            if "?offset=" in u and "&limit=" in u:
+                return lambda n: f"{BASE_URL}?offset={(n-1)*page_size}&limit={page_size}"
+            if "?p=" in u:
+                return lambda n: f"{BASE_URL}?p={n}"
+
+    # If nothing worked, site may only show first page without server-side paging
+    return None
 
 
 def run():
     print(f"[ForeclosureTNBot] seed={BASE_URL}")
 
-    try:
-        html1 = fetch(_page_url(1))
-    except Exception as e:
-        print("[ForeclosureTNBot] fetch failed:", e)
+    html1 = _get_page_html(BASE_URL)
+    if not html1:
+        print("[ForeclosureTNBot] fetch failed on base url")
         return
 
     soup1 = BeautifulSoup(html1, "html.parser")
     total_pages = min(_extract_total_pages(soup1), MAX_PAGES_CAP)
     print(f"[ForeclosureTNBot] detected_pages={total_pages}")
+
+    url_builder = _detect_paging_url_builder(soup1, total_pages)
+    if url_builder is None:
+        print("[ForeclosureTNBot] pagination_not_supported_server_side -> processing only page 1")
+        url_builder = lambda n: BASE_URL
+        total_pages = 1
 
     total_written = 0
     green = 0
@@ -125,17 +197,16 @@ def run():
     skipped_no_link = 0
 
     for page in range(1, total_pages + 1):
-        url = _page_url(page)
+        url = url_builder(page)
 
-        try:
-            html = html1 if page == 1 else fetch(url)
-        except Exception as e:
-            print(f"[ForeclosureTNBot] fetch failed page={page} url={url}: {e}")
+        html = html1 if page == 1 and url == BASE_URL else _get_page_html(url)
+        if not html:
+            print(f"[ForeclosureTNBot] fetch failed page={page} url={url}")
             break
 
         soup = BeautifulSoup(html, "html.parser")
-        rows = soup.select("table tbody tr")
-        print(f"[ForeclosureTNBot] page={page} rows={len(rows)}")
+        rows = _extract_rows(soup)
+        print(f"[ForeclosureTNBot] page={page} rows={len(rows)} url={url}")
 
         for row in rows:
             cols = [c.get_text(strip=True) for c in row.find_all("td")]
@@ -207,9 +278,7 @@ def run():
 
             existing_id = find_existing_by_lead_key(lead_key)
 
-            # ✅ Score ONLY on create; NEVER overwrite on update
             score_for_create = _falco_score_from_status(dts, status)
-            score_for_update = None
 
             props = build_properties(
                 title=title,
@@ -222,7 +291,7 @@ def run():
                 contact_info=firm_trustee,
                 raw_snippet=f"orig_sale={sale_date_str} cont={cont_date_str} page={page}",
                 url=listing_url,
-                score=(score_for_update if existing_id else score_for_create),
+                score=(None if existing_id else score_for_create),  # ✅ create-only score
                 status=status,
                 lead_key=lead_key,
                 days_to_sale_num=dts,
