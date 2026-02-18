@@ -35,8 +35,11 @@ def build_properties(
     source: str,
     distress_type: str,
     county: str,
+    address: str,
     sale_date_iso: str,
+    trustee_attorney: str,
     contact_info: str,
+    raw_snippet: str,
     url: str,
     score: int,
     status: str,
@@ -47,16 +50,23 @@ def build_properties(
         "Distress Type": {"select": {"name": distress_type}},
         "Falco Score": {"number": int(score)},
         "Status": {"select": {"name": status}},
+        "Raw Snippet": {"rich_text": rich(raw_snippet, limit=1800)},
     }
 
     if county:
         props["County"] = {"select": {"name": county}}
 
+    if address:
+        props["Address"] = {"rich_text": rich(address, limit=180)}
+
     if sale_date_iso:
         props["Sale Date"] = {"date": {"start": sale_date_iso}}
 
+    if trustee_attorney:
+        props["Trustee/Attorney"] = {"rich_text": rich(trustee_attorney, limit=180)}
+
     if contact_info:
-        props["Contact Info"] = {"rich_text": rich(contact_info)}
+        props["Contact Info"] = {"rich_text": rich(contact_info, limit=500)}
 
     if url:
         props["URL"] = {"url": url}
