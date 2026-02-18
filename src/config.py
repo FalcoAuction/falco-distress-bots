@@ -1,15 +1,14 @@
 # src/config.py
 
-# Public notice sources we can scrape without logins/CAPTCHA:
-# tnlegalpub exposes listing pages + individual notice pages.
+# -----------------------------
+# Public Notices (tnlegalpub)
+# -----------------------------
 SEED_URLS_PUBLIC_NOTICES = [
     "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
 
-# Hard limit while stabilizing: how many listing pages to paginate through per seed.
 PUBLIC_NOTICE_MAX_LIST_PAGES = 5
 
-# Keywords (kept for compatibility with other code, even if not used in the new notice-level crawler)
 TRUSTEE_KEYWORDS = [
     "TRUSTEE'S SALE",
     "TRUSTEE’S SALE",
@@ -29,4 +28,21 @@ ESTATE_KEYWORDS = [
     "ADMINISTRATOR",
     "EXECUTOR",
     "PERSONAL REPRESENTATIVE",
+]
+
+# -----------------------------
+# County Tax Pages (TaxPagesBot)
+# -----------------------------
+# Put real county tax seed pages here later.
+# For now, keep it empty so TaxPagesBot does nothing but also doesn't crash.
+SEED_URLS_COUNTY_TAX = []
+
+TAX_KEYWORDS = [
+    "tax sale",
+    "delinquent",
+    "delinquent taxes",
+    "tax delinquent",
+    "back taxes",
+    "trustee",
+    "foreclosure",
 ]
