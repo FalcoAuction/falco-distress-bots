@@ -47,7 +47,6 @@ def detect_risk_flags(text: str) -> Dict[str, bool]:
         "probate": any(w in t for w in PROBATE_WORDS),
         "hoa_condo": any(w in t for w in HOA_WORDS),
     }
-from datetime import date as _date
 
 def triage(dts: int | None, flags: Dict[str, bool]) -> tuple[str, str]:
     """
@@ -56,7 +55,6 @@ def triage(dts: int | None, flags: Dict[str, bool]) -> tuple[str, str]:
     - <30 days to sale => MONITOR (still potentially actionable)
     - Bankruptcy / HOA-condo / probate authority => KILL
     """
-    # Legal complexity kills (early-stage avoid)
     if flags.get("bankruptcy"):
         return "KILL", "KILL: bankruptcy flag"
     if flags.get("hoa_condo"):
@@ -64,18 +62,14 @@ def triage(dts: int | None, flags: Dict[str, bool]) -> tuple[str, str]:
     if flags.get("probate"):
         return "KILL", "KILL: probate authority risk"
 
-    # Date-based triage
     if dts is None:
         return "MONITOR", "MONITOR: sale date missing"
-
     if dts < 0:
         return "KILL", "KILL: past sale date"
-
     if dts < 30:
         return "MONITOR", "MONITOR: sale < 30 days"
 
     return "", ""
-
 
 def score_v2(distress_type: str, county: str, dts: int | None, has_contact: bool) -> int:
     # Score answers: "likelihood to close into auction commission within timeline"
@@ -92,17 +86,17 @@ def score_v2(distress_type: str, county: str, dts: int | None, has_contact: bool
     else:
         score += 5
 
-    # Timeline comfort (heavy)
+    # Timeline comfort (strategic)
     if dts is None:
         score += 0
     elif dts >= 60:
         score += 35
-    elif dts >= 35:
+    elif dts >= 28:
         score += 25
-    elif dts >= 30:
+    elif dts >= 0:
         score += 10
     else:
-        score -= 40  # should already be killed
+        score -= 40  # past date should be killed
 
     # County liquidity (light early)
     if county:
@@ -115,18 +109,14 @@ def score_v2(distress_type: str, county: str, dts: int | None, has_contact: bool
     else:
         score -= 10
 
-    # Clamp
-    score = max(0, min(100, score))
-    return score
+    return max(0, min(100, score))
 
 def label(distress_type: str, county: str, dts: int | None, flags: Dict[str, bool], score: int, has_contact: bool) -> str:
-    # GREEN requirements (lean v1)
     is_focus = (county in FOCUS_COUNTIES) if county else False
     dt = (distress_type or "").lower()
     is_primary_dt = ("trustee" in dt) or (dt == "tax")
 
-    if (dts is not None and dts >= 35) and is_primary_dt and is_focus and (not any(flags.values())) and has_contact and score >= 70:
+    if (dts is not None and dts >= 28) and is_primary_dt and is_focus and (not any(flags.values())) and has_contact and score >= 70:
         return "GREEN"
 
-    # Otherwise MONITOR if not killed
     return "MONITOR"
