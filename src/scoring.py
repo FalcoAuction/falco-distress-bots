@@ -47,19 +47,35 @@ def detect_risk_flags(text: str) -> Dict[str, bool]:
         "probate": any(w in t for w in PROBATE_WORDS),
         "hoa_condo": any(w in t for w in HOA_WORDS),
     }
+from datetime import date as _date
 
-def hard_kill(reasonable_days_to_sale: int | None, flags: Dict[str, bool]) -> tuple[bool, str]:
-    # Hard kill rules (lean v1)
-    if reasonable_days_to_sale is not None and reasonable_days_to_sale < 30:
-        return True, "KILL: sale < 30 days"
+def triage(dts: int | None, flags: Dict[str, bool]) -> tuple[str, str]:
+    """
+    Strategic triage:
+    - Past sale dates => KILL (historical / irrelevant)
+    - <30 days to sale => MONITOR (still potentially actionable)
+    - Bankruptcy / HOA-condo / probate authority => KILL
+    """
+    # Legal complexity kills (early-stage avoid)
     if flags.get("bankruptcy"):
-        return True, "KILL: bankruptcy flag"
+        return "KILL", "KILL: bankruptcy flag"
     if flags.get("hoa_condo"):
-        return True, "KILL: HOA/condo flag"
+        return "KILL", "KILL: HOA/condo flag"
     if flags.get("probate"):
-        # Early-stage avoid per your doctrine
-        return True, "KILL: probate authority risk"
-    return False, ""
+        return "KILL", "KILL: probate authority risk"
+
+    # Date-based triage
+    if dts is None:
+        return "MONITOR", "MONITOR: sale date missing"
+
+    if dts < 0:
+        return "KILL", "KILL: past sale date"
+
+    if dts < 30:
+        return "MONITOR", "MONITOR: sale < 30 days"
+
+    return "", ""
+
 
 def score_v2(distress_type: str, county: str, dts: int | None, has_contact: bool) -> int:
     # Score answers: "likelihood to close into auction commission within timeline"
