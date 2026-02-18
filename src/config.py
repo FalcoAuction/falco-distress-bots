@@ -5,7 +5,7 @@ NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
 
 # We will add real URLs later
 SEED_URLS_PUBLIC_NOTICES = [
-    "https://www.tnpublicnotice.com/",
+     "https://www.tnpublicnotice.com/search?keyword=trustee+sale",
     "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
 
