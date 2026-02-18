@@ -27,6 +27,29 @@ def normalize_county(name: str):
     return name
 
 
+def parse_date_flex(date_str: str):
+    if not date_str:
+        return None
+
+    date_str = date_str.strip()
+
+    formats = [
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.date().isoformat()
+        except Exception:
+            continue
+
+    return None
+
+
 def determine_status(dts: int | None):
     if dts is None:
         return None
@@ -92,27 +115,17 @@ def run():
 
             county = normalize_county(county_raw)
 
-            # Statewide mode if TARGET_COUNTIES is empty
             if TARGET_COUNTIES and county not in TARGET_COUNTIES:
                 skipped_out_of_geo += 1
                 continue
 
-            # Parse sale date
-            sale_date_iso = None
-            if sale_date_str:
-                try:
-                    dt = datetime.strptime(sale_date_str, "%m/%d/%Y")
-                    sale_date_iso = dt.date().isoformat()
-                except Exception:
-                    pass
+            # Flexible date parsing
+            sale_date_iso = parse_date_flex(sale_date_str)
 
             # Continuance override
-            if continuance_str:
-                try:
-                    dt = datetime.strptime(continuance_str, "%m/%d/%Y")
-                    sale_date_iso = dt.date().isoformat()
-                except Exception:
-                    pass
+            cont_iso = parse_date_flex(continuance_str)
+            if cont_iso:
+                sale_date_iso = cont_iso
 
             if not sale_date_iso:
                 skipped_no_date += 1
