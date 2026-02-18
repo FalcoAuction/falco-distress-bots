@@ -15,16 +15,10 @@ def _clean(txt: str) -> str:
     return " ".join((txt or "").split())
 
 def _split_into_notice_chunks(text: str) -> list[str]:
-    """
-    Heuristic chunker:
-    - Works on aggregator pages by splitting on repeated notice starters.
-    - Keeps chunks reasonably sized.
-    """
     t = _clean(text)
     if len(t) < 200:
         return []
 
-    # Common start markers in public notice portals
     markers = [
         r"\bSUBSTITUTE\s+TRUSTEE\S*\s+SALE\b",
         r"\bTRUSTEE\S*\s+SALE\b",
@@ -33,7 +27,6 @@ def _split_into_notice_chunks(text: str) -> list[str]:
         r"\bNOTICE\s+OF\s+SALE\b",
     ]
 
-    # Find all marker positions
     positions = []
     for m in markers:
         for match in re.finditer(m, t, flags=re.IGNORECASE):
@@ -42,28 +35,27 @@ def _split_into_notice_chunks(text: str) -> list[str]:
     positions = sorted(set(positions))
     if not positions:
         # fallback: if page has keywords, treat as one chunk
-        return [t[:4000]] if (contains_any(t, TRUSTEE_KEYWORDS) or contains_any(t, ESTATE_KEYWORDS)) else []
+        return [t[:6000]] if (contains_any(t, TRUSTEE_KEYWORDS) or contains_any(t, ESTATE_KEYWORDS)) else []
 
-    # Build chunks between marker positions
     chunks = []
     for i, start in enumerate(positions):
-        end = positions[i + 1] if i + 1 < len(positions) else min(len(t), start + 6000)
+        end = positions[i + 1] if i + 1 < len(positions) else min(len(t), start + 8000)
         chunk = t[start:end].strip()
         if len(chunk) < 200:
             continue
-        chunks.append(chunk[:6000])
+        chunks.append(chunk[:8000])
 
-    # De-dupe near duplicates
+    # de-dupe
     deduped = []
     seen = set()
     for c in chunks:
-        key = c[:200].lower()
-        if key in seen:
+        k = c[:220].lower()
+        if k in seen:
             continue
-        seen.add(key)
+        seen.add(k)
         deduped.append(c)
 
-    return deduped[:80]
+    return deduped[:100]
 
 
 def run():
@@ -79,8 +71,7 @@ def run():
             continue
 
         soup = BeautifulSoup(html, "html.parser")
-        page_text = soup.get_text(" ", strip=True)
-        page_text = _clean(page_text)
+        page_text = _clean(soup.get_text(" ", strip=True))
 
         if not (contains_any(page_text, TRUSTEE_KEYWORDS) or contains_any(page_text, ESTATE_KEYWORDS)):
             print(f"[PublicNoticesBot] {url} -> no trustee/estate keywords")
@@ -92,20 +83,22 @@ def run():
         for snippet in chunks:
             is_trustee = contains_any(snippet, TRUSTEE_KEYWORDS)
             is_estate = contains_any(snippet, ESTATE_KEYWORDS)
-
             distress_type = "Trustee Sale" if is_trustee else ("Estate" if is_estate else "Other")
 
             sale_date = find_date_iso(snippet)
             county = guess_county(snippet)
-
             contact = extract_contact(snippet)
             has_contact = bool(contact)
-
             address = extract_address(snippet)
             trustee = extract_trustee_or_attorney(snippet)
 
             flags = detect_risk_flags(snippet)
             dts = days_to_sale(sale_date)
+
+            # ✅ NEW: Skip expired notices entirely (do not write them)
+            if dts is not None and dts < 0:
+                continue
+
             override_status, reason = triage(dts, flags)
 
             if override_status == "KILL":
@@ -120,8 +113,11 @@ def run():
 
             title = f"{distress_type} ({status}) ({county or 'TN'})"
 
-            # Lead key now includes snippet-derived fields, so each notice becomes unique
-            lead_key = make_lead_key(distress_type, county, sale_date, address, trustee, url + "|" + snippet[:120])
+            # Notice-specific lead key
+            lead_key = make_lead_key(
+                distress_type, county, sale_date, address, trustee,
+                url + "|" + snippet[:140]
+            )
 
             props = build_properties(
                 title=title,
