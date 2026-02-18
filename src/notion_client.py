@@ -29,6 +29,38 @@ def create_lead(props: Dict[str, Any]):
     )
     if r.status_code >= 300:
         raise RuntimeError(f"Notion create failed: {r.status_code} {r.text}")
+def find_existing_by_url(url: str):
+    if not url:
+        return None
+    payload = {
+        "filter": {
+            "property": "URL",
+            "url": {"equals": url}
+        }
+    }
+    r = requests.post(
+        f"https://api.notion.com/v1/databases/{DB_ID}/query",
+        headers=headers(),
+        json=payload,
+        timeout=30
+    )
+    if r.status_code >= 300:
+        print(f"[Notion] query failed: {r.status_code} {r.text}")
+        return None
+
+    data = r.json()
+    results = data.get("results", [])
+    return results[0]["id"] if results else None
+
+def update_lead(page_id: str, props: Dict[str, Any]):
+    r = requests.patch(
+        f"https://api.notion.com/v1/pages/{page_id}",
+        headers=headers(),
+        json={"properties": props},
+        timeout=30
+    )
+    if r.status_code >= 300:
+        print(f"[Notion] update failed: {r.status_code} {r.text}")
 
 def build_properties(
     title: str,
