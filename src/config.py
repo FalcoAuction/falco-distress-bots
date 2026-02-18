@@ -4,8 +4,16 @@ NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
 NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
 
 # We will add real URLs later
-SEED_URLS_PUBLIC_NOTICES = []
-SEED_URLS_COUNTY_TAX = []
+SEED_URLS_PUBLIC_NOTICES = [
+    "https://www.tnpublicnotice.com/",
+    "https://tnlegalpub.com/notice_type/foreclosure/",
+]
+
+SEED_URLS_COUNTY_TAX = [
+    "https://chanceryclerkandmaster.nashville.gov/fees/property-tax-schedule/",
+    "https://chanceryclerkandmaster.nashville.gov/fees/delinquent-tax-sales/",
+]
+
 
 TRUSTEE_KEYWORDS = [
     "substitute trustee",
