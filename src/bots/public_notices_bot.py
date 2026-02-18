@@ -18,18 +18,13 @@ def _clean(txt: str) -> str:
 
 
 def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
-    """
-    tnlegalpub listing pages link individual notices at /legal_notice/<slug>/
-    """
     soup = BeautifulSoup(list_html, "html.parser")
     links: list[str] = []
-
     for a in soup.select("a[href]"):
         href = a.get("href", "")
         if "/legal_notice/" in href:
             links.append(urljoin(base_url, href))
 
-    # De-dupe while preserving order
     seen = set()
     out: list[str] = []
     for u in links:
@@ -41,9 +36,6 @@ def _extract_notice_links(list_html: str, base_url: str) -> list[str]:
 
 
 def _find_next_page(list_html: str, base_url: str) -> str | None:
-    """
-    Try rel=next, otherwise any link containing 'next'
-    """
     soup = BeautifulSoup(list_html, "html.parser")
 
     rel_next = soup.select_one('a[rel="next"][href]')
@@ -70,11 +62,9 @@ def run():
         print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set yet.")
         return
 
-    # Run-level counters for GitHub Actions logs
     list_pages_fetched = 0
     notice_links_found = 0
     notice_pages_fetched_ok = 0
-    parsed_ok = 0
 
     created = 0
     updated = 0
@@ -84,6 +74,9 @@ def run():
     skipped_expired = 0
     skipped_lt30 = 0
     skipped_kill = 0
+
+    wrote_count = 0
+    debug_prints_left = 5
 
     seen_notice_urls = set()
 
@@ -138,12 +131,9 @@ def run():
                 flags = detect_risk_flags(text)
                 dts = days_to_sale(sale_date)
 
+                # Skip expired outright
                 if dts is not None and dts < 0:
                     skipped_expired += 1
-                    continue
-
-                if dts is not None and dts < 30:
-                    skipped_lt30 += 1
                     continue
 
                 override_status, reason = triage(dts, flags)
@@ -152,9 +142,15 @@ def run():
                     continue
 
                 score = score_v2(distress_type, county, dts, has_contact)
-                status = "MONITOR" if override_status == "MONITOR" else label(
-                    distress_type, county, dts, flags, score, has_contact
-                )
+
+                # If within 30 days, write MONITOR (do not skip)
+                if dts is not None and dts < 30:
+                    skipped_lt30 += 1
+                    status = "MONITOR"
+                else:
+                    status = "MONITOR" if override_status == "MONITOR" else label(
+                        distress_type, county, dts, flags, score, has_contact
+                    )
 
                 title = f"{distress_type} ({status}) ({county or 'TN'})"
 
@@ -190,14 +186,16 @@ def run():
                     create_lead(props)
                     created += 1
 
-                parsed_ok += 1
+                wrote_count += 1
 
-            next_url = _find_next_page(list_html, base_url=next_url)
+                if debug_prints_left > 0:
+                    print(f"[PublicNoticesBot][DEBUG] wrote status={status} sale_date={sale_date} dts={dts} county={county} url={notice_url}")
+                    debug_prints_left -= 1
 
     print(
         "[PublicNoticesBot] summary "
         f"list_pages_fetched={list_pages_fetched} notice_links_found={notice_links_found} "
-        f"notice_pages_fetched_ok={notice_pages_fetched_ok} parsed_ok={parsed_ok} "
+        f"notice_pages_fetched_ok={notice_pages_fetched_ok} wrote_count={wrote_count} "
         f"created={created} updated={updated} "
         f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
         f"skipped_expired={skipped_expired} skipped_lt30={skipped_lt30} skipped_kill={skipped_kill}"
