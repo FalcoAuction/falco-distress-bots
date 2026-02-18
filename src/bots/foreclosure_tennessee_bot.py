@@ -11,7 +11,7 @@ from ..config import (
 )
 from ..utils import fetch, make_lead_key
 from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
-from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
+from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2
 
 
 _DATE_RE = re.compile(r"^\s*(\d{1,2})/(\d{1,2})/(\d{4})\s*$")
@@ -71,6 +71,24 @@ def _extract_table_rows(html: str, base_url: str) -> list[dict]:
     return out
 
 
+def _status_from_dts(dts: int | None) -> str:
+    """
+    Actionable status ladder:
+      dts >= 14  -> GREEN (call + route)
+      7-13       -> HOT (call within 24h)
+      0-6        -> URGENT (call today)
+    """
+    if dts is None:
+        return "MONITOR"
+    if dts >= 14:
+        return "GREEN"
+    if dts >= 7:
+        return "HOT"
+    if dts >= 0:
+        return "URGENT"
+    return "EXPIRED"
+
+
 def run():
     print(f"[ForeclosureTNBot] seed={FORECLOSURE_TN_SEED_URL}")
     print(f"[ForeclosureTNBot] target_counties={TARGET_COUNTIES}")
@@ -87,8 +105,10 @@ def run():
     skipped_no_date = 0
     skipped_out_of_geo = 0
 
-    monitor_written = 0
+    urgent_written = 0
+    hot_written = 0
     green_written = 0
+    monitor_written = 0
     total_written = 0
 
     for page in range(1, FORECLOSURE_TN_MAX_PAGES + 1):
@@ -116,8 +136,7 @@ def run():
             county_raw = (r["county"] or "").strip()
             county = county_raw.upper() if county_raw else "TN"
 
-            # ✅ GEO FILTER
-            # If county is missing, skip (we need confident geo for outreach)
+            # GEO FILTER
             if county == "TN":
                 skipped_out_of_geo += 1
                 continue
@@ -143,17 +162,15 @@ def run():
             distress_type = "Foreclosure"
             score = score_v2(distress_type, county, dts, True)
 
-            if dts is not None and dts < 30:
-                status = "MONITOR"
-            else:
-                status = "MONITOR" if override_status == "MONITOR" else label(
-                    distress_type, county, dts, flags, score, True
-                )
-
-            if status == "MONITOR":
-                monitor_written += 1
-            else:
+            status = _status_from_dts(dts)
+            if status == "URGENT":
+                urgent_written += 1
+            elif status == "HOT":
+                hot_written += 1
+            elif status == "GREEN":
                 green_written += 1
+            else:
+                monitor_written += 1
 
             title = f"Foreclosure ({status}) ({county})"
 
@@ -174,7 +191,7 @@ def run():
                 sale_date_iso=sale_date_iso,
                 trustee_attorney=trustee,
                 contact_info=trustee if trustee else (reason or ""),
-                raw_snippet=f"City={r['city']} Zip={r['zip']} (continuance={r['continuance_date_iso']} orig={r['sale_date_iso']})",
+                raw_snippet=f"City={r['city']} Zip={r['zip']} (continuance={r['continuance_date_iso']} orig={r['sale_date_iso']}) dts={dts}",
                 url=listing_url,
                 score=score,
                 status=status,
@@ -193,7 +210,7 @@ def run():
 
     print(
         "[ForeclosureTNBot] summary "
-        f"total_written={total_written} green_written={green_written} monitor_written={monitor_written} "
+        f"total_written={total_written} green={green_written} hot={hot_written} urgent={urgent_written} monitor={monitor_written} "
         f"created={created} updated={updated} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_no_date={skipped_no_date} "
         f"skipped_expired={skipped_expired} skipped_kill={skipped_kill}"
