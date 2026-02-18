@@ -1,16 +1,32 @@
 # src/run_all.py
 
-print("RUN_ALL VERSION CHECK - 2026-02-18")
+from datetime import datetime
 
-from .bots.public_notices_bot import run as run_public_notices
-from .bots.foreclosure_tennessee_bot import run as run_foreclosure_tn
-from .bots.tax_pages_bot import run as run_tax_pages
+from .bots import foreclosure_tennessee_bot
+from .bots import public_notices_bot
+from .bots import tax_pages_bot
+from .bots import tn_foreclosure_notices_bot
+
+
+def run_bot(name: str, fn):
+    print(f"\n=== RUNNING: {name} ===")
+    try:
+        fn()
+        print(f"=== DONE: {name} ===")
+    except Exception as e:
+        print(f"=== ERROR: {name} === {type(e).__name__}: {e}")
 
 
 def main():
-    run_public_notices()
-    run_foreclosure_tn()
-    run_tax_pages()
+    print("RUN_ALL VERSION CHECK - 2026-02-18")
+    print(f"RUN_ALL UTC START: {datetime.utcnow().isoformat()}")
+
+    run_bot("ForeclosureTennesseeBot", foreclosure_tennessee_bot.run)
+    run_bot("TNForeclosureNoticesBot", tn_foreclosure_notices_bot.run)
+    run_bot("PublicNoticesBot", public_notices_bot.run)
+    run_bot("TaxPagesBot", tax_pages_bot.run)
+
+    print(f"RUN_ALL UTC END: {datetime.utcnow().isoformat()}")
 
 
 if __name__ == "__main__":
