@@ -4,6 +4,7 @@ import re
 from datetime import datetime
 from urllib.parse import urljoin
 
+import requests
 from bs4 import BeautifulSoup
 
 from ..notion_client import (
@@ -13,12 +14,11 @@ from ..notion_client import (
     find_existing_by_lead_key,
 )
 from ..scoring import days_to_sale, score_v2, label
-from ..utils import fetch, make_lead_key
+from ..utils import make_lead_key
 
 BASE_URL = "https://tnforeclosurenotices.com/"
 COUNTY_URL_FMT = urljoin(BASE_URL, "results/counties/{slug}/")
 
-# Hardcoded county list to avoid relying on search-page link markup (which can be JS/weird anchors).
 COUNTY_NAMES = [
     "Anderson","Bedford","Benton","Bledsoe","Blount","Bradley","Campbell","Cannon","Carroll","Carter",
     "Cheatham","Chester","Claiborne","Clay","Cocke","Coffee","Crockett","Cumberland","Davidson","Decatur",
@@ -32,12 +32,32 @@ COUNTY_NAMES = [
     "Wayne","Weakley","White","Williamson","Wilson",
 ]
 
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/121.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+}
+
 
 def _slugify_county(name: str) -> str:
     s = name.strip().lower()
     s = s.replace(".", "")
     s = re.sub(r"\s+", "-", s)
     return s
+
+
+def _get(url: str, session: requests.Session, timeout: int = 25):
+    try:
+        r = session.get(url, headers=HEADERS, timeout=timeout, allow_redirects=True)
+        return r.status_code, r.text
+    except Exception:
+        return None, None
 
 
 def _parse_date_tnfn(s: str):
@@ -116,8 +136,7 @@ def _parse_notice_line(line: str):
     }
 
 
-def _parse_county_page(county_url: str):
-    html = fetch(county_url)
+def _parse_county_html(html: str):
     if not html:
         return []
 
@@ -146,11 +165,31 @@ def run():
     parsed_ok = 0
     counties_hit = 0
 
+    # lightweight diagnostics (single line at end)
+    http_ok_pages = 0
+    http_403 = 0
+    http_other = 0
+
+    session = requests.Session()
+
     for county_name in COUNTY_NAMES:
         slug = _slugify_county(county_name)
         county_url = COUNTY_URL_FMT.format(slug=slug)
 
-        leads = _parse_county_page(county_url)
+        status, html = _get(county_url, session=session)
+        if status == 200:
+            http_ok_pages += 1
+        elif status == 403:
+            http_403 += 1
+            continue
+        elif status is None:
+            http_other += 1
+            continue
+        else:
+            http_other += 1
+            continue
+
+        leads = _parse_county_html(html)
         if not leads:
             continue
 
@@ -165,7 +204,7 @@ def run():
                 continue
 
             falco_score = score_v2(dts, flags=[])
-            status = label(falco_score)
+            status_label = label(falco_score)
 
             lead_key = make_lead_key(
                 distress_type="Foreclosure",
@@ -185,7 +224,7 @@ def run():
                 sale_date=lead["sale_date"],
                 trustee=lead["firm"],
                 contact_info=None,
-                status=status,
+                status=status_label,
                 falco_score=falco_score,
                 raw_snippet=lead["raw_text"],
                 url=county_url,
@@ -206,5 +245,6 @@ def run():
     print(
         "TNForeclosureNoticeBot complete: "
         f"total_written={total_written} created={created} updated={updated} "
-        f"skipped_expired={skipped_expired} parsed_ok={parsed_ok} counties_hit={counties_hit}"
+        f"skipped_expired={skipped_expired} parsed_ok={parsed_ok} counties_hit={counties_hit} "
+        f"http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other}"
     )
