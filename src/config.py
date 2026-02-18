@@ -1,24 +1,19 @@
 # src/config.py
 
 # -----------------------------
-# Public Notices (tnlegalpub)
+# tnlegalpub (Foreclosure notice type)
 # -----------------------------
 SEED_URLS_PUBLIC_NOTICES = [
     "https://tnlegalpub.com/notice_type/foreclosure/",
 ]
-
-PUBLIC_NOTICE_MAX_LIST_PAGES = 5
+PUBLIC_NOTICE_MAX_LIST_PAGES = 25  # go deeper so we actually hit future sale dates
 
 TRUSTEE_KEYWORDS = [
     "TRUSTEE'S SALE",
     "TRUSTEE’S SALE",
     "SUBSTITUTE TRUSTEE",
-    "SUBSTITUTE TRUSTEE’S",
-    "SUBSTITUTE TRUSTEE'S",
     "NOTICE OF FORECLOSURE",
     "FORECLOSURE SALE",
-    "NOTICE OF SUBSTITUTE TRUSTEE",
-    "NOTICE OF TRUSTEE",
     "NOTICE OF SALE",
 ]
 
@@ -31,18 +26,20 @@ ESTATE_KEYWORDS = [
 ]
 
 # -----------------------------
-# County Tax Pages (TaxPagesBot)
+# ForeclosureTennessee.com (active upstream feed)
 # -----------------------------
-# Put real county tax seed pages here later.
-# For now, keep it empty so TaxPagesBot does nothing but also doesn't crash.
-SEED_URLS_COUNTY_TAX = []
+FORECLOSURE_TN_SEED_URL = "https://foreclosuretennessee.com/"
+FORECLOSURE_TN_MAX_PAGES = 4  # site shows 4 pages / ~70 items
 
+# -----------------------------
+# County Tax Pages (TaxPagesBot) - keep stable, empty for now
+# -----------------------------
+SEED_URLS_COUNTY_TAX = []
 TAX_KEYWORDS = [
     "tax sale",
     "delinquent",
     "delinquent taxes",
     "tax delinquent",
     "back taxes",
-    "trustee",
     "foreclosure",
 ]
