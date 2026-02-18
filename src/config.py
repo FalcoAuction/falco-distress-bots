@@ -1,45 +1,32 @@
-import os
+# === Public Notice Seeds ===
+# IMPORTANT: Do NOT scrape the tnpublicnotice homepage.
+# Use search endpoints so results are already filtered.
 
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
-NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
-
-# We will add real URLs later
 SEED_URLS_PUBLIC_NOTICES = [
-     "https://www.tnpublicnotice.com/search?keyword=trustee+sale",
-    "https://tnlegalpub.com/notice_type/foreclosure/",
+    # Trustee sale keyword search
+    "https://www.tnpublicnotice.com/search?keyword=trustee%20sale",
+    # Foreclosure keyword search (optional)
+    "https://www.tnpublicnotice.com/search?keyword=foreclosure",
 ]
 
+# === County Tax Seeds (pipeline pages for now) ===
 SEED_URLS_COUNTY_TAX = [
-    "https://chanceryclerkandmaster.nashville.gov/fees/property-tax-schedule/",
-    "https://chanceryclerkandmaster.nashville.gov/fees/delinquent-tax-sales/",
+    # Put your county tax / delinquent tax list pages here
+    # Example placeholders:
+    # "https://.../davidson/tax-sale",
 ]
 
-
+# === Keyword Sets ===
 TRUSTEE_KEYWORDS = [
-    "substitute trustee",
-    "trustee’s sale",
-    "trustees sale",
-    "foreclosure",
-    "notice of sale",
-    "deed of trust",
-    "default"
+    "substitute trustee", "trustee sale", "notice of sale",
+    "foreclosure", "deed of trust", "power of sale"
 ]
 
 ESTATE_KEYWORDS = [
-    "notice to creditors",
-    "estate of",
-    "letters testamentary",
-    "letters of administration",
-    "administrator",
-    "executor",
-    "probate"
+    "estate of", "probate", "executor", "administrator"
 ]
 
 TAX_KEYWORDS = [
-    "delinquent tax",
-    "tax sale",
-    "court sale",
-    "clerk and master",
-    "chancery",
-    "auction"
+    "tax sale", "delinquent", "delinquent tax", "back taxes",
+    "tax lien", "trustee tax"
 ]
