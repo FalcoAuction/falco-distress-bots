@@ -39,13 +39,14 @@ def build_properties(
     contact_info: str,
     url: str,
     score: int,
+    status: str,
 ) -> Dict[str, Any]:
     props: Dict[str, Any] = {
         "Property Name": {"title": [{"type": "text", "text": {"content": title[:180]}}]},
         "Source": {"select": {"name": source}},
         "Distress Type": {"select": {"name": distress_type}},
         "Falco Score": {"number": int(score)},
-        "Status": {"select": {"name": "New"}},
+        "Status": {"select": {"name": status}},
     }
 
     if county:
