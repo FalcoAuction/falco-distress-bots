@@ -2,7 +2,6 @@
 
 import re
 import hashlib
-import inspect
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -123,6 +122,7 @@ def _pick_sale_date_iso(text: str):
 
 
 def _triage_and_score(dts: int):
+    # URGENT 0–7, HOT 8–14, GREEN 15+
     if dts <= 7:
         return "URGENT", 95
     if dts <= 14:
@@ -159,7 +159,7 @@ def _parse_notice_container_text(container_text: str):
         "Address:",
         end_labels=["Firm:", "County:", "Original Sale Date:", "Current Sale Date:", "PP Sale Date:"],
     )
-    firm = _extract_field(
+    trustee_attorney = _extract_field(
         container_text,
         "Firm:",
         end_labels=["PP Sale Date:", "Current Sale Date:", "Sale Location:", "Sale Time:", "Auction Vendor:", "County:"],
@@ -175,7 +175,7 @@ def _parse_notice_container_text(container_text: str):
         "county": county.strip(),
         "sale_date_iso": sale_date_iso,
         "address": address.strip(),
-        "trustee_attorney": firm.strip() if firm else None,
+        "trustee_attorney": trustee_attorney.strip() if trustee_attorney else None,
         "raw_text": container_text.strip(),
     }
 
@@ -216,33 +216,6 @@ def _parse_county_html(html: str):
         leads.append(parsed)
 
     return leads
-
-
-def _call_build_properties(payload: dict):
-    """
-    build_properties appears positional-only in your repo (error complains about missing positional args).
-    We therefore:
-      - detect its parameter order
-      - assemble positional args by parameter name using payload keys
-      - call build_properties(*args)
-    """
-    sig = inspect.signature(build_properties)
-    params = list(sig.parameters.values())
-    names = [p.name for p in params]
-
-    # If it supports kwargs, just do kwargs
-    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
-        return build_properties(**payload)
-
-    # Build positional args in exact order
-    args = []
-    for n in names:
-        if n in payload:
-            args.append(payload[n])
-        else:
-            # provide safe defaults for optional fields if caller forgot
-            args.append(None)
-    return build_properties(*args)
 
 
 def run():
@@ -300,15 +273,14 @@ def run():
                 notice_url=f"{county_url}#{lead.get('notice_id') or ''}",
             )
 
-            # REQUIRED by your build_properties (per errors):
-            # sale_date_iso, trustee_attorney, score, contact_info
             payload = {
+                # Required inputs (your repo’s build_properties expectations)
                 "sale_date_iso": lead["sale_date_iso"],
                 "trustee_attorney": lead["trustee_attorney"],
                 "score": score,
                 "contact_info": lead["trustee_attorney"] or "",
 
-                # Common fields (may be ignored depending on signature)
+                # Full Notion mapping
                 "title": lead["address"],
                 "source": "TNForeclosureNotices",
                 "county": lead["county"],
@@ -321,7 +293,7 @@ def run():
                 "days_to_sale": dts,
             }
 
-            props = _call_build_properties(payload)
+            props = build_properties(payload)
 
             existing_id = find_existing_by_lead_key(lead_key)
             if existing_id:
