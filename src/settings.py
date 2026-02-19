@@ -196,3 +196,8 @@ def is_allowed_county(county_name: str | None, allowed_bases: Optional[set[str]]
     if not b:
         return False
     return b in allowed_bases
+
+# Back-compat alias (some bots import this name)
+def normalize_county_full(name: str | None) -> str | None:
+    return normalize_county(name)
+
