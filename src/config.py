@@ -1,64 +1,86 @@
-# ============================================================
-# FALCO DISTRESS ENGINE CONFIG
-# ============================================================
+# src/config.py
 
+"""
+FALCO DISTRESS ENGINE CONFIG
+
+Future-proof goals:
+- Each bot can have its OWN days-to-sale (DTS) window.
+- Bots do NOT accidentally inherit global env vars unless you want them to.
+- Global defaults exist, but per-bot config overrides are supported.
+- Env vars can override anything when you’re running actions / prod.
+
+Precedence (highest -> lowest):
+1) Env per-bot:     FALCO_<BOTKEY>_DTS_MIN / FALCO_<BOTKEY>_DTS_MAX
+2) Config per-bot:  <BOTKEY>_DTS_WINDOW
+3) Env global:      FALCO_DTS_MIN / FALCO_DTS_MAX
+4) Config global:   GLOBAL_DTS_WINDOW
+"""
 
 # ============================================================
 # GEOGRAPHY CONTROL
 # ============================================================
-
-# Leave empty list [] to allow STATEWIDE
-# Add counties like ["Davidson County", "Williamson County"] to restrict
+# Leave [] to allow statewide (unless env restricts).
+# If set, MUST match "X County" format (e.g., "Davidson County").
 TARGET_COUNTIES = []
+
+
+# ============================================================
+# GLOBAL DEFAULTS
+# ============================================================
+# Default window used if bot-specific window is not set.
+GLOBAL_DTS_WINDOW = (21, 90)
+
+# Default allowed counties if env not set and TARGET_COUNTIES empty.
+# (Bots treat this as "base county names" without "County")
+DEFAULT_ALLOWED_COUNTIES_BASE = ["Davidson", "Rutherford", "Sumner", "Williamson", "Wilson"]
 
 
 # ============================================================
 # PUBLIC NOTICE SOURCES (LISTING / SEARCH PAGES)
 # ============================================================
-
 SEED_URLS_PUBLIC_NOTICES = [
     "https://tnlegalpub.com/notice_type/foreclosure/",
     "https://www.foreclosurestn.com/",
     "https://www.tnpublicnotice.com/Search.aspx",
 ]
 
-# Max pages to attempt per listing source
 PUBLIC_NOTICES_MAX_LIST_PAGES = 10
 
-# Minimum days until sale to write to Notion (0 = any future)
-PUBLIC_NOTICES_MIN_DAYS_OUT = 0
+# Per-bot window (THIS is the important fix)
+# TNLegalPub etc can have sale dates that are much farther out than courthouse lists.
+PUBLIC_NOTICES_DTS_WINDOW = (0, 180)
 
-# Debug mode (prints verbose logs)
+# Truncate raw snippets before sending to Notion (prevents massive blobs)
+PUBLIC_NOTICES_RAW_SNIPPET_MAX_CHARS = 1200
+
+# Debug mode
 PUBLIC_NOTICES_DEBUG = False
 
 
 # ============================================================
 # FORECLOSURE TENNESSEE (PRIMARY HIGH-SIGNAL SOURCE)
 # ============================================================
+SEED_URLS_FORECLOSURE_TN = ["https://foreclosuretennessee.com/"]
 
-SEED_URLS_FORECLOSURE_TN = [
-    "https://foreclosuretennessee.com/"
-]
+FORECLOSURE_TN_DTS_WINDOW = (21, 90)
+
+
+# ============================================================
+# TN FORECLOSURE NOTICES (TNForeclosureNoticesBot)
+# ============================================================
+TNFN_DTS_WINDOW = (21, 90)
 
 
 # ============================================================
 # COUNTY TAX / CLERK & MASTER SEEDS (TaxPagesBot expects this)
 # ============================================================
-
-# Leave empty if you’re not using tax pages yet.
-# If empty, TaxPagesBot should ideally just print "no seeds" and exit.
 SEED_URLS_COUNTY_TAX = []
-
-# Example seeds you can add later:
-# SEED_URLS_COUNTY_TAX = [
-#     "https://www.examplecounty.gov/tax-sale",
-# ]
+TAXPAGES_DTS_WINDOW = (0, 365)
 
 
 # ============================================================
 # KEYWORD SIGNALS
 # ============================================================
-
 TRUSTEE_KEYWORDS = [
     "trustee sale",
     "substitute trustee",
@@ -88,7 +110,6 @@ TAX_KEYWORDS = [
 # ============================================================
 # SCORING CONFIG (optional knobs)
 # ============================================================
-
 URGENT_DAYS_THRESHOLD = 7
 HOT_DAYS_THRESHOLD = 14
 
@@ -96,26 +117,5 @@ HOT_DAYS_THRESHOLD = 14
 # ============================================================
 # SAFETY LIMITS
 # ============================================================
-
 MAX_NOTICE_LINKS_PER_SOURCE = 200
 MAX_NOTICE_TEXT_CHARS = 8000
-
-
-# ============================================================
-# TIER 1 FILTERS (FalcoFB Phase 1 – Call Ready Focus)
-# ============================================================
-
-# Base county names (no " County" suffix).
-# These are the ONLY counties we want for Phase 1 density.
-ALLOWED_COUNTIES_BASE = [
-    "Davidson",
-    "Williamson",
-    "Rutherford",
-    "Wilson",
-    "Sumner",
-]
-
-# Days-to-sale window for "Call Ready" leads
-# This is your operational outreach band.
-DTS_WINDOW_MIN = 21
-DTS_WINDOW_MAX = 90
