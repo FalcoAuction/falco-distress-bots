@@ -54,11 +54,33 @@ def is_allowed_county(county_name: str | None) -> bool:
     return b in allowed
 
 
-def within_target_counties(county_name: str | None, target_counties: list[str] | None) -> bool:
+def _get_config_target_counties_fallback() -> list[str]:
     """
-    Checks an optional *hard restriction* list (from config TARGET_COUNTIES).
-    If target_counties is empty/None => allow.
+    If a bot calls within_target_counties(county) with no 2nd arg,
+    we try to pull TARGET_COUNTIES from src.config if it exists.
     """
+    try:
+        from .config import TARGET_COUNTIES  # type: ignore
+        if isinstance(TARGET_COUNTIES, list):
+            return TARGET_COUNTIES
+        return []
+    except Exception:
+        return []
+
+
+def within_target_counties(county_name: str | None, target_counties: list[str] | None = None) -> bool:
+    """
+    BACKWARD + FORWARD COMPAT:
+
+    - Old call style: within_target_counties(county)
+    - New call style: within_target_counties(county, TARGET_COUNTIES)
+
+    If target_counties is None, we fallback to src.config.TARGET_COUNTIES if present.
+    If still empty/None => allow.
+    """
+    if target_counties is None:
+        target_counties = _get_config_target_counties_fallback()
+
     if not target_counties:
         return True
 
