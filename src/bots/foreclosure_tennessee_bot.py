@@ -66,6 +66,14 @@ def _is_allowed_county(county: str | None) -> bool:
     return base in _ALLOWED_COUNTIES_BASE
 
 
+def _clean(s: str | None) -> str:
+    if not s:
+        return ""
+    s = s.replace("\r", " ").replace("\n", " ")
+    s = " ".join(s.split())
+    return s.strip()
+
+
 def _parse_date_flex(s: str):
     if not s:
         return None
@@ -225,8 +233,10 @@ def run():
     skipped_kill = 0
     skipped_bad_row = 0
     skipped_no_link = 0
+    skipped_dup_in_run = 0
 
     sample_kept: list[str] = []
+    seen_lead_keys: set[str] = set()
 
     for page in range(1, total_pages + 1):
         url = url_builder(page)
@@ -254,11 +264,11 @@ def run():
 
             sale_date_str = cols[0]
             cont_date_str = cols[1]
-            city = cols[2]
-            address = cols[3]
-            zip_code = cols[4]
-            county_raw = cols[5]
-            firm_trustee = cols[6]
+            city = _clean(cols[2])
+            address = _clean(cols[3])
+            zip_code = _clean(cols[4])
+            county_raw = _clean(cols[5])
+            firm_trustee = _clean(cols[6])
 
             county = _normalize_county(county_raw)
 
@@ -297,8 +307,8 @@ def run():
             listing_url = urljoin(BASE_URL, a["href"])
 
             distress_type = "Foreclosure"
+            address_full = _clean(f"{address}, {city}, TN {zip_code}")
             title = f"{distress_type} ({status}) ({county_raw})"
-            address_full = f"{address}, {city}, TN {zip_code}"
 
             lead_key = make_lead_key(
                 "FORECLOSURETN",
@@ -307,6 +317,11 @@ def run():
                 sale_date_iso,
                 address_full,
             )
+
+            if lead_key in seen_lead_keys:
+                skipped_dup_in_run += 1
+                continue
+            seen_lead_keys.add(lead_key)
 
             existing_id = find_existing_by_lead_key(lead_key)
             score_for_create = _falco_score_from_status(dts, status)
@@ -320,7 +335,7 @@ def run():
                 sale_date_iso=sale_date_iso,
                 trustee_attorney=firm_trustee,
                 contact_info=firm_trustee,
-                raw_snippet=f"orig_sale={sale_date_str} cont={cont_date_str} page={page}",
+                raw_snippet=_clean(f"orig_sale={sale_date_str} cont={cont_date_str} page={page}"),
                 url=listing_url,
                 score=(None if existing_id else score_for_create),
                 status=status,
@@ -347,6 +362,7 @@ def run():
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
         f"skipped_no_date={skipped_no_date} skipped_expired={skipped_expired} "
         f"skipped_kill={skipped_kill} skipped_bad_row={skipped_bad_row} skipped_no_link={skipped_no_link} "
+        f"skipped_dup_in_run={skipped_dup_in_run} "
         f"sample_kept={sample_kept}"
     )
     print("[ForeclosureTNBot] Done.")
