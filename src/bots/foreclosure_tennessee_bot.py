@@ -1,30 +1,51 @@
 import os
 import re
-from bs4 import BeautifulSoup
 from datetime import datetime
 from urllib.parse import urljoin
 
-from ..config import TARGET_COUNTIES
-from ..utils import fetch, make_lead_key
-from ..notion_client import (
-    build_properties,
-    create_lead,
-    update_lead,
-    find_existing_by_lead_key,
+from bs4 import BeautifulSoup
+
+from ..config import (
+    TARGET_COUNTIES,
+    ALLOWED_COUNTIES_BASE,
+    DTS_WINDOW_MIN,
+    DTS_WINDOW_MAX,
 )
+from ..notion_client import build_properties, create_lead, find_existing_by_lead_key, update_lead
 from ..scoring import days_to_sale
+from ..utils import fetch, make_lead_key
 
 BASE_URL = "https://foreclosuretennessee.com/"
-MAX_PAGES_CAP = 25  # safety cap
+MAX_PAGES_CAP = 25
 
-_ALLOWED_COUNTIES_BASE = {
-    c.strip() for c in os.getenv(
-        "FALCO_ALLOWED_COUNTIES",
-        "Davidson,Williamson,Rutherford,Wilson,Sumner",
-    ).split(",") if c.strip()
-}
-_DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
-_DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
+
+def _env_csv(name: str) -> set[str]:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return set()
+    return {c.strip() for c in raw.split(",") if c.strip()}
+
+
+def _effective_allowed_counties() -> set[str]:
+    env = _env_csv("FALCO_ALLOWED_COUNTIES")
+    if env:
+        return env
+    return {c.strip() for c in (ALLOWED_COUNTIES_BASE or []) if c and c.strip()}
+
+
+def _effective_dts_window() -> tuple[int, int]:
+    mn = os.getenv("FALCO_DTS_MIN")
+    mx = os.getenv("FALCO_DTS_MAX")
+    if mn and mx:
+        try:
+            return int(mn), int(mx)
+        except Exception:
+            pass
+    return int(DTS_WINDOW_MIN), int(DTS_WINDOW_MAX)
+
+
+_ALLOWED_COUNTIES_BASE = _effective_allowed_counties()
+_DTS_MIN, _DTS_MAX = _effective_dts_window()
 
 
 def _county_base(name: str | None) -> str | None:
@@ -40,6 +61,8 @@ def _is_allowed_county(county: str | None) -> bool:
     base = _county_base(county)
     if not base:
         return False
+    if not _ALLOWED_COUNTIES_BASE:
+        return True
     return base in _ALLOWED_COUNTIES_BASE
 
 
@@ -138,7 +161,7 @@ def _candidate_page_urls(page_num: int, page_size: int = 20):
     ]
 
 
-def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int):
+def _detect_paging_url_builder(total_pages: int):
     if total_pages <= 1:
         return lambda n: BASE_URL
 
@@ -169,7 +192,10 @@ def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int)
 
 
 def run():
-    print(f"[ForeclosureTNBot] seed={BASE_URL} allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
+    print(
+        f"[ForeclosureTNBot] seed={BASE_URL} "
+        f"allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]"
+    )
 
     html1 = _get_page_html(BASE_URL)
     if not html1:
@@ -180,7 +206,7 @@ def run():
     total_pages = min(_extract_total_pages(soup1), MAX_PAGES_CAP)
     print(f"[ForeclosureTNBot] detected_pages={total_pages}")
 
-    url_builder = _detect_paging_url_builder(soup1, total_pages)
+    url_builder = _detect_paging_url_builder(total_pages)
     if url_builder is None:
         print("[ForeclosureTNBot] pagination_not_supported_server_side -> processing only page 1")
         url_builder = lambda n: BASE_URL
@@ -199,6 +225,8 @@ def run():
     skipped_kill = 0
     skipped_bad_row = 0
     skipped_no_link = 0
+
+    sample_kept: list[str] = []
 
     for page in range(1, total_pages + 1):
         url = url_builder(page)
@@ -309,12 +337,16 @@ def run():
 
             filtered_in += 1
 
+            if len(sample_kept) < 5:
+                sample_kept.append(f"county={county_raw} sale={sale_date_iso} dts={dts} addr={address_full}")
+
     print(
         "[ForeclosureTNBot] summary "
         f"fetched_rows={fetched_rows} parsed_rows={parsed_rows} filtered_in={filtered_in} "
         f"created={created} updated={updated} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
         f"skipped_no_date={skipped_no_date} skipped_expired={skipped_expired} "
-        f"skipped_kill={skipped_kill} skipped_bad_row={skipped_bad_row} skipped_no_link={skipped_no_link}"
+        f"skipped_kill={skipped_kill} skipped_bad_row={skipped_bad_row} skipped_no_link={skipped_no_link} "
+        f"sample_kept={sample_kept}"
     )
     print("[ForeclosureTNBot] Done.")
