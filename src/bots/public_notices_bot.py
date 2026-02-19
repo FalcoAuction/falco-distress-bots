@@ -1,4 +1,5 @@
 import os
+import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -31,6 +32,11 @@ _ALLOWED_COUNTIES_BASE = {
 }
 _DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
 _DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
+
+_ALLOWED_RE = re.compile(
+    r"\b(" + "|".join(re.escape(c) for c in sorted(_ALLOWED_COUNTIES_BASE, key=len, reverse=True)) + r")\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _county_base(name: str | None) -> str | None:
@@ -88,21 +94,41 @@ def _log(msg: str):
         print(f"[PublicNoticesBot][DEBUG] {msg}")
 
 
-def _extract_links_tnlegalpub(listing_html: str, listing_url: str) -> list[str]:
-    soup = BeautifulSoup(listing_html, "html.parser")
-    links = []
-    for a in soup.select("h2 a[href]"):
-        href = a.get("href")
-        if href:
-            links.append(urljoin(listing_url, href))
+# ----------------------------
+# LIST PAGE PARSERS
+# ----------------------------
 
-    out = []
-    seen = set()
-    for u in links:
+def _extract_items_tnlegalpub(listing_html: str, listing_url: str) -> list[dict]:
+    """
+    Returns items: {url, title, excerpt}
+    """
+    soup = BeautifulSoup(listing_html, "html.parser")
+    items: list[dict] = []
+    for art in soup.select("article.post"):
+        a = art.select_one("h2.entry-title a[href]")
+        if not a:
+            continue
+        href = a.get("href")
+        title = _clean(a.get_text(" ", strip=True))
+        p = art.select_one("p")
+        excerpt = _clean(p.get_text(" ", strip=True)) if p else ""
+        if href:
+            items.append(
+                {
+                    "url": urljoin(listing_url, href),
+                    "title": title,
+                    "excerpt": excerpt,
+                }
+            )
+
+    # de-dupe by url
+    out, seen = [], set()
+    for it in items:
+        u = it["url"]
         if u in seen:
             continue
         seen.add(u)
-        out.append(u)
+        out.append(it)
     return out
 
 
@@ -168,6 +194,21 @@ def _seed_pages_tnpublicnotice(seed: str) -> list[str]:
     return out
 
 
+def _listing_item_mentions_allowed(it: dict) -> bool:
+    """
+    tnlegalpub listing item pre-filter:
+    keep only if title OR excerpt mentions one of the allowed counties.
+    """
+    title = (it.get("title") or "")
+    excerpt = (it.get("excerpt") or "")
+    blob = f"{title} {excerpt}"
+    return bool(_ALLOWED_RE.search(blob))
+
+
+# ----------------------------
+# NOTICE PARSING
+# ----------------------------
+
 def _parse_notice_page(notice_url: str, html: str) -> dict | None:
     soup = BeautifulSoup(html, "html.parser")
     text = _clean(soup.get_text(" ", strip=True))
@@ -232,147 +273,41 @@ def run():
     skipped_outside_window = 0
     skipped_kill = 0
 
-    sample_out_of_geo: list[str] = []
-    sample_county_missing: list[str] = []
+    # new: efficiency counters for tnlegalpub listing pre-filter
+    tnlegalpub_items_seen = 0
+    tnlegalpub_items_kept = 0
 
     for seed in SEED_URLS_PUBLIC_NOTICES:
         dom = _domain(seed)
 
-        if "tnlegalpub.com" in dom:
-            list_pages = _listing_pages_tnlegalpub(seed)
-        elif "foreclosurestn.com" in dom:
-            list_pages = _seed_pages_foreclosurestn(seed)
-        elif "tnpublicnotice.com" in dom:
-            list_pages = _seed_pages_tnpublicnotice(seed)
-        else:
-            list_pages = [seed]
-
         notice_links: list[str] = []
         seen_links = set()
 
-        for lp in list_pages:
-            try:
-                _log(f"fetching listing={lp}")
-                html = fetch(lp)
-                list_pages_fetched += 1
-            except Exception as e:
-                _log(f"listing fetch failed {lp}: {e}")
-                continue
+        # tnlegalpub: parse listing items and pre-filter before fetching notices
+        if "tnlegalpub.com" in dom:
+            list_pages = _listing_pages_tnlegalpub(seed)
 
-            if "tnlegalpub.com" in dom:
-                links = _extract_links_tnlegalpub(html, lp)
-            else:
-                links = _extract_links_generic(html, lp)
-
-            for u in links:
-                if u in seen_links:
+            for lp in list_pages:
+                try:
+                    html = fetch(lp)
+                    list_pages_fetched += 1
+                except Exception as e:
+                    _log(f"listing fetch failed {lp}: {e}")
                     continue
-                seen_links.add(u)
-                notice_links.append(u)
 
-            if len(notice_links) >= 200:
-                break
+                items = _extract_items_tnlegalpub(html, lp)
+                tnlegalpub_items_seen += len(items)
+                kept = [it for it in items if _listing_item_mentions_allowed(it)]
+                tnlegalpub_items_kept += len(kept)
 
-        notice_links_found += len(notice_links)
+                for it in kept:
+                    u = it["url"]
+                    if u in seen_links:
+                        continue
+                    seen_links.add(u)
+                    notice_links.append(u)
 
-        for notice_url in notice_links:
-            try:
-                html = fetch(notice_url)
-                notice_pages_fetched_ok += 1
-            except Exception as e:
-                _log(f"notice fetch failed {notice_url}: {e}")
-                continue
+                if len(notice_links) >= 200:
+                    break
 
-            parsed = _parse_notice_page(notice_url, html)
-            if not parsed:
-                skipped_short += 1
-                continue
-            parsed_ok += 1
-
-            sale_date = parsed["sale_date"]
-            if not sale_date:
-                skipped_no_sale += 1
-                continue
-
-            county = parsed.get("county")
-            if not county:
-                skipped_out_of_geo += 1
-                if len(sample_county_missing) < 3:
-                    sample_county_missing.append(f"url={notice_url} guess={parsed.get('county_guess')}")
-                continue
-
-            if not _is_allowed_county(county):
-                skipped_out_of_geo += 1
-                if len(sample_out_of_geo) < 3:
-                    sample_out_of_geo.append(f"url={notice_url} county={county} guess={parsed.get('county_guess')}")
-                continue
-
-            dts = days_to_sale(sale_date)
-            if dts is None:
-                skipped_no_sale += 1
-                continue
-            if dts < 0:
-                skipped_expired += 1
-                continue
-            if not (_DTS_MIN <= dts <= _DTS_MAX):
-                skipped_outside_window += 1
-                continue
-
-            flags = detect_risk_flags(parsed["text"])
-            override_status, reason = triage(dts, flags)
-            if override_status == "KILL":
-                skipped_kill += 1
-                continue
-
-            has_contact = bool(parsed["contact"])
-            score = score_v2(parsed["distress_type"], county, dts, has_contact)
-            status = label(parsed["distress_type"], county, dts, flags, score, has_contact)
-            title = f"{parsed['distress_type']} ({status}) ({county or 'TN'})"
-
-            lead_key = make_lead_key(
-                parsed["distress_type"],
-                county,
-                sale_date,
-                parsed["address"],
-                parsed["trustee"],
-                parsed["notice_url"],
-            )
-
-            props = build_properties(
-                title=title,
-                source="Public Notice",
-                distress_type=parsed["distress_type"],
-                county=county,
-                address=parsed["address"],
-                sale_date_iso=sale_date,
-                trustee_attorney=parsed["trustee"],
-                contact_info=(parsed["contact"] or reason),
-                raw_snippet=parsed["snippet"],
-                url=parsed["notice_url"],
-                score=score,
-                status=status,
-                lead_key=lead_key,
-                days_to_sale=dts,
-            )
-
-            existing_id = find_existing_by_lead_key(lead_key)
-            if existing_id:
-                update_lead(existing_id, props)
-                updated += 1
-            else:
-                create_lead(props)
-                created += 1
-
-            filtered_in += 1
-
-    print(
-        "[PublicNoticesBot] summary "
-        f"list_pages_fetched={list_pages_fetched} notice_links_found={notice_links_found} "
-        f"notice_pages_fetched_ok={notice_pages_fetched_ok} parsed_ok={parsed_ok} filtered_in={filtered_in} "
-        f"created={created} updated={updated} "
-        f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
-        f"skipped_expired={skipped_expired} skipped_out_of_geo={skipped_out_of_geo} "
-        f"skipped_outside_window={skipped_outside_window} skipped_kill={skipped_kill} "
-        f"sample_out_of_geo={sample_out_of_geo} sample_county_missing={sample_county_missing}"
-    )
-    print("[PublicNoticesBot] Done.")
+        els
