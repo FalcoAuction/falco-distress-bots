@@ -218,17 +218,31 @@ def _parse_county_html(html: str):
     return leads
 
 
-def _call_build_properties(kwargs: dict):
+def _call_build_properties(payload: dict):
+    """
+    build_properties appears positional-only in your repo (error complains about missing positional args).
+    We therefore:
+      - detect its parameter order
+      - assemble positional args by parameter name using payload keys
+      - call build_properties(*args)
+    """
     sig = inspect.signature(build_properties)
     params = list(sig.parameters.values())
+    names = [p.name for p in params]
 
-    # if it accepts **kwargs, just pass everything
+    # If it supports kwargs, just do kwargs
     if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
-        return build_properties(**kwargs)
+        return build_properties(**payload)
 
-    accepted = {p.name for p in params if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
-    filtered = {k: v for k, v in kwargs.items() if k in accepted}
-    return build_properties(**filtered)
+    # Build positional args in exact order
+    args = []
+    for n in names:
+        if n in payload:
+            args.append(payload[n])
+        else:
+            # provide safe defaults for optional fields if caller forgot
+            args.append(None)
+    return build_properties(*args)
 
 
 def run():
@@ -286,14 +300,15 @@ def run():
                 notice_url=f"{county_url}#{lead.get('notice_id') or ''}",
             )
 
-            # Provide BOTH your older aliases and the exact required names.
+            # REQUIRED by your build_properties (per errors):
+            # sale_date_iso, trustee_attorney, score, contact_info
             payload = {
-                # required by your build_properties:
                 "sale_date_iso": lead["sale_date_iso"],
                 "trustee_attorney": lead["trustee_attorney"],
                 "score": score,
+                "contact_info": lead["trustee_attorney"] or "",
 
-                # likely used elsewhere / notion mapping:
+                # Common fields (may be ignored depending on signature)
                 "title": lead["address"],
                 "source": "TNForeclosureNotices",
                 "county": lead["county"],
@@ -304,13 +319,6 @@ def run():
                 "url": county_url,
                 "lead_key": lead_key,
                 "days_to_sale": dts,
-
-                # extra aliases (harmless if ignored):
-                "sale_date": lead["sale_date_iso"],
-                "trustee": lead["trustee_attorney"],
-                "falco_score": score,
-                "property_name": lead["address"],
-                "name": lead["address"],
             }
 
             props = _call_build_properties(payload)
