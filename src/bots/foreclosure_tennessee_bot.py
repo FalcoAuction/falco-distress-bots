@@ -78,31 +78,53 @@ def _normalize_city(city_raw: str) -> str:
     s = _clean(city_raw)
     if not s:
         return ""
-    # Remove trailing ", TN" or ", Tennessee ..." if present
     s = re.sub(r",\s*TN\b.*$", "", s, flags=re.IGNORECASE).strip()
     s = re.sub(r",\s*Tennessee\b.*$", "", s, flags=re.IGNORECASE).strip()
     return s
 
 
-def _address_looks_full(addr: str) -> bool:
+def _address_has_state(addr: str) -> bool:
     s = _clean(addr).lower()
     if not s:
         return False
-    has_state = (" tn " in f" {s} ") or (" tennessee " in f" {s} ") or s.endswith(" tn") or " tennessee" in s
-    has_zip = bool(re.search(r"\b\d{5}(?:-\d{4})?\b", s))
-    return has_state and has_zip
+    return bool(re.search(r"\bTN\b", addr)) or (" tennessee" in s)
+
+
+def _address_has_zip(addr: str) -> bool:
+    s = _clean(addr)
+    return bool(re.search(r"\b\d{5}(?:-\d{4})?\b", s))
+
+
+def _normalize_state_tokens(addr: str) -> str:
+    s = _clean(addr)
+    if not s:
+        return s
+    # Normalize ", Tennessee" -> ", TN"
+    s = re.sub(r",\s*Tennessee\b", ", TN", s, flags=re.IGNORECASE)
+    return _clean(s)
 
 
 def _compose_address(address_raw: str, city_raw: str, zip_raw: str) -> str:
-    address = _clean(address_raw)
-    if _address_looks_full(address):
-        return address
-    city = _normalize_city(city_raw)
+    address = _normalize_state_tokens(address_raw)
     zip_code = _clean(zip_raw)
-    parts = [p for p in [address, city, "TN", zip_code] if p]
-    out = ", ".join(parts[:2])  # address, city
-    tail = " ".join(parts[2:])  # TN + zip
-    return _clean(f"{out}, {tail}") if tail else out
+
+    # If address already contains state (TN/Tennessee), do NOT append city again.
+    if _address_has_state(address):
+        if zip_code and not _address_has_zip(address):
+            # Add zip to the end (ensure one space before zip)
+            return _clean(f"{address} {zip_code}")
+        return address
+
+    # Otherwise build "address, city, TN zip"
+    city = _normalize_city(city_raw)
+    parts_left = [p for p in [address, city] if p]
+    left = ", ".join(parts_left) if parts_left else ""
+    right_parts = [p for p in ["TN", zip_code] if p]
+    right = " ".join(right_parts) if right_parts else ""
+
+    if left and right:
+        return _clean(f"{left}, {right}")
+    return _clean(left or right)
 
 
 def _parse_date_flex(s: str):
