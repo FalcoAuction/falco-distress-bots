@@ -49,6 +49,37 @@ def _is_allowed_county(county: str | None) -> bool:
     return base in _ALLOWED_COUNTIES_BASE
 
 
+def _infer_allowed_county_from_text(text: str) -> str | None:
+    """
+    Fallback when guess_county() fails.
+    Looks for exact county mentions in the notice text for our allowed set only.
+    Returns "X County" if found.
+    """
+    if not text:
+        return None
+    t = " " + " ".join(text.lower().split()) + " "
+
+    # Strong patterns first: "davidson county"
+    for c in _ALLOWED_COUNTIES_BASE:
+        c_l = c.lower()
+        if f" {c_l} county " in t:
+            return f"{c} County"
+
+    # Secondary patterns: "in the county of davidson"
+    for c in _ALLOWED_COUNTIES_BASE:
+        c_l = c.lower()
+        if f" county of {c_l} " in t:
+            return f"{c} County"
+
+    # Weak patterns: standalone county name (riskier, but still bounded to allowed list)
+    for c in _ALLOWED_COUNTIES_BASE:
+        c_l = c.lower()
+        if f" {c_l} " in t:
+            return f"{c} County"
+
+    return None
+
+
 def _clean(txt: str) -> str:
     return " ".join((txt or "").split())
 
@@ -155,7 +186,11 @@ def _parse_notice_page(notice_url: str, html: str) -> dict | None:
         return None
 
     sale_date = find_date_iso(text)
+
     county = guess_county(text)
+    if not _is_allowed_county(county):
+        county = _infer_allowed_county_from_text(text)
+
     address = extract_address(text)
     trustee = extract_trustee_or_attorney(text)
     contact = extract_contact(text)
@@ -182,7 +217,10 @@ def run():
         print("[PublicNoticesBot] No SEED_URLS_PUBLIC_NOTICES set.")
         return
 
-    print(f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES} allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
+    print(
+        f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES} "
+        f"allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]"
+    )
 
     created = 0
     updated = 0
@@ -191,7 +229,6 @@ def run():
     notice_links_found = 0
     notice_pages_fetched_ok = 0
     parsed_ok = 0
-
     filtered_in = 0
 
     skipped_short = 0
@@ -329,6 +366,7 @@ def run():
         f"notice_pages_fetched_ok={notice_pages_fetched_ok} parsed_ok={parsed_ok} filtered_in={filtered_in} "
         f"created={created} updated={updated} "
         f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
-        f"skipped_expired={skipped_expired} skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} skipped_kill={skipped_kill}"
+        f"skipped_expired={skipped_expired} skipped_out_of_geo={skipped_out_of_geo} "
+        f"skipped_outside_window={skipped_outside_window} skipped_kill={skipped_kill}"
     )
     print("[PublicNoticesBot] Done.")
