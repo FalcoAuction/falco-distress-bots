@@ -53,10 +53,14 @@ _DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
 _DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
 
 
+def _clean(txt: str | None) -> str:
+    return " ".join((txt or "").split())
+
+
 def _county_base(name: str | None) -> str | None:
     if not name:
         return None
-    n = " ".join(name.strip().split())
+    n = _clean(name)
     if n.lower().endswith(" county"):
         n = n[:-7].strip()
     return n
@@ -195,11 +199,11 @@ def _parse_notice_container_text(container_text: str):
 
     return {
         "notice_id": notice_id,
-        "county": county.strip(),
+        "county": _clean(county),
         "sale_date_iso": sale_date_iso,
-        "address": address.strip(),
-        "trustee_attorney": trustee_attorney.strip() if trustee_attorney else None,
-        "raw_text": container_text.strip(),
+        "address": _clean(address),
+        "trustee_attorney": _clean(trustee_attorney) if trustee_attorney else None,
+        "raw_text": _clean(container_text),
     }
 
 
@@ -254,12 +258,16 @@ def run():
     skipped_out_of_geo = 0
     skipped_expired = 0
     skipped_outside_window = 0
+    skipped_dup_in_run = 0
 
     counties_hit = 0
 
     http_ok_pages = 0
     http_403 = 0
     http_other = 0
+
+    sample_kept: list[str] = []
+    seen_lead_keys = set()
 
     session = requests.Session()
 
@@ -305,14 +313,25 @@ def run():
 
             status_label, score = _triage_and_score(dts)
 
+            notice_url = f"{county_url}#{lead.get('notice_id') or ''}"
             lead_key = _make_lead_key(
                 distress_type="Foreclosure",
                 county=lead["county"],
                 sale_date=lead["sale_date_iso"],
                 address=lead["address"],
                 trustee=lead["trustee_attorney"],
-                notice_url=f"{county_url}#{lead.get('notice_id') or ''}",
+                notice_url=notice_url,
             )
+
+            if lead_key in seen_lead_keys:
+                skipped_dup_in_run += 1
+                continue
+            seen_lead_keys.add(lead_key)
+
+            if len(sample_kept) < 5:
+                sample_kept.append(
+                    f"county={_county_base(lead.get('county'))} sale={lead['sale_date_iso']} dts={dts} addr={lead['address']}"
+                )
 
             payload = {
                 "sale_date_iso": lead["sale_date_iso"],
@@ -348,5 +367,7 @@ def run():
         f"fetched_notices={fetched_notices} parsed_ok={parsed_ok} filtered_in={filtered_in} "
         f"created={created} updated={updated} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} skipped_outside_window={skipped_outside_window} "
-        f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other}"
+        f"skipped_dup_in_run={skipped_dup_in_run} "
+        f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other} "
+        f"sample_kept={sample_kept}"
     )
