@@ -1,4 +1,3 @@
-import os
 import re
 import hashlib
 from datetime import datetime
@@ -14,10 +13,18 @@ from ..notion_client import (
     find_existing_by_lead_key,
 )
 from ..scoring import days_to_sale
+from ..settings import (
+    get_dts_window,
+    is_allowed_county,
+    within_target_counties,
+    normalize_county_full,
+    clip_raw_snippet,
+)
 
 BASE_URL = "https://tnforeclosurenotices.com/"
 COUNTY_URL_FMT = urljoin(BASE_URL, "results/counties/{slug}/")
 
+# You can keep this list full; we only fetch allowed counties.
 COUNTY_NAMES = [
     "Anderson","Bedford","Benton","Bledsoe","Blount","Bradley","Campbell","Cannon","Carroll","Carter",
     "Cheatham","Chester","Claiborne","Clay","Cocke","Coffee","Crockett","Cumberland","Davidson","Decatur",
@@ -43,34 +50,7 @@ HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-_ALLOWED_COUNTIES_BASE = {
-    c.strip() for c in os.getenv(
-        "FALCO_ALLOWED_COUNTIES",
-        "Davidson,Williamson,Rutherford,Wilson,Sumner",
-    ).split(",") if c.strip()
-}
-_DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
-_DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
-
-
-def _clean(txt: str | None) -> str:
-    return " ".join((txt or "").split())
-
-
-def _county_base(name: str | None) -> str | None:
-    if not name:
-        return None
-    n = _clean(name)
-    if n.lower().endswith(" county"):
-        n = n[:-7].strip()
-    return n
-
-
-def _is_allowed_county(county: str | None) -> bool:
-    base = _county_base(county)
-    if not base:
-        return False
-    return base in _ALLOWED_COUNTIES_BASE
+_DTS_MIN, _DTS_MAX = get_dts_window("TN_FORECLOSURE_NOTICES")
 
 
 def _slugify_county(name: str) -> str:
@@ -88,7 +68,7 @@ def _get(url: str, session: requests.Session, timeout: int = 25):
         return None, None
 
 
-def _parse_date_tnfn(s: str):
+def _parse_date(s: str):
     if not s:
         return None
     s = s.strip().strip("()")
@@ -99,7 +79,7 @@ def _parse_date_tnfn(s: str):
             continue
     m = re.search(r"([A-Za-z]{3}\s+\d{1,2},\s+[A-Za-z]{3,9}\s+\d{4})", s)
     if m:
-        return _parse_date_tnfn(m.group(1))
+        return _parse_date(m.group(1))
     return None
 
 
@@ -126,6 +106,7 @@ def _extract_field(text: str, start_label: str, end_labels: list[str] | None = N
 
 
 def _pick_sale_date_iso(text: str):
+    # Prefer current / postponed, then original
     pp = _extract_field(
         text,
         "PP Sale Date:",
@@ -143,13 +124,13 @@ def _pick_sale_date_iso(text: str):
     )
 
     for candidate in (pp, cur, orig):
-        iso = _parse_date_tnfn(candidate) if candidate else None
+        iso = _parse_date(candidate) if candidate else None
         if iso:
             return iso
     return None
 
 
-def _triage_and_score(dts: int):
+def _triage(dts: int):
     if dts <= 7:
         return "URGENT", 95
     if dts <= 14:
@@ -171,6 +152,7 @@ def _make_lead_key(distress_type: str, county: str, sale_date: str, address: str
 
 
 def _parse_notice_container_text(container_text: str):
+    # Find TNFN ID
     m = re.search(r"(TNFN#\d+)", container_text)
     if not m:
         return None
@@ -199,11 +181,11 @@ def _parse_notice_container_text(container_text: str):
 
     return {
         "notice_id": notice_id,
-        "county": _clean(county),
+        "county_raw": county.strip(),
         "sale_date_iso": sale_date_iso,
-        "address": _clean(address),
-        "trustee_attorney": _clean(trustee_attorney) if trustee_attorney else None,
-        "raw_text": _clean(container_text),
+        "address_raw": address.strip(),
+        "trustee_attorney": trustee_attorney.strip() if trustee_attorney else None,
+        "raw_text": container_text.strip(),
     }
 
 
@@ -221,7 +203,8 @@ def _parse_county_html(html: str):
 
     for node in hits:
         container = node.parent
-        for _ in range(8):
+        # climb to a sane container
+        for _ in range(10):
             if container is None:
                 break
             if container.name in ("div", "li", "section", "article", "tr", "tbody", "table"):
@@ -246,12 +229,14 @@ def _parse_county_html(html: str):
 
 
 def run():
-    print(f"TNForeclosureNoticeBot starting... allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
+    print(
+        "TNForeclosureNoticeBot starting... "
+        f"dts_window=[{_DTS_MIN},{_DTS_MAX}]"
+    )
 
     fetched_notices = 0
     parsed_ok = 0
     filtered_in = 0
-
     created = 0
     updated = 0
 
@@ -261,18 +246,21 @@ def run():
     skipped_dup_in_run = 0
 
     counties_hit = 0
-
     http_ok_pages = 0
     http_403 = 0
     http_other = 0
 
-    sample_kept: list[str] = []
-    seen_lead_keys = set()
+    seen_in_run = set()
+    sample_kept = []
 
     session = requests.Session()
 
     for county_name in COUNTY_NAMES:
-        if county_name not in _ALLOWED_COUNTIES_BASE:
+        # only hit allowed base counties (e.g., Davidson)
+        county_full = normalize_county_full(county_name)
+        if not is_allowed_county(county_full):
+            continue
+        if not within_target_counties(county_full):
             continue
 
         slug = _slugify_county(county_name)
@@ -297,9 +285,16 @@ def run():
         for lead in leads:
             fetched_notices += 1
 
-            if not _is_allowed_county(lead.get("county")):
+            county_full = normalize_county_full(lead.get("county_raw"))
+            if not is_allowed_county(county_full):
                 skipped_out_of_geo += 1
                 continue
+            if not within_target_counties(county_full):
+                skipped_out_of_geo += 1
+                continue
+
+            # Normalize address lightly (don’t overthink)
+            address = " ".join((lead.get("address_raw") or "").split())
 
             dts = days_to_sale(lead["sale_date_iso"])
             if dts is None or dts < 0:
@@ -311,43 +306,39 @@ def run():
 
             parsed_ok += 1
 
-            status_label, score = _triage_and_score(dts)
+            status_label, score = _triage(dts)
 
             notice_url = f"{county_url}#{lead.get('notice_id') or ''}"
+
             lead_key = _make_lead_key(
                 distress_type="Foreclosure",
-                county=lead["county"],
+                county=county_full,
                 sale_date=lead["sale_date_iso"],
-                address=lead["address"],
-                trustee=lead["trustee_attorney"],
+                address=address,
+                trustee=lead.get("trustee_attorney"),
                 notice_url=notice_url,
             )
 
-            if lead_key in seen_lead_keys:
+            if lead_key in seen_in_run:
                 skipped_dup_in_run += 1
                 continue
-            seen_lead_keys.add(lead_key)
-
-            if len(sample_kept) < 5:
-                sample_kept.append(
-                    f"county={_county_base(lead.get('county'))} sale={lead['sale_date_iso']} dts={dts} addr={lead['address']}"
-                )
+            seen_in_run.add(lead_key)
 
             payload = {
-                "sale_date_iso": lead["sale_date_iso"],
-                "trustee_attorney": lead["trustee_attorney"],
-                "score": score,
-                "contact_info": lead["trustee_attorney"] or "",
-                "title": lead["address"],
+                "title": address or f"Foreclosure ({county_full})",
                 "source": "TNForeclosureNotices",
-                "county": lead["county"],
                 "distress_type": "Foreclosure",
-                "address": lead["address"],
-                "status": status_label,
-                "raw_snippet": lead["raw_text"],
+                "county": county_full,
+                "address": address,
+                "sale_date_iso": lead["sale_date_iso"],
+                "trustee_attorney": lead.get("trustee_attorney") or "",
+                "contact_info": lead.get("trustee_attorney") or "",
+                "raw_snippet": clip_raw_snippet(lead.get("raw_text") or ""),
                 "url": county_url,
                 "lead_key": lead_key,
                 "days_to_sale": dts,
+                "status": status_label,
+                "score": score,
             }
 
             props = build_properties(payload)
@@ -362,12 +353,18 @@ def run():
 
             filtered_in += 1
 
+            if len(sample_kept) < 5:
+                sample_kept.append(
+                    f"county={county_full} sale={lead['sale_date_iso']} dts={dts} addr={address}"
+                )
+
     print(
         "TNForeclosureNoticeBot summary: "
         f"fetched_notices={fetched_notices} parsed_ok={parsed_ok} filtered_in={filtered_in} "
         f"created={created} updated={updated} "
-        f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} skipped_outside_window={skipped_outside_window} "
-        f"skipped_dup_in_run={skipped_dup_in_run} "
+        f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} "
+        f"skipped_outside_window={skipped_outside_window} skipped_dup_in_run={skipped_dup_in_run} "
         f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other} "
         f"sample_kept={sample_kept}"
     )
+    print("=== DONE: TNForeclosureNoticesBot ===")
