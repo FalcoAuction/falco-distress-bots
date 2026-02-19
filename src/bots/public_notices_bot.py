@@ -50,28 +50,20 @@ def _is_allowed_county(county: str | None) -> bool:
 
 
 def _infer_allowed_county_from_text(text: str) -> str | None:
-    """
-    Fallback when guess_county() fails.
-    Looks for exact county mentions in the notice text for our allowed set only.
-    Returns "X County" if found.
-    """
     if not text:
         return None
     t = " " + " ".join(text.lower().split()) + " "
 
-    # Strong patterns first: "davidson county"
     for c in _ALLOWED_COUNTIES_BASE:
         c_l = c.lower()
         if f" {c_l} county " in t:
             return f"{c} County"
 
-    # Secondary patterns: "in the county of davidson"
     for c in _ALLOWED_COUNTIES_BASE:
         c_l = c.lower()
         if f" county of {c_l} " in t:
             return f"{c} County"
 
-    # Weak patterns: standalone county name (riskier, but still bounded to allowed list)
     for c in _ALLOWED_COUNTIES_BASE:
         c_l = c.lower()
         if f" {c_l} " in t:
@@ -187,7 +179,8 @@ def _parse_notice_page(notice_url: str, html: str) -> dict | None:
 
     sale_date = find_date_iso(text)
 
-    county = guess_county(text)
+    county_guess = guess_county(text)
+    county = county_guess
     if not _is_allowed_county(county):
         county = _infer_allowed_county_from_text(text)
 
@@ -205,6 +198,7 @@ def _parse_notice_page(notice_url: str, html: str) -> dict | None:
         "snippet": text[:2000],
         "sale_date": sale_date,
         "county": county,
+        "county_guess": county_guess,
         "address": address,
         "trustee": trustee,
         "contact": contact,
@@ -237,6 +231,9 @@ def run():
     skipped_out_of_geo = 0
     skipped_outside_window = 0
     skipped_kill = 0
+
+    sample_out_of_geo: list[str] = []
+    sample_county_missing: list[str] = []
 
     for seed in SEED_URLS_PUBLIC_NOTICES:
         dom = _domain(seed)
@@ -298,8 +295,16 @@ def run():
                 continue
 
             county = parsed.get("county")
+            if not county:
+                skipped_out_of_geo += 1
+                if len(sample_county_missing) < 3:
+                    sample_county_missing.append(f"url={notice_url} guess={parsed.get('county_guess')}")
+                continue
+
             if not _is_allowed_county(county):
                 skipped_out_of_geo += 1
+                if len(sample_out_of_geo) < 3:
+                    sample_out_of_geo.append(f"url={notice_url} county={county} guess={parsed.get('county_guess')}")
                 continue
 
             dts = days_to_sale(sale_date)
@@ -367,6 +372,7 @@ def run():
         f"created={created} updated={updated} "
         f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} "
         f"skipped_expired={skipped_expired} skipped_out_of_geo={skipped_out_of_geo} "
-        f"skipped_outside_window={skipped_outside_window} skipped_kill={skipped_kill}"
+        f"skipped_outside_window={skipped_outside_window} skipped_kill={skipped_kill} "
+        f"sample_out_of_geo={sample_out_of_geo} sample_county_missing={sample_county_missing}"
     )
     print("[PublicNoticesBot] Done.")
