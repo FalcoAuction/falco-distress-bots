@@ -123,7 +123,6 @@ def _pick_sale_date_iso(text: str):
 
 
 def _triage_and_score(dts: int):
-    # URGENT 0–7, HOT 8–14, GREEN 15+
     if dts <= 7:
         return "URGENT", 95
     if dts <= 14:
@@ -174,9 +173,9 @@ def _parse_notice_container_text(container_text: str):
     return {
         "notice_id": notice_id,
         "county": county.strip(),
-        "sale_date": sale_date_iso,
+        "sale_date_iso": sale_date_iso,
         "address": address.strip(),
-        "firm": firm.strip() if firm else None,
+        "trustee_attorney": firm.strip() if firm else None,
         "raw_text": container_text.strip(),
     }
 
@@ -188,8 +187,8 @@ def _parse_county_html(html: str):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-
     hits = soup.find_all(string=re.compile(r"TNFN#\d+"))
+
     leads = []
     seen_ids = set()
 
@@ -219,50 +218,17 @@ def _parse_county_html(html: str):
     return leads
 
 
-def _call_build_properties(data: dict):
-    """
-    Adapts to build_properties signature without knowing it in advance.
-    Tries:
-      1) build_properties(data) if single-arg function
-      2) build_properties(**filtered_kwargs) where keys match signature
-      3) build_properties(*positional) in common order if signature is positional-only
-    """
+def _call_build_properties(kwargs: dict):
     sig = inspect.signature(build_properties)
     params = list(sig.parameters.values())
 
-    # Case 1: single positional parameter (often `data` or `lead`)
-    if len(params) == 1 and params[0].kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
-        return build_properties(data)
-
-    # Case 2: supports **kwargs
+    # if it accepts **kwargs, just pass everything
     if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
-        return build_properties(**data)
+        return build_properties(**kwargs)
 
-    # Case 3: strict named parameters — filter to what it accepts
     accepted = {p.name for p in params if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
-    filtered = {k: v for k, v in data.items() if k in accepted}
-    if filtered:
-        return build_properties(**filtered)
-
-    # Case 4: positional-only / unknown — try common order
-    # (title/name, source, county, distress_type, address, sale_date, trustee, contact_info, status, falco_score, raw_snippet, url, lead_key, days_to_sale)
-    common_order = [
-        data.get("title") or data.get("name") or data.get("property_name"),
-        data.get("source"),
-        data.get("county"),
-        data.get("distress_type"),
-        data.get("address"),
-        data.get("sale_date"),
-        data.get("trustee"),
-        data.get("contact_info"),
-        data.get("status"),
-        data.get("falco_score"),
-        data.get("raw_snippet"),
-        data.get("url"),
-        data.get("lead_key"),
-        data.get("days_to_sale"),
-    ]
-    return build_properties(*common_order)
+    filtered = {k: v for k, v in kwargs.items() if k in accepted}
+    return build_properties(**filtered)
 
 
 def run():
@@ -304,43 +270,50 @@ def run():
         for lead in leads:
             parsed_ok += 1
 
-            dts = days_to_sale(lead["sale_date"])
+            dts = days_to_sale(lead["sale_date_iso"])
             if dts is None or dts < 0:
                 skipped_expired += 1
                 continue
 
-            status_label, falco_score = _triage_and_score(dts)
+            status_label, score = _triage_and_score(dts)
 
             lead_key = _make_lead_key(
                 distress_type="Foreclosure",
                 county=lead["county"],
-                sale_date=lead["sale_date"],
+                sale_date=lead["sale_date_iso"],
                 address=lead["address"],
-                trustee=lead["firm"],
+                trustee=lead["trustee_attorney"],
                 notice_url=f"{county_url}#{lead.get('notice_id') or ''}",
             )
 
-            # Provide multiple aliases for "title" so build_properties can map it.
-            data = {
+            # Provide BOTH your older aliases and the exact required names.
+            payload = {
+                # required by your build_properties:
+                "sale_date_iso": lead["sale_date_iso"],
+                "trustee_attorney": lead["trustee_attorney"],
+                "score": score,
+
+                # likely used elsewhere / notion mapping:
                 "title": lead["address"],
-                "name": lead["address"],
-                "property_name": lead["address"],
                 "source": "TNForeclosureNotices",
                 "county": lead["county"],
                 "distress_type": "Foreclosure",
                 "address": lead["address"],
-                "sale_date": lead["sale_date"],
-                "trustee": lead["firm"],
-                "contact_info": None,
                 "status": status_label,
-                "falco_score": falco_score,
                 "raw_snippet": lead["raw_text"],
                 "url": county_url,
                 "lead_key": lead_key,
                 "days_to_sale": dts,
+
+                # extra aliases (harmless if ignored):
+                "sale_date": lead["sale_date_iso"],
+                "trustee": lead["trustee_attorney"],
+                "falco_score": score,
+                "property_name": lead["address"],
+                "name": lead["address"],
             }
 
-            props = _call_build_properties(data)
+            props = _call_build_properties(payload)
 
             existing_id = find_existing_by_lead_key(lead_key)
             if existing_id:
