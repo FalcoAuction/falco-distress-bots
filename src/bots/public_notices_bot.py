@@ -2,11 +2,19 @@
 
 import os
 import re
-import hashlib
-from datetime import date
+from datetime import datetime
+from urllib.parse import urljoin
+
 from bs4 import BeautifulSoup
 
-from ..utils import fetch
+from ..config import (
+    SEED_URLS_PUBLIC_NOTICES,
+    PUBLIC_NOTICES_MAX_LIST_PAGES,
+    MAX_NOTICE_LINKS_PER_SOURCE,
+    MAX_NOTICE_TEXT_CHARS,
+    TARGET_COUNTIES,
+)
+from ..utils import fetch, make_lead_key
 from ..notion_client import (
     build_properties,
     create_lead,
@@ -16,10 +24,9 @@ from ..notion_client import (
 from ..scoring import days_to_sale
 
 
-# ============================================================
-# CONFIG VIA ENV
-# ============================================================
-
+# -----------------------------
+# ENV OVERRIDES (same style as your other bots)
+# -----------------------------
 _ALLOWED_COUNTIES_BASE = {
     c.strip()
     for c in os.getenv(
@@ -28,31 +35,46 @@ _ALLOWED_COUNTIES_BASE = {
     ).split(",")
     if c.strip()
 }
-
 _DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "21"))
 _DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "90"))
 
-MAX_NOTICE_TEXT_CHARS = int(os.getenv("FALCO_MAX_NOTICE_TEXT_CHARS", "1200"))
-MAX_LIST_PAGES = int(os.getenv("FALCO_PUBLIC_NOTICES_MAX_LIST_PAGES", "10"))
-
-SEEDS = [
-    "https://tnlegalpub.com/notice_type/foreclosure/",
-    "https://www.foreclosurestn.com/",
-    "https://www.tnpublicnotice.com/Search.aspx",
-]
+DEBUG = bool(int(os.getenv("FALCO_PUBLIC_DEBUG", "0")))
 
 
-# ============================================================
+# -----------------------------
 # HELPERS
-# ============================================================
+# -----------------------------
+def _log(msg: str):
+    if DEBUG:
+        print(msg)
+
+
+def _norm_whitespace(s: str) -> str:
+    if not s:
+        return ""
+    s = s.replace("\r", " ").replace("\n", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
 
 def _county_base(name: str | None) -> str | None:
     if not name:
         return None
-    n = " ".join(name.strip().split()).replace("\u00a0", " ")
+    n = " ".join(name.strip().split())
     if n.lower().endswith(" county"):
         n = n[:-7].strip()
     return n
+
+
+def _normalize_county(name: str | None) -> str | None:
+    if not name:
+        return None
+    n = _norm_whitespace(name)
+    if not n:
+        return None
+    if n.lower().endswith("county"):
+        return n if n.lower().endswith(" county") else f"{n[:-6].strip()} County"
+    return f"{n} County"
 
 
 def _is_allowed_county(county: str | None) -> bool:
@@ -62,177 +84,139 @@ def _is_allowed_county(county: str | None) -> bool:
     return base in _ALLOWED_COUNTIES_BASE
 
 
-def _norm_whitespace(s: str) -> str:
-    s = (s or "").replace("\u00a0", " ")
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+def _status_from_dts(dts: int | None):
+    if dts is None:
+        return None
+    if dts < 0:
+        return "EXPIRED"
+    if dts <= 6:
+        return "URGENT"
+    if 7 <= dts <= 13:
+        return "HOT"
+    return "GREEN"
 
 
-def _truncate(s: str, n: int) -> str:
-    s = s or ""
-    if len(s) <= n:
-        return s
-    return s[: n - 3].rstrip() + "..."
+def _score_from_status(dts: int | None, status: str | None) -> int:
+    if dts is None or not status:
+        return 0
+    if status == "URGENT":
+        return max(90, min(100, 100 - (dts * 2)))
+    if status == "HOT":
+        return max(75, min(89, 89 - ((dts - 7) * 2)))
+    if status == "GREEN":
+        return max(55, min(74, 74 - int((max(14, dts) - 14) / 2)))
+    return 0
 
 
-def _sha1(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-
-def _make_lead_key(source: str, url: str, county: str | None, sale_date_iso: str | None, address: str | None):
-    parts = [
-        (source or "").strip().lower(),
-        (url or "").strip().lower(),
-        (county or "").strip().lower(),
-        (sale_date_iso or "").strip().lower(),
-        (address or "").strip().lower(),
-    ]
-    return _sha1("|".join(parts))
-
-
-def _triage(dts: int):
-    if dts <= 7:
-        return "URGENT", 95
-    if dts <= 14:
-        return "HOT", 82
-    return "GREEN", 65
-
-
-# ============================================================
-# DATE EXTRACTION (TNLEGALPUB NEEDS MULTI-DATE PICKING)
-# ============================================================
-
-_MONTH_MAP = {
-    "jan": 1, "january": 1,
-    "feb": 2, "february": 2,
-    "mar": 3, "march": 3,
-    "apr": 4, "april": 4,
-    "may": 5,
-    "jun": 6, "june": 6,
-    "jul": 7, "july": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "oct": 10, "october": 10,
-    "nov": 11, "november": 11,
-    "dec": 12, "december": 12,
-}
-
-
-def _iso_from_mdy(mm: int, dd: int, yy: int) -> str | None:
-    try:
-        if yy < 100:
-            yy += 2000
-        return date(yy, mm, dd).isoformat()
-    except Exception:
+def _parse_date_flex_any(s: str) -> str | None:
+    if not s:
+        return None
+    s = _norm_whitespace(s)
+    if not s or s.lower() in {"tbd", "unknown", "n/a", "-"}:
         return None
 
+    fmts = [
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%B %d, %Y",
+        "%b %d, %Y",
+        "%B %d,%Y",
+        "%b %d,%Y",
+    ]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except Exception:
+            pass
+    return None
 
-def _extract_all_dates_iso(text: str) -> list[str]:
+
+def _extract_all_date_candidates(text: str) -> list[str]:
     """
-    Pull ALL date candidates in a notice.
-    Returns list of ISO dates (YYYY-MM-DD), de-duped, order preserved.
+    TNLegalPub notices can contain multiple dates (publication, postponement, original, new, etc.).
+    We want the best FUTURE sale date, so we collect candidates from common patterns.
     """
-    if not text:
-        return []
     t = _norm_whitespace(text)
 
-    found: list[str] = []
+    candidates: list[str] = []
 
-    # numeric dates: 2/25/2026 or 2/25/26
-    for m in re.finditer(r"\b(\d{1,2})/(\d{1,2})/(\d{2,4})\b", t):
-        iso = _iso_from_mdy(int(m.group(1)), int(m.group(2)), int(m.group(3)))
-        if iso and iso not in found:
-            found.append(iso)
+    # Common written dates: "February 25, 2026" / "Feb 25, 2026"
+    for m in re.finditer(r"\b([A-Z][a-z]{2,9}\s+\d{1,2},\s+\d{4})\b", t):
+        candidates.append(m.group(1))
 
-    # month name dates: February 25, 2026 / Feb 25, 2026
+    # Numeric: 02/25/2026
+    for m in re.finditer(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b", t):
+        candidates.append(m.group(1))
+
+    # Phrases like "sold at foreclosure sale on Wednesday, February 25, 2026"
     for m in re.finditer(
-        r"\b(January|February|March|April|May|June|July|August|September|October|November|December|"
-        r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+(\d{1,2}),\s+(\d{4})\b",
+        r"\b(?:sale on|sold on|foreclosure sale on|will be on)\s+(?:[A-Za-z]+,\s+)?([A-Z][a-z]{2,9}\s+\d{1,2},\s+\d{4})\b",
         t,
         flags=re.IGNORECASE,
     ):
-        mon_raw = m.group(1).strip().lower()
-        day = int(m.group(2))
-        year = int(m.group(3))
+        candidates.append(m.group(1))
 
-        if mon_raw.startswith("sept"):
-            month = 9
-        else:
-            key3 = mon_raw[:3]
-            month = _MONTH_MAP.get(key3) or _MONTH_MAP.get(mon_raw)
-
-        if month:
-            try:
-                iso = date(year, month, day).isoformat()
-                if iso not in found:
-                    found.append(iso)
-            except Exception:
-                pass
-
-    return found
+    # Dedup preserving order
+    seen = set()
+    out = []
+    for c in candidates:
+        cc = c.strip()
+        if cc not in seen:
+            seen.add(cc)
+            out.append(cc)
+    return out
 
 
 def _pick_best_sale_date_iso(text: str) -> str | None:
     """
-    TNLegalPub notices may include:
-      - publication dates (expired)
-      - original sale dates (expired)
-      - postponed/rescheduled dates (future)
-    So we select the best sale date by scoring all extracted dates:
-      1) prefer dates where DTS is within [_DTS_MIN, _DTS_MAX]
-      2) otherwise prefer the nearest FUTURE date (smallest non-negative DTS)
+    Choose the earliest FUTURE date found in the notice.
+    If none are future, return None.
     """
-    all_iso = _extract_all_dates_iso(text)
-    if not all_iso:
+    cands = _extract_all_date_candidates(text)
+    isos = []
+    for c in cands:
+        iso = _parse_date_flex_any(c)
+        if iso:
+            isos.append(iso)
+
+    if not isos:
         return None
 
-    scored = []
-    for iso in all_iso:
+    # Keep only future-ish (dts >= 0), then pick earliest upcoming
+    future = []
+    for iso in isos:
         dts = days_to_sale(iso)
-        if dts is None:
-            continue
-        scored.append((iso, dts))
+        if dts is not None and dts >= 0:
+            future.append((dts, iso))
 
-    if not scored:
+    if not future:
         return None
 
-    # Prefer within window
-    in_window = [(iso, dts) for (iso, dts) in scored if dts >= 0 and _DTS_MIN <= dts <= _DTS_MAX]
-    if in_window:
-        # choose earliest upcoming in-window (smallest dts)
-        in_window.sort(key=lambda x: x[1])
-        return in_window[0][0]
+    future.sort(key=lambda x: x[0])
+    return future[0][1]
 
-    # Otherwise choose nearest future date
-    future = [(iso, dts) for (iso, dts) in scored if dts >= 0]
-    if future:
-        future.sort(key=lambda x: x[1])
-        return future[0][0]
-
-    # If all are past, return None
-    return None
-
-
-# ============================================================
-# COUNTY / ADDRESS / TRUSTEE EXTRACTION
-# ============================================================
 
 def _extract_county_from_text(text: str) -> str | None:
-    if not text:
-        return None
-    t = text
+    """
+    TNLegalPub often contains "... Register’s Office for Sumner County, Tennessee"
+    or "Shelby County Courthouse" etc.
+    """
+    t = _norm_whitespace(text)
 
-    m = re.search(r"\bfor\s+([A-Za-z]+)\s+County,\s*Tennessee\b", t, flags=re.IGNORECASE)
+    # "for Sumner County"
+    m = re.search(r"\bfor\s+([A-Za-z \-]+?)\s+County\b", t, flags=re.IGNORECASE)
     if m:
-        return m.group(1).strip() + " County"
+        return _normalize_county(m.group(1))
 
-    m = re.search(r"\bOffice\s+of\s+([A-Za-z]+)\s+County,\s*Tennessee\b", t, flags=re.IGNORECASE)
+    # "Sumner County Courthouse"
+    m = re.search(r"\b([A-Za-z \-]+?)\s+County\s+Courthouse\b", t, flags=re.IGNORECASE)
     if m:
-        return m.group(1).strip() + " County"
+        return _normalize_county(m.group(1))
 
-    m = re.search(r"\b([A-Za-z]+)\s+County\s+Courthouse\b", t, flags=re.IGNORECASE)
+    # "in the Register’s Office for Davidson County"
+    m = re.search(r"\bRegister[’']?s Office for\s+([A-Za-z \-]+?)\s+County\b", t, flags=re.IGNORECASE)
     if m:
-        return m.group(1).strip() + " County"
+        return _normalize_county(m.group(1))
 
     return None
 
@@ -242,10 +226,21 @@ def _extract_address_from_text(text: str) -> str | None:
         return None
     t = _norm_whitespace(text)
 
+    # Strong labeled patterns
+    labeled = [
+        r"\bProperty Address:\s*([0-9].{10,140}?\b(?:TN|Tennessee)\s+\d{5}\b)",
+        r"\bAddress:\s*([0-9].{10,140}?\b(?:TN|Tennessee)\s+\d{5}\b)",
+    ]
+    for pat in labeled:
+        m = re.search(pat, t, flags=re.IGNORECASE)
+        if m:
+            return _norm_whitespace(m.group(1))
+
+    # Common phrasing patterns
     patterns = [
-        r"\b(commonly known as|located at|located on)\s+([0-9].{10,140}?\b(TN|Tennessee)\s+\d{5}\b)",
-        r"\bproperty.*?\blocated\s+at\s+([0-9].{10,140}?\b(TN|Tennessee)\s+\d{5}\b)",
-        r"\b([0-9]{1,6}\s+[A-Za-z0-9\.\-# ]{4,90}?),\s*([A-Za-z \-]{2,40}?),\s*(TN|Tennessee)\s+(\d{5})\b",
+        r"\b(commonly known as|located at|located on)\s+([0-9].{10,140}?\b(?:TN|Tennessee)\s+\d{5}\b)",
+        r"\bproperty.*?\blocated\s+at\s+([0-9].{10,140}?\b(?:TN|Tennessee)\s+\d{5}\b)",
+        r"\b([0-9]{1,6}\s+[A-Za-z0-9\.\-# ]{4,90}?),\s*([A-Za-z \-]{2,40}?),\s*(?:TN|Tennessee)\s+(\d{5})\b",
     ]
 
     for pat in patterns:
@@ -253,16 +248,17 @@ def _extract_address_from_text(text: str) -> str | None:
         if not m:
             continue
 
-        if m.lastindex and m.lastindex >= 2 and (m.group(1) or "").lower() in {"commonly known as", "located at", "located on"}:
+        if pat.startswith(r"\b(commonly known as"):
             return _norm_whitespace(m.group(2))
 
         if pat.startswith(r"\bproperty"):
             return _norm_whitespace(m.group(1))
 
+        # street, city, zip
         if pat.startswith(r"\b([0-9]{1,6}"):
             street = m.group(1)
             city = m.group(2)
-            z = m.group(4)
+            z = m.group(3)
             return _norm_whitespace(f"{street}, {city}, TN {z}")
 
     return None
@@ -273,76 +269,143 @@ def _extract_trustee_or_firm(text: str) -> str | None:
         return None
     t = _norm_whitespace(text)
 
-    # explicit labels
-    for lab in ["Substitute Trustee:", "Trustee:", "Attorney:", "Law Firm:", "Firm:"]:
-        m = re.search(re.escape(lab) + r"\s*([^\.]{3,140})", t, flags=re.IGNORECASE)
+    # Explicit labels (best case)
+    labels = [
+        "Substitute Trustee:",
+        "Substitute Trustee is",
+        "Trustee:",
+        "Attorney:",
+        "Attorney for",
+        "Law Firm:",
+        "Firm:",
+    ]
+    for lab in labels:
+        m = re.search(re.escape(lab) + r"\s*([^\.]{3,160})", t, flags=re.IGNORECASE)
         if m:
             cand = _norm_whitespace(m.group(1))
-            cand = re.split(r"\b(Sale Date|Sale Location|Sale Time|Address|County|Reference)\b", cand, maxsplit=1)[0]
+            cand = re.split(
+                r"\b(Sale Date|Sale Location|Sale Time|Address|County|Reference|Property)\b",
+                cand,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0]
             cand = _norm_whitespace(cand)
-            if cand:
+            if cand and len(cand) >= 3:
                 return cand
 
-    # firm-ish fallback
-    m = re.search(r"\b([A-Z][A-Za-z0-9&,\.\- ]{6,90}\b(?:LLC|L\.L\.C\.|PC|P\.C\.|PLC|P\.L\.C\.|LLP|L\.L\.P\.))\b", t)
+    # Law firm entity fallback
+    firm_pat = r"\b([A-Z][A-Za-z0-9&,\.\- ]{6,90}\b(?:LLC|L\.L\.C\.|PC|P\.C\.|PLC|P\.L\.C\.|LLP|L\.L\.P\.))\b"
+    m = re.search(firm_pat, t)
+    if m:
+        return _norm_whitespace(m.group(1))
+
+    # Person-name trustee fallback: "... as Substitute Trustee"
+    m = re.search(
+        r"\b([A-Z][a-z]+(?:\s+[A-Z]\.)?(?:\s+[A-Z][a-z]+){1,2})\s+(?:as\s+)?Substitute Trustee\b",
+        t,
+    )
     if m:
         return _norm_whitespace(m.group(1))
 
     return None
 
 
-# ============================================================
-# TNLEGALPUB LIST + NOTICE PARSER
-# ============================================================
+def _trim_snippet(text: str, max_chars: int) -> str:
+    t = _norm_whitespace(text)
+    if not t:
+        return ""
+    if len(t) <= max_chars:
+        return t
 
-def _tnlegalpub_list_page_url(page: int) -> str:
-    if page <= 1:
-        return "https://tnlegalpub.com/notice_type/foreclosure/"
-    return f"https://tnlegalpub.com/notice_type/foreclosure/page/{page}/"
+    # Keep the first chunk + a little tail (often contains county/sale lines)
+    head = t[: int(max_chars * 0.75)]
+    tail = t[-int(max_chars * 0.20) :]
+    out = f"{head} ... {tail}"
+    return out[:max_chars]
 
 
-def _tnlegalpub_extract_notice_links(html: str) -> list[str]:
-    soup = BeautifulSoup(html, "html.parser")
+# -----------------------------
+# TNLEGALPUB (listing + notice)
+# -----------------------------
+def _tnlegalpub_listing_urls(seed_url: str, max_pages: int):
+    # WordPress taxonomy pagination: /page/2/
+    urls = [seed_url]
+    for p in range(2, max_pages + 1):
+        if seed_url.endswith("/"):
+            urls.append(f"{seed_url}page/{p}/")
+        else:
+            urls.append(f"{seed_url}/page/{p}/")
+    return urls
+
+
+def _tnlegalpub_extract_notice_links(list_html: str, base_url: str):
+    soup = BeautifulSoup(list_html, "html.parser")
     links = []
-    for a in soup.select("article.post h2.entry-title a[href]"):
-        href = (a.get("href") or "").strip()
-        if href.startswith("http"):
-            links.append(href)
-    return links
+    for a in soup.select("h2.entry-title a[href]"):
+        href = a.get("href")
+        if not href:
+            continue
+        u = urljoin(base_url, href)
+        if "/legal_notice/" not in u:
+            continue
+        links.append(u)
+
+    # Dedup preserve order
+    seen = set()
+    out = []
+    for u in links:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
 
 
-def _tnlegalpub_parse_notice(html: str, url: str) -> dict | None:
+def _tnlegalpub_parse_notice_page(notice_url: str, html: str):
     soup = BeautifulSoup(html, "html.parser")
-    container = soup.select_one("main#content") or soup.select_one("div.page-content") or soup.body
-    text = _norm_whitespace(container.get_text(" ", strip=True) if container else soup.get_text(" ", strip=True))
 
-    sale_date_iso = _pick_best_sale_date_iso(text)
-    if not sale_date_iso:
+    title = None
+    h1 = soup.select_one("h1.entry-title")
+    if h1:
+        title = _norm_whitespace(h1.get_text(" ", strip=True))
+
+    # Main content: WordPress commonly uses .entry-content, but fall back to body text
+    content = ""
+    entry = soup.select_one(".entry-content")
+    if entry:
+        content = entry.get_text(" ", strip=True)
+    else:
+        # fallback: find the first article text
+        art = soup.select_one("article")
+        content = art.get_text(" ", strip=True) if art else soup.get_text(" ", strip=True)
+
+    content = _norm_whitespace(content)
+    if not content:
         return None
 
-    county = _extract_county_from_text(text)
-    address = _extract_address_from_text(text)
-    trustee = _extract_trustee_or_firm(text)
-
-    raw_snippet = _truncate(text, MAX_NOTICE_TEXT_CHARS)
+    county = _extract_county_from_text(content)
+    sale_date_iso = _pick_best_sale_date_iso(content)
+    address = _extract_address_from_text(content)
+    trustee = _extract_trustee_or_firm(content)
 
     return {
-        "source": "TNLegalPub",
-        "url": url,
-        "sale_date_iso": sale_date_iso,
+        "title": title,
         "county": county,
+        "sale_date_iso": sale_date_iso,
         "address": address,
-        "trustee_attorney": trustee,
-        "raw_snippet": raw_snippet,
+        "trustee": trustee,
+        "raw_text": content,
+        "url": notice_url,
     }
 
 
-# ============================================================
-# MAIN RUN (TNLEGALPUB ONLY FOR NOW)
-# ============================================================
-
+# -----------------------------
+# MAIN BOT
+# -----------------------------
 def run():
-    print(f"[PublicNoticesBot] SEEDS={SEEDS} allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
+    print(
+        f"[PublicNoticesBot] SEEDS={SEED_URLS_PUBLIC_NOTICES} "
+        f"allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]"
+    )
 
     list_pages_fetched = 0
     notice_links_found = 0
@@ -364,114 +427,148 @@ def run():
     sample_kept = []
     sample_county_missing = []
 
-    seen_keys = set()
+    seen_lead_keys = set()
 
-    # ---- LIST PAGES ----
-    all_links: list[str] = []
-    for page in range(1, MAX_LIST_PAGES + 1):
-        list_url = _tnlegalpub_list_page_url(page)
-        try:
-            html = fetch(list_url)
-            list_pages_fetched += 1
-        except Exception:
-            break
-
-        links = _tnlegalpub_extract_notice_links(html)
-        if not links:
-            break
-
-        all_links.extend(links)
-
-        if page >= 2 and len(set(links)) <= 2:
-            break
-
-    all_links = list(dict.fromkeys(all_links))
-    notice_links_found = len(all_links)
-
-    # ---- NOTICE PAGES ----
-    for notice_url in all_links:
-        try:
-            html = fetch(notice_url)
-            notice_pages_fetched_ok += 1
-        except Exception:
+    for seed in SEED_URLS_PUBLIC_NOTICES:
+        # Only fully implement tnlegalpub right now
+        if "tnlegalpub.com/notice_type/foreclosure" not in seed:
             continue
 
-        parsed = _tnlegalpub_parse_notice(html, notice_url)
-        if not parsed:
-            skipped_no_sale += 1
-            continue
+        base_url = "https://tnlegalpub.com/"
 
-        parsed_ok += 1
+        listing_urls = _tnlegalpub_listing_urls(seed, PUBLIC_NOTICES_MAX_LIST_PAGES)
+        all_notice_links = []
 
-        sale_date_iso = parsed["sale_date_iso"]
-        dts = days_to_sale(sale_date_iso)
+        for u in listing_urls:
+            try:
+                html = fetch(u)
+                list_pages_fetched += 1
+            except Exception:
+                continue
 
-        if dts is None:
-            skipped_no_sale += 1
-            continue
-        if dts < 0:
-            skipped_expired += 1
-            continue
-        if not (_DTS_MIN <= dts <= _DTS_MAX):
-            skipped_outside_window += 1
-            continue
+            links = _tnlegalpub_extract_notice_links(html, base_url=base_url)
+            all_notice_links.extend(links)
 
-        county = parsed.get("county")
-        if not county:
-            skipped_county_missing += 1
-            sample_county_missing.append(f"url={notice_url} guess=?")
-            continue
+            if len(all_notice_links) >= MAX_NOTICE_LINKS_PER_SOURCE:
+                break
 
-        if not _is_allowed_county(county):
-            skipped_out_of_geo += 1
-            continue
+        # Dedup
+        uniq = []
+        seen = set()
+        for u in all_notice_links:
+            if u not in seen:
+                seen.add(u)
+                uniq.append(u)
+        all_notice_links = uniq[:MAX_NOTICE_LINKS_PER_SOURCE]
+        notice_links_found += len(all_notice_links)
 
-        status, score = _triage(dts)
+        # Fetch + parse each notice page
+        for notice_url in all_notice_links:
+            try:
+                notice_html = fetch(notice_url)
+                notice_pages_fetched_ok += 1
+            except Exception:
+                continue
 
-        lead_key = _make_lead_key("TNLEGALPUB", notice_url, county, sale_date_iso, parsed.get("address"))
+            parsed = _tnlegalpub_parse_notice_page(notice_url, notice_html)
+            if not parsed:
+                skipped_short += 1
+                continue
 
-        if lead_key in seen_keys:
-            skipped_dup_in_run += 1
-            continue
-        seen_keys.add(lead_key)
+            parsed_ok += 1
 
-        existing_id = find_existing_by_lead_key(lead_key)
+            county = parsed.get("county")
+            sale_date_iso = parsed.get("sale_date_iso")
 
-        # NEVER overwrite fields with blanks.
-        payload = {
-            "title": f"Foreclosure ({status}) ({county})",
-            "source": parsed["source"],
-            "distress_type": "Foreclosure",
-            "county": county,
-            "sale_date_iso": sale_date_iso,
-            "status": status,
-            "url": notice_url,
-            "lead_key": lead_key,
-            "days_to_sale": dts,
-            "raw_snippet": parsed.get("raw_snippet"),
-        }
+            if not sale_date_iso:
+                skipped_no_sale += 1
+                continue
 
-        if parsed.get("address"):
-            payload["address"] = parsed["address"]
-        if parsed.get("trustee_attorney"):
-            payload["trustee_attorney"] = parsed["trustee_attorney"]
-            payload["contact_info"] = parsed["trustee_attorney"]
+            dts = days_to_sale(sale_date_iso)
+            if dts is None:
+                skipped_no_sale += 1
+                continue
+            if dts < 0:
+                skipped_expired += 1
+                continue
 
-        if not existing_id:
-            payload["score"] = score
+            # County handling
+            if not county:
+                skipped_county_missing += 1
+                sample_county_missing.append(f"url={notice_url} guess=")
+                continue
 
-        props = build_properties(payload)
+            if not _is_allowed_county(county):
+                skipped_out_of_geo += 1
+                continue
+            if TARGET_COUNTIES and county not in TARGET_COUNTIES:
+                skipped_out_of_geo += 1
+                continue
 
-        if existing_id:
-            update_lead(existing_id, props)
-            updated += 1
-        else:
-            create_lead(props)
-            created += 1
+            if not (_DTS_MIN <= dts <= _DTS_MAX):
+                skipped_outside_window += 1
+                continue
 
-        filtered_in += 1
-        if len(sample_kept) < 5:
-            sample_kept.append(f"county={county} sale={sale_date_iso} dts={dts} url={notice_url}")
+            status = _status_from_dts(dts)
+            if status in (None, "EXPIRED"):
+                skipped_kill += 1
+                continue
+
+            address = parsed.get("address") or ""
+            trustee = parsed.get("trustee") or ""
+
+            # Lead key
+            lead_key = make_lead_key(
+                "TNLEGALPUB",
+                notice_url,
+                county,
+                sale_date_iso,
+                address or (parsed.get("title") or ""),
+            )
+
+            if lead_key in seen_lead_keys:
+                skipped_dup_in_run += 1
+                continue
+            seen_lead_keys.add(lead_key)
+
+            existing_id = find_existing_by_lead_key(lead_key)
+
+            score_for_create = _score_from_status(dts, status)
+
+            title = parsed.get("title") or f"Foreclosure Notice ({status})"
+            if address:
+                title = f"{address} ({status})"
+
+            raw_snippet = _trim_snippet(parsed.get("raw_text", ""), MAX_NOTICE_TEXT_CHARS)
+
+            props = build_properties(
+                title=title,
+                source="TNLegalPub",
+                distress_type="Foreclosure",
+                county=county,
+                address=(address if address else None),
+                sale_date_iso=sale_date_iso,
+                trustee_attorney=(trustee if trustee else None),
+                contact_info=(trustee if trustee else None),
+                raw_snippet=raw_snippet,
+                url=notice_url,
+                score=(None if existing_id else score_for_create),
+                status=status,
+                lead_key=lead_key,
+                days_to_sale=dts,
+            )
+
+            if existing_id:
+                update_lead(existing_id, props)
+                updated += 1
+            else:
+                create_lead(props)
+                created += 1
+
+            filtered_in += 1
+
+            if len(sample_kept) < 5:
+                sample_kept.append(f"county={county} sale={sale_date_iso} dts={dts} url={notice_url}")
 
     print(
         "[PublicNoticesBot] summary "
@@ -480,7 +577,9 @@ def run():
         f"filtered_in={filtered_in} created={created} updated={updated} "
         f"skipped_short={skipped_short} skipped_no_sale={skipped_no_sale} skipped_expired={skipped_expired} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
-        f"skipped_kill={skipped_kill} skipped_dup_in_run={skipped_dup_in_run} skipped_county_missing={skipped_county_missing} "
+        f"skipped_kill={skipped_kill} skipped_dup_in_run={skipped_dup_in_run} "
+        f"skipped_county_missing={skipped_county_missing} "
         f"sample_kept={sample_kept} sample_county_missing={sample_county_missing}"
     )
+
     print("[PublicNoticesBot] Done.")
