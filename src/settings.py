@@ -22,12 +22,43 @@ def normalize_county(name: str | None) -> str | None:
     return f"{b} County"
 
 
-# Back-compat alias (some bots import this name)
+# Back-compat alias (some bots import this)
 def normalize_county_full(name: str | None) -> str | None:
     return normalize_county(name)
 
 
+def get_allowed_counties_base() -> set[str]:
+    """
+    Reads allowed counties from env:
+      FALCO_ALLOWED_COUNTIES="Davidson,Williamson,..."
+    Returns a set of base county names (no 'County' suffix).
+    """
+    raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford,Wilson,Sumner")
+    vals = []
+    for part in raw.split(","):
+        p = part.strip()
+        if p:
+            vals.append(p)
+    return {county_base(v) for v in vals if county_base(v)}
+
+
+def is_allowed_county(county_name: str | None) -> bool:
+    """
+    Back-compat function used by multiple bots.
+    Accepts 'Davidson' or 'Davidson County' and checks against env allowlist.
+    """
+    b = county_base(county_name)
+    if not b:
+        return False
+    allowed = get_allowed_counties_base()
+    return b in allowed
+
+
 def within_target_counties(county_name: str | None, target_counties: list[str] | None) -> bool:
+    """
+    Checks an optional *hard restriction* list (from config TARGET_COUNTIES).
+    If target_counties is empty/None => allow.
+    """
     if not target_counties:
         return True
 
@@ -40,7 +71,6 @@ def within_target_counties(county_name: str | None, target_counties: list[str] |
         for t in target_counties
         if county_base(t)
     }
-
     return b.lower() in targets_base
 
 
@@ -50,16 +80,16 @@ def within_target_counties(county_name: str | None, target_counties: list[str] |
 
 def get_dts_window(source: str | None = None):
     """
-    Returns (min_days, max_days) window for a source.
+    Returns (min_days, max_days) window for filtering.
+    Bots may call: get_dts_window("FORECLOSURE_TN") etc.
 
     Uses environment variables:
       FALCO_DTS_MIN
       FALCO_DTS_MAX
 
-    If not set:
-      default = 21 to 90 days
+    Defaults:
+      21 to 90 days
     """
-
     try:
         dts_min = int(os.getenv("FALCO_DTS_MIN", "21"))
     except Exception:
@@ -78,6 +108,11 @@ def get_dts_window(source: str | None = None):
 # ============================================================
 
 def clip_raw_snippet(text: str, max_chars: int | None = None) -> str:
+    """
+    Central place to keep Notion 'Raw Snippet' short so it doesn't become the full notice.
+    Controlled by:
+      FALCO_MAX_RAW_SNIPPET_CHARS (default 1200)
+    """
     if text is None:
         return ""
 
@@ -94,6 +129,7 @@ def clip_raw_snippet(text: str, max_chars: int | None = None) -> str:
     if max_chars <= 0:
         return ""
 
+    # collapse whitespace
     s = " ".join(s.split())
 
     if len(s) <= max_chars:
