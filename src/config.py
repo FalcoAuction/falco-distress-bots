@@ -1,8 +1,7 @@
-# src/config.py
-
 # ============================================================
 # FALCO DISTRESS ENGINE CONFIG
 # ============================================================
+
 
 # ============================================================
 # GEOGRAPHY CONTROL
@@ -100,3 +99,23 @@ HOT_DAYS_THRESHOLD = 14
 
 MAX_NOTICE_LINKS_PER_SOURCE = 200
 MAX_NOTICE_TEXT_CHARS = 8000
+
+
+# ============================================================
+# TIER 1 FILTERS (FalcoFB Phase 1 – Call Ready Focus)
+# ============================================================
+
+# Base county names (no " County" suffix).
+# These are the ONLY counties we want for Phase 1 density.
+ALLOWED_COUNTIES_BASE = [
+    "Davidson",
+    "Williamson",
+    "Rutherford",
+    "Wilson",
+    "Sumner",
+]
+
+# Days-to-sale window for "Call Ready" leads
+# This is your operational outreach band.
+DTS_WINDOW_MIN = 21
+DTS_WINDOW_MAX = 90
