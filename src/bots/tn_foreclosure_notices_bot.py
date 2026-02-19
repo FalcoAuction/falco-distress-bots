@@ -2,6 +2,7 @@
 
 import re
 import hashlib
+import inspect
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -164,17 +165,6 @@ def _parse_notice_container_text(container_text: str):
         "Firm:",
         end_labels=["PP Sale Date:", "Current Sale Date:", "Sale Location:", "Sale Time:", "Auction Vendor:", "County:"],
     )
-    sale_location = _extract_field(
-        container_text,
-        "Sale Location:",
-        end_labels=["Sale Time:", "Auction Vendor:", "County:"],
-    )
-    sale_time = _extract_field(
-        container_text,
-        "Sale Time:",
-        end_labels=["Auction Vendor:", "County:"],
-    )
-    auction_vendor = _extract_field(container_text, "Auction Vendor:", end_labels=None)
 
     sale_date_iso = _pick_sale_date_iso(container_text)
 
@@ -187,9 +177,6 @@ def _parse_notice_container_text(container_text: str):
         "sale_date": sale_date_iso,
         "address": address.strip(),
         "firm": firm.strip() if firm else None,
-        "sale_location": sale_location.strip() if sale_location else None,
-        "sale_time": sale_time.strip() if sale_time else None,
-        "auction_vendor": auction_vendor.strip() if auction_vendor else None,
         "raw_text": container_text.strip(),
     }
 
@@ -230,6 +217,52 @@ def _parse_county_html(html: str):
         leads.append(parsed)
 
     return leads
+
+
+def _call_build_properties(data: dict):
+    """
+    Adapts to build_properties signature without knowing it in advance.
+    Tries:
+      1) build_properties(data) if single-arg function
+      2) build_properties(**filtered_kwargs) where keys match signature
+      3) build_properties(*positional) in common order if signature is positional-only
+    """
+    sig = inspect.signature(build_properties)
+    params = list(sig.parameters.values())
+
+    # Case 1: single positional parameter (often `data` or `lead`)
+    if len(params) == 1 and params[0].kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+        return build_properties(data)
+
+    # Case 2: supports **kwargs
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+        return build_properties(**data)
+
+    # Case 3: strict named parameters — filter to what it accepts
+    accepted = {p.name for p in params if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)}
+    filtered = {k: v for k, v in data.items() if k in accepted}
+    if filtered:
+        return build_properties(**filtered)
+
+    # Case 4: positional-only / unknown — try common order
+    # (title/name, source, county, distress_type, address, sale_date, trustee, contact_info, status, falco_score, raw_snippet, url, lead_key, days_to_sale)
+    common_order = [
+        data.get("title") or data.get("name") or data.get("property_name"),
+        data.get("source"),
+        data.get("county"),
+        data.get("distress_type"),
+        data.get("address"),
+        data.get("sale_date"),
+        data.get("trustee"),
+        data.get("contact_info"),
+        data.get("status"),
+        data.get("falco_score"),
+        data.get("raw_snippet"),
+        data.get("url"),
+        data.get("lead_key"),
+        data.get("days_to_sale"),
+    ]
+    return build_properties(*common_order)
 
 
 def run():
@@ -287,22 +320,27 @@ def run():
                 notice_url=f"{county_url}#{lead.get('notice_id') or ''}",
             )
 
-            props = build_properties(
-                property_name=lead["address"],
-                source="TNForeclosureNotices",
-                county=lead["county"],
-                distress_type="Foreclosure",
-                address=lead["address"],
-                sale_date=lead["sale_date"],
-                trustee=lead["firm"],
-                contact_info=None,
-                status=status_label,
-                falco_score=falco_score,
-                raw_snippet=lead["raw_text"],
-                url=county_url,
-                lead_key=lead_key,
-                days_to_sale=dts,
-            )
+            # Provide multiple aliases for "title" so build_properties can map it.
+            data = {
+                "title": lead["address"],
+                "name": lead["address"],
+                "property_name": lead["address"],
+                "source": "TNForeclosureNotices",
+                "county": lead["county"],
+                "distress_type": "Foreclosure",
+                "address": lead["address"],
+                "sale_date": lead["sale_date"],
+                "trustee": lead["firm"],
+                "contact_info": None,
+                "status": status_label,
+                "falco_score": falco_score,
+                "raw_snippet": lead["raw_text"],
+                "url": county_url,
+                "lead_key": lead_key,
+                "days_to_sale": dts,
+            }
+
+            props = _call_build_properties(data)
 
             existing_id = find_existing_by_lead_key(lead_key)
             if existing_id:
