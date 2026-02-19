@@ -74,6 +74,37 @@ def _clean(s: str | None) -> str:
     return s.strip()
 
 
+def _normalize_city(city_raw: str) -> str:
+    s = _clean(city_raw)
+    if not s:
+        return ""
+    # Remove trailing ", TN" or ", Tennessee ..." if present
+    s = re.sub(r",\s*TN\b.*$", "", s, flags=re.IGNORECASE).strip()
+    s = re.sub(r",\s*Tennessee\b.*$", "", s, flags=re.IGNORECASE).strip()
+    return s
+
+
+def _address_looks_full(addr: str) -> bool:
+    s = _clean(addr).lower()
+    if not s:
+        return False
+    has_state = (" tn " in f" {s} ") or (" tennessee " in f" {s} ") or s.endswith(" tn") or " tennessee" in s
+    has_zip = bool(re.search(r"\b\d{5}(?:-\d{4})?\b", s))
+    return has_state and has_zip
+
+
+def _compose_address(address_raw: str, city_raw: str, zip_raw: str) -> str:
+    address = _clean(address_raw)
+    if _address_looks_full(address):
+        return address
+    city = _normalize_city(city_raw)
+    zip_code = _clean(zip_raw)
+    parts = [p for p in [address, city, "TN", zip_code] if p]
+    out = ", ".join(parts[:2])  # address, city
+    tail = " ".join(parts[2:])  # TN + zip
+    return _clean(f"{out}, {tail}") if tail else out
+
+
 def _parse_date_flex(s: str):
     if not s:
         return None
@@ -264,9 +295,9 @@ def run():
 
             sale_date_str = cols[0]
             cont_date_str = cols[1]
-            city = _clean(cols[2])
-            address = _clean(cols[3])
-            zip_code = _clean(cols[4])
+            city_raw = cols[2]
+            address_raw = cols[3]
+            zip_raw = cols[4]
             county_raw = _clean(cols[5])
             firm_trustee = _clean(cols[6])
 
@@ -307,7 +338,7 @@ def run():
             listing_url = urljoin(BASE_URL, a["href"])
 
             distress_type = "Foreclosure"
-            address_full = _clean(f"{address}, {city}, TN {zip_code}")
+            address_full = _compose_address(address_raw, city_raw, zip_raw)
             title = f"{distress_type} ({status}) ({county_raw})"
 
             lead_key = make_lead_key(
