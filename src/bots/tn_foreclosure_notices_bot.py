@@ -1,5 +1,4 @@
-# src/bots/tn_foreclosure_notices_bot.py
-
+import os
 import re
 import hashlib
 from datetime import datetime
@@ -43,6 +42,31 @@ HEADERS = {
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
 }
+
+_ALLOWED_COUNTIES_BASE = {
+    c.strip() for c in os.getenv(
+        "FALCO_ALLOWED_COUNTIES",
+        "Davidson,Williamson,Rutherford,Wilson,Sumner",
+    ).split(",") if c.strip()
+}
+_DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
+_DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
+
+
+def _county_base(name: str | None) -> str | None:
+    if not name:
+        return None
+    n = " ".join(name.strip().split())
+    if n.lower().endswith(" county"):
+        n = n[:-7].strip()
+    return n
+
+
+def _is_allowed_county(county: str | None) -> bool:
+    base = _county_base(county)
+    if not base:
+        return False
+    return base in _ALLOWED_COUNTIES_BASE
 
 
 def _slugify_county(name: str) -> str:
@@ -122,7 +146,6 @@ def _pick_sale_date_iso(text: str):
 
 
 def _triage_and_score(dts: int):
-    # URGENT 0–7, HOT 8–14, GREEN 15+
     if dts <= 7:
         return "URGENT", 95
     if dts <= 14:
@@ -219,13 +242,19 @@ def _parse_county_html(html: str):
 
 
 def run():
-    print("TNForeclosureNoticeBot starting...")
+    print(f"TNForeclosureNoticeBot starting... allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
 
-    total_written = 0
+    fetched_notices = 0
+    parsed_ok = 0
+    filtered_in = 0
+
     created = 0
     updated = 0
+
+    skipped_out_of_geo = 0
     skipped_expired = 0
-    parsed_ok = 0
+    skipped_outside_window = 0
+
     counties_hit = 0
 
     http_ok_pages = 0
@@ -235,6 +264,9 @@ def run():
     session = requests.Session()
 
     for county_name in COUNTY_NAMES:
+        if county_name not in _ALLOWED_COUNTIES_BASE:
+            continue
+
         slug = _slugify_county(county_name)
         county_url = COUNTY_URL_FMT.format(slug=slug)
 
@@ -255,12 +287,21 @@ def run():
         counties_hit += 1
 
         for lead in leads:
-            parsed_ok += 1
+            fetched_notices += 1
+
+            if not _is_allowed_county(lead.get("county")):
+                skipped_out_of_geo += 1
+                continue
 
             dts = days_to_sale(lead["sale_date_iso"])
             if dts is None or dts < 0:
                 skipped_expired += 1
                 continue
+            if not (_DTS_MIN <= dts <= _DTS_MAX):
+                skipped_outside_window += 1
+                continue
+
+            parsed_ok += 1
 
             status_label, score = _triage_and_score(dts)
 
@@ -274,13 +315,10 @@ def run():
             )
 
             payload = {
-                # Required inputs (your repo’s build_properties expectations)
                 "sale_date_iso": lead["sale_date_iso"],
                 "trustee_attorney": lead["trustee_attorney"],
                 "score": score,
                 "contact_info": lead["trustee_attorney"] or "",
-
-                # Full Notion mapping
                 "title": lead["address"],
                 "source": "TNForeclosureNotices",
                 "county": lead["county"],
@@ -303,11 +341,12 @@ def run():
                 create_lead(props)
                 created += 1
 
-            total_written += 1
+            filtered_in += 1
 
     print(
-        "TNForeclosureNoticeBot complete: "
-        f"total_written={total_written} created={created} updated={updated} "
-        f"skipped_expired={skipped_expired} parsed_ok={parsed_ok} counties_hit={counties_hit} "
-        f"http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other}"
+        "TNForeclosureNoticeBot summary: "
+        f"fetched_notices={fetched_notices} parsed_ok={parsed_ok} filtered_in={filtered_in} "
+        f"created={created} updated={updated} "
+        f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} skipped_outside_window={skipped_outside_window} "
+        f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other}"
     )
