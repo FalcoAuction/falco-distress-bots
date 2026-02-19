@@ -1,61 +1,56 @@
 # src/settings.py
 """
-Centralized runtime settings + small helpers shared by bots.
+Shared settings/helpers for Falco distress bots.
 
-Bots should read:
-- Allowed counties (base names) from env FALCO_ALLOWED_COUNTIES
-- Days-to-sale window from env FALCO_DTS_MIN / FALCO_DTS_MAX
-- Optional raw snippet clipping limit from env FALCO_MAX_RAW_SNIPPET_CHARS
+Purpose:
+- Centralize env/config parsing so bots don't duplicate logic.
+- Provide stable helper functions that bots can import:
+    - get_allowed_counties()
+    - get_dts_window()
+    - within_target_counties()
+    - clip_raw_snippet()
+    - county_base()
+    - normalize_county()
+
+Conventions:
+- "Allowed counties" are enforced first (from env or config fallback).
+- "Target counties" is optional (from config.py). If empty => statewide allowed.
+- County comparisons are done on the BASE name (e.g., "Davidson" matches "Davidson County").
 """
 
 from __future__ import annotations
 
 import os
-from typing import Iterable
+import re
+from typing import Iterable, Tuple, Optional
 
 
-# ----------------------------
-# Counties
-# ----------------------------
-
-DEFAULT_ALLOWED_COUNTIES = ["Davidson", "Williamson", "Rutherford", "Wilson", "Sumner"]
-
-
-def get_allowed_counties_base() -> set[str]:
-    """
-    Returns base county names like {"Davidson","Sumner"} (no 'County' suffix).
-    Uses env var FALCO_ALLOWED_COUNTIES (comma-separated). Falls back to defaults.
-    """
-    raw = os.getenv("FALCO_ALLOWED_COUNTIES", ",".join(DEFAULT_ALLOWED_COUNTIES))
-    items = []
-    for part in raw.split(","):
-        p = part.strip()
-        if not p:
-            continue
-        # normalize: strip trailing "County" if user included it
-        if p.lower().endswith(" county"):
-            p = p[:-7].strip()
-        items.append(p)
-
-    return set(items) if items else set(DEFAULT_ALLOWED_COUNTIES)
-
+# -----------------------------
+# County normalization
+# -----------------------------
 
 def county_base(name: str | None) -> str | None:
     """
-    "Davidson County" -> "Davidson"
-    "Davidson" -> "Davidson"
+    Converts "Davidson County" -> "Davidson"
+    Converts " davidson   county " -> "davidson" (base returned in original casing? we return normalized casing)
     """
     if not name:
         return None
     n = " ".join(str(name).strip().split())
+    if not n:
+        return None
+    n = re.sub(r"\s+", " ", n).strip()
+    # remove trailing "County" (case-insensitive)
     if n.lower().endswith(" county"):
         n = n[:-7].strip()
-    return n or None
+    return n if n else None
 
 
 def normalize_county(name: str | None) -> str | None:
     """
-    Ensures 'X County' format.
+    Ensures county is stored as "X County".
+    - "Davidson" -> "Davidson County"
+    - "Davidson County" -> "Davidson County"
     """
     b = county_base(name)
     if not b:
@@ -63,36 +58,53 @@ def normalize_county(name: str | None) -> str | None:
     return f"{b} County"
 
 
-def is_allowed_county(county_name: str | None, allowed_bases: set[str] | None = None) -> bool:
+# -----------------------------
+# Allowed Counties / DTS window
+# -----------------------------
+
+_DEFAULT_ALLOWED = "Davidson,Williamson,Rutherford,Wilson,Sumner"
+_DEFAULT_DTS_MIN = 21
+_DEFAULT_DTS_MAX = 90
+
+def get_allowed_counties() -> set[str]:
     """
-    True if county base exists in allowed bases.
+    Returns allowed county BASE names (e.g., {"Davidson","Wilson"}).
+
+    Priority:
+    1) env var FALCO_ALLOWED_COUNTIES = "Davidson,Wilson,..."
+    2) default list in this module
+
+    NOTE: This returns BASE names only (no "County" suffix).
     """
-    allowed = allowed_bases or get_allowed_counties_base()
-    b = county_base(county_name)
-    if not b:
-        return False
-    return b in allowed
+    raw = os.getenv("FALCO_ALLOWED_COUNTIES", _DEFAULT_ALLOWED)
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    bases = set()
+    for p in parts:
+        b = county_base(p)
+        if b:
+            bases.add(b)
+    return bases
 
 
-# ----------------------------
-# DTS (days-to-sale) window
-# ----------------------------
-
-def get_dts_window(default_min: int = 21, default_max: int = 90) -> tuple[int, int]:
+def get_dts_window() -> Tuple[int, int]:
     """
-    Reads FALCO_DTS_MIN/FALCO_DTS_MAX, returns (min,max) ints.
+    Returns (min_days, max_days) until sale.
+
+    Priority:
+    1) env vars FALCO_DTS_MIN / FALCO_DTS_MAX
+    2) defaults in this module
     """
     try:
-        dmin = int(os.getenv("FALCO_DTS_MIN", str(default_min)))
+        dmin = int(os.getenv("FALCO_DTS_MIN", str(_DEFAULT_DTS_MIN)))
     except Exception:
-        dmin = default_min
+        dmin = _DEFAULT_DTS_MIN
 
     try:
-        dmax = int(os.getenv("FALCO_DTS_MAX", str(default_max)))
+        dmax = int(os.getenv("FALCO_DTS_MAX", str(_DEFAULT_DTS_MAX)))
     except Exception:
-        dmax = default_max
+        dmax = _DEFAULT_DTS_MAX
 
-    # safety normalize
+    # safety
     if dmin < 0:
         dmin = 0
     if dmax < dmin:
@@ -101,54 +113,86 @@ def get_dts_window(default_min: int = 21, default_max: int = 90) -> tuple[int, i
     return dmin, dmax
 
 
-# ----------------------------
+# -----------------------------
+# Target counties (optional strict filter)
+# -----------------------------
+
+def within_target_counties(county_name: str | None, target_counties: list[str] | None) -> bool:
+    """
+    Enforces optional TARGET_COUNTIES from config.py.
+
+    - If target_counties is empty/None => allow everything (True)
+    - Otherwise county must match one of target_counties (case-insensitive),
+      with or without the "County" suffix.
+    """
+    if not target_counties:
+        return True
+
+    b = county_base(county_name)
+    if not b:
+        return False
+
+    targets_base = set()
+    for t in target_counties:
+        tb = county_base(t)
+        if tb:
+            targets_base.add(tb.lower())
+
+    return b.lower() in targets_base
+
+
+# -----------------------------
 # Raw snippet clipping
-# ----------------------------
+# -----------------------------
 
-def clip_raw_snippet(text: str, max_chars: int | None = None) -> str:
+def clip_raw_snippet(text: str | None, limit: int | None = None) -> str:
     """
-    Hard-cap raw notice text so Notion doesn't get flooded.
-    Default cap can be set via env var FALCO_MAX_RAW_SNIPPET_CHARS.
+    Clips large raw notice text so Notion doesn't get flooded.
+
+    Defaults:
+    - limit from env FALCO_RAW_SNIPPET_MAX (int) OR 1200 chars.
+
+    Behavior:
+    - Normalize whitespace
+    - Clip to limit with a clear suffix
     """
-    if text is None:
+    if not text:
         return ""
 
-    s = str(text).strip()
-    if not s:
-        return ""
+    try:
+        max_chars = int(os.getenv("FALCO_RAW_SNIPPET_MAX", "1200"))
+    except Exception:
+        max_chars = 1200
 
-    # Prefer explicit arg, else env var, else safe default
-    if max_chars is None:
+    if limit is not None:
         try:
-            max_chars = int(os.getenv("FALCO_MAX_RAW_SNIPPET_CHARS", "1200"))
+            max_chars = int(limit)
         except Exception:
-            max_chars = 1200
-
-    if max_chars <= 0:
-        return ""
+            pass
 
     # normalize whitespace
-    s = " ".join(s.split())
+    cleaned = re.sub(r"\s+", " ", str(text)).strip()
 
-    if len(s) <= max_chars:
-        return s
+    if max_chars <= 0:
+        return cleaned
 
-    return s[: max_chars - 3].rstrip() + "..."
+    if len(cleaned) <= max_chars:
+        return cleaned
 
-
-# ----------------------------
-# Minor shared helpers
-# ----------------------------
-
-def env_bool(key: str, default: bool = False) -> bool:
-    v = os.getenv(key)
-    if v is None:
-        return default
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return cleaned[: max_chars - 40].rstrip() + " ... [clipped]"
 
 
-def env_int(key: str, default: int) -> int:
-    try:
-        return int(os.getenv(key, str(default)))
-    except Exception:
-        return default
+# -----------------------------
+# Convenience checks (optional)
+# -----------------------------
+
+def is_allowed_county(county_name: str | None, allowed_bases: Optional[set[str]] = None) -> bool:
+    """
+    Checks whether the given county is in allowed list.
+    Uses base matching ("Davidson" matches "Davidson County").
+    """
+    allowed_bases = allowed_bases or get_allowed_counties()
+    b = county_base(county_name)
+    if not b:
+        return False
+    return b in allowed_bases
