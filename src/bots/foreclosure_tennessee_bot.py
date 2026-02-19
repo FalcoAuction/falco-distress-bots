@@ -1,5 +1,4 @@
-# src/bots/foreclosure_tennessee_bot.py
-
+import os
 import re
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -17,6 +16,31 @@ from ..scoring import days_to_sale
 
 BASE_URL = "https://foreclosuretennessee.com/"
 MAX_PAGES_CAP = 25  # safety cap
+
+_ALLOWED_COUNTIES_BASE = {
+    c.strip() for c in os.getenv(
+        "FALCO_ALLOWED_COUNTIES",
+        "Davidson,Williamson,Rutherford,Wilson,Sumner",
+    ).split(",") if c.strip()
+}
+_DTS_MIN = int(os.getenv("FALCO_DTS_MIN", "30"))
+_DTS_MAX = int(os.getenv("FALCO_DTS_MAX", "75"))
+
+
+def _county_base(name: str | None) -> str | None:
+    if not name:
+        return None
+    n = " ".join(name.strip().split())
+    if n.lower().endswith(" county"):
+        n = n[:-7].strip()
+    return n
+
+
+def _is_allowed_county(county: str | None) -> bool:
+    base = _county_base(county)
+    if not base:
+        return False
+    return base in _ALLOWED_COUNTIES_BASE
 
 
 def _parse_date_flex(s: str):
@@ -88,7 +112,6 @@ def _has_real_rows(soup: BeautifulSoup) -> bool:
     rows = _extract_rows(soup)
     if not rows:
         return False
-    # ignore pagination junk row if present
     for r in rows:
         cols = [c.get_text(strip=True) for c in r.find_all("td")]
         if len(cols) >= 8:
@@ -104,37 +127,22 @@ def _get_page_html(url: str) -> str | None:
 
 
 def _candidate_page_urls(page_num: int, page_size: int = 20):
-    """
-    Common non-WP paging patterns. We'll probe these and pick the first that works.
-    page_num is 1-indexed.
-    """
-    # DataTables style (start/length)
     start = (page_num - 1) * page_size
     return [
-        # Query param paging
         f"{BASE_URL}?page={page_num}",
         f"{BASE_URL}?paged={page_num}",
         f"{BASE_URL}?pg={page_num}",
-        # Offset paging
         f"{BASE_URL}?start={start}&length={page_size}",
         f"{BASE_URL}?offset={start}&limit={page_size}",
-        # Another common pattern
         f"{BASE_URL}?p={page_num}",
     ]
 
 
 def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int):
-    """
-    Try to find a working paging scheme by probing page 2.
-    Returns a function(page_num)->url, or None if no paging supported.
-    """
     if total_pages <= 1:
         return lambda n: BASE_URL
 
-    # Probe for the page size from the "Page size" select if present, else assume 20
     page_size = 20
-    # not strictly needed; keep simple
-
     probe_urls = _candidate_page_urls(2, page_size=page_size)
 
     for u in probe_urls:
@@ -144,7 +152,6 @@ def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int)
         soup = BeautifulSoup(html, "html.parser")
         if _has_real_rows(soup):
             print(f"[ForeclosureTNBot] pagination_detected url_pattern_example={u}")
-            # Determine which pattern matched and build closure
             if "?page=" in u:
                 return lambda n: f"{BASE_URL}?page={n}"
             if "?paged=" in u:
@@ -158,12 +165,11 @@ def _detect_paging_url_builder(first_page_soup: BeautifulSoup, total_pages: int)
             if "?p=" in u:
                 return lambda n: f"{BASE_URL}?p={n}"
 
-    # If nothing worked, site may only show first page without server-side paging
     return None
 
 
 def run():
-    print(f"[ForeclosureTNBot] seed={BASE_URL}")
+    print(f"[ForeclosureTNBot] seed={BASE_URL} allowed_counties={sorted(_ALLOWED_COUNTIES_BASE)} dts_window=[{_DTS_MIN},{_DTS_MAX}]")
 
     html1 = _get_page_html(BASE_URL)
     if not html1:
@@ -180,16 +186,14 @@ def run():
         url_builder = lambda n: BASE_URL
         total_pages = 1
 
-    total_written = 0
-    green = 0
-    hot = 0
-    urgent = 0
-    monitor = 0
-
+    fetched_rows = 0
+    parsed_rows = 0
+    filtered_in = 0
     created = 0
     updated = 0
 
     skipped_out_of_geo = 0
+    skipped_outside_window = 0
     skipped_no_date = 0
     skipped_expired = 0
     skipped_kill = 0
@@ -198,7 +202,6 @@ def run():
 
     for page in range(1, total_pages + 1):
         url = url_builder(page)
-
         html = html1 if page == 1 and url == BASE_URL else _get_page_html(url)
         if not html:
             print(f"[ForeclosureTNBot] fetch failed page={page} url={url}")
@@ -206,6 +209,7 @@ def run():
 
         soup = BeautifulSoup(html, "html.parser")
         rows = _extract_rows(soup)
+        fetched_rows += len(rows)
         print(f"[ForeclosureTNBot] page={page} rows={len(rows)} url={url}")
 
         for row in rows:
@@ -214,12 +218,12 @@ def run():
             if len(cols) < 8:
                 skipped_bad_row += 1
                 continue
-
             if len(cols) == 1 and "items in" in cols[0].lower():
                 skipped_bad_row += 1
                 continue
 
-            # Verified column order:
+            parsed_rows += 1
+
             sale_date_str = cols[0]
             cont_date_str = cols[1]
             city = cols[2]
@@ -230,6 +234,9 @@ def run():
 
             county = _normalize_county(county_raw)
 
+            if not _is_allowed_county(county):
+                skipped_out_of_geo += 1
+                continue
             if TARGET_COUNTIES and county not in TARGET_COUNTIES:
                 skipped_out_of_geo += 1
                 continue
@@ -240,23 +247,20 @@ def run():
                 continue
 
             dts = days_to_sale(sale_date_iso)
-            if dts is not None and dts < 0:
+            if dts is None:
+                skipped_no_date += 1
+                continue
+            if dts < 0:
                 skipped_expired += 1
+                continue
+            if not (_DTS_MIN <= dts <= _DTS_MAX):
+                skipped_outside_window += 1
                 continue
 
             status = _status_from_dts(dts)
             if status in (None, "EXPIRED"):
                 skipped_kill += 1
                 continue
-
-            if status == "GREEN":
-                green += 1
-            elif status == "HOT":
-                hot += 1
-            elif status == "URGENT":
-                urgent += 1
-            else:
-                monitor += 1
 
             a = row.select_one('a[href*="Foreclosure-Listing"]')
             if not a or not a.get("href"):
@@ -277,7 +281,6 @@ def run():
             )
 
             existing_id = find_existing_by_lead_key(lead_key)
-
             score_for_create = _falco_score_from_status(dts, status)
 
             props = build_properties(
@@ -291,10 +294,10 @@ def run():
                 contact_info=firm_trustee,
                 raw_snippet=f"orig_sale={sale_date_str} cont={cont_date_str} page={page}",
                 url=listing_url,
-                score=(None if existing_id else score_for_create),  # ✅ create-only score
+                score=(None if existing_id else score_for_create),
                 status=status,
                 lead_key=lead_key,
-                days_to_sale_num=dts,
+                days_to_sale=dts,
             )
 
             if existing_id:
@@ -304,14 +307,14 @@ def run():
                 create_lead(props)
                 created += 1
 
-            total_written += 1
+            filtered_in += 1
 
     print(
         "[ForeclosureTNBot] summary "
-        f"total_written={total_written} green={green} hot={hot} urgent={urgent} monitor={monitor} "
+        f"fetched_rows={fetched_rows} parsed_rows={parsed_rows} filtered_in={filtered_in} "
         f"created={created} updated={updated} "
-        f"skipped_out_of_geo={skipped_out_of_geo} skipped_no_date={skipped_no_date} "
-        f"skipped_expired={skipped_expired} skipped_kill={skipped_kill} "
-        f"skipped_bad_row={skipped_bad_row} skipped_no_link={skipped_no_link}"
+        f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
+        f"skipped_no_date={skipped_no_date} skipped_expired={skipped_expired} "
+        f"skipped_kill={skipped_kill} skipped_bad_row={skipped_bad_row} skipped_no_link={skipped_no_link}"
     )
     print("[ForeclosureTNBot] Done.")
