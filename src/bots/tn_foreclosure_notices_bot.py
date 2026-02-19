@@ -13,7 +13,7 @@ from ..notion_client import (
     update_lead,
     find_existing_by_lead_key,
 )
-from ..scoring import days_to_sale, score_v2, label
+from ..scoring import days_to_sale
 from ..utils import make_lead_key
 
 BASE_URL = "https://tnforeclosurenotices.com/"
@@ -121,6 +121,15 @@ def _pick_sale_date_iso(text: str):
     return None
 
 
+def _triage_and_score(dts: int):
+    # Mirrors your current thresholds: URGENT 0–7, HOT 8–14, GREEN 15+
+    if dts <= 7:
+        return "URGENT", 95
+    if dts <= 14:
+        return "HOT", 80
+    return "GREEN", 65
+
+
 def _parse_notice_container_text(container_text: str):
     m = re.search(r"(TNFN#\d+)", container_text)
     if not m:
@@ -210,20 +219,6 @@ def _parse_county_html(html: str):
     return leads
 
 
-def _coerce_score(score_out):
-    # score_v2 may return: number OR (score, flags) OR {"score": x, ...}
-    if isinstance(score_out, (int, float)):
-        return float(score_out)
-    if isinstance(score_out, dict):
-        if "score" in score_out and isinstance(score_out["score"], (int, float)):
-            return float(score_out["score"])
-    if isinstance(score_out, (list, tuple)):
-        for v in score_out:
-            if isinstance(v, (int, float)):
-                return float(v)
-    return None
-
-
 def run():
     print("TNForeclosureNoticeBot starting...")
 
@@ -268,15 +263,7 @@ def run():
                 skipped_expired += 1
                 continue
 
-            has_contact = bool(lead.get("firm") or lead.get("auction_vendor"))
-            flags = []
-            score_out = score_v2(lead["county"], dts, flags, has_contact)
-            falco_score = _coerce_score(score_out)
-            if falco_score is None:
-                # If scoring shape is unexpected, skip cleanly (avoids crashing run_all)
-                continue
-
-            status_label = label(falco_score)
+            status_label, falco_score = _triage_and_score(dts)
 
             lead_key = make_lead_key(
                 distress_type="Foreclosure",
