@@ -354,7 +354,7 @@ def run():
                     "sale_date_iso": sale_date_iso,
                     "trustee_attorney": "",
                     "contact_info": "",
-                    "raw_snippet": text[:2000],
+                    "raw_snippet": text[:800],
                     "url": notice_url,
                     "status": status,
                     "score": score,
