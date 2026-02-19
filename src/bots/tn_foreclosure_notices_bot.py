@@ -1,6 +1,7 @@
 # src/bots/tn_foreclosure_notices_bot.py
 
 import re
+import hashlib
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -14,7 +15,6 @@ from ..notion_client import (
     find_existing_by_lead_key,
 )
 from ..scoring import days_to_sale
-from ..utils import make_lead_key
 
 BASE_URL = "https://tnforeclosurenotices.com/"
 COUNTY_URL_FMT = urljoin(BASE_URL, "results/counties/{slug}/")
@@ -122,12 +122,25 @@ def _pick_sale_date_iso(text: str):
 
 
 def _triage_and_score(dts: int):
-    # Mirrors your current thresholds: URGENT 0–7, HOT 8–14, GREEN 15+
+    # URGENT 0–7, HOT 8–14, GREEN 15+
     if dts <= 7:
         return "URGENT", 95
     if dts <= 14:
         return "HOT", 80
     return "GREEN", 65
+
+
+def _make_lead_key(distress_type: str, county: str, sale_date: str, address: str, trustee: str | None, notice_url: str):
+    parts = [
+        (distress_type or "").strip().lower(),
+        (county or "").strip().lower(),
+        (sale_date or "").strip().lower(),
+        (address or "").strip().lower(),
+        (trustee or "").strip().lower(),
+        (notice_url or "").strip().lower(),
+    ]
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def _parse_notice_container_text(container_text: str):
@@ -265,7 +278,7 @@ def run():
 
             status_label, falco_score = _triage_and_score(dts)
 
-            lead_key = make_lead_key(
+            lead_key = _make_lead_key(
                 distress_type="Foreclosure",
                 county=lead["county"],
                 sale_date=lead["sale_date"],
