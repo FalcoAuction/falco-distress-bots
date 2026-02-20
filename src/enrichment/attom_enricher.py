@@ -43,69 +43,150 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
+def _status_msg(payload: Dict[str, Any]) -> str:
+    try:
+        s = payload.get("status") or {}
+        if isinstance(s, dict):
+            return str(s.get("msg") or s.get("message") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _looks_like_no_result(payload: Dict[str, Any]) -> bool:
+    msg = (_status_msg(payload) or "").lower()
+    if "successwithoutresult" in msg:
+        return True
+    # some responses return empty property[]
+    prop = payload.get("property")
+    if isinstance(prop, list) and len(prop) == 0:
+        return True
+    return False
+
+
+def _clean_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _strip_zip(s: str) -> str:
+    return re.sub(r"\b\d{5}(?:-\d{4})?\b", "", s or "").strip(" ,")
+
+
+def _normalize_state(st: str) -> str:
+    st = (st or "").strip().upper()
+    if len(st) == 2 and st.isalpha():
+        return st
+    # fall back (we're TN-only right now)
+    return "TN"
+
+
 def _parse_address(addr: str) -> Tuple[str, str]:
     """
-    Returns (address1, address2) where:
-      address1 = street line
-      address2 = "City, ST" (ATTOM tenant requires both)
+    Returns (address1, address2='City, ST') for ATTOM tenant.
 
-    Input examples:
-      "1409 Scarcroft Lane, Nashville, TN 37221"
-      "323 WITHAM COURT, GOODLETTSVILLE, TN 37072"
-      "98 Randy Road, Madison, TN 37115"
+    Handles messy inputs like:
+      "409-A Eastboro Drive, Nashville, Tennessee 37209, Nashville, TN 37209"
+      "98 Randy Road,\r\nMadison, TN, Madison, TN 37115"
+      "2654 Fizer Road Memphis"  (tries to infer city if last token is a known city word)
     """
-    addr = str(addr or "").strip()
-    if not addr:
+    raw = _clean_spaces(str(addr or ""))
+    if not raw:
         return "", ""
 
-    # Split by commas first (best case)
-    parts = [p.strip() for p in addr.split(",") if p.strip()]
+    # Normalize commas and remove duplicate whitespace/newlines
+    raw = raw.replace("\n", " ").replace("\r", " ")
+    raw = _clean_spaces(raw)
+
+    # Split by commas
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+
+    # Helper: if we see "Tennessee" convert to TN
+    def fix_state_token(token: str) -> str:
+        t = (token or "").strip()
+        if t.lower() == "tennessee":
+            return "TN"
+        return t
+
+    # Try canonical: street, city, state/zip...
     if len(parts) >= 3:
         street = parts[0]
         city = parts[1]
-        # state part might include zip
-        st_tokens = parts[2].split()
-        st = st_tokens[0].upper() if st_tokens else "TN"
-        if len(st) != 2:
-            st = "TN"
-        return street, f"{city}, {st}"
+        st_part = _strip_zip(parts[2])
+        st_tokens = [fix_state_token(t) for t in st_part.replace(",", " ").split() if t.strip()]
+        st = _normalize_state(st_tokens[0] if st_tokens else "TN")
 
+        # If city itself contains "TN" etc, clean it
+        city = _strip_zip(city)
+        city = re.sub(r"\bTN\b", "", city, flags=re.I).strip(" ,")
+        city = _clean_spaces(city)
+
+        if street and city:
+            return street, f"{city}, {st}"
+
+    # If two parts: street + (city/state/zip)
     if len(parts) == 2:
         street = parts[0]
-        # second part might be "Nashville, TN 37209" collapsed or "Nashville TN 37209"
-        tail = parts[1]
-        tokens = tail.replace(",", " ").split()
+        tail = _strip_zip(parts[1])
+        tail_tokens = [fix_state_token(t) for t in tail.replace(",", " ").split() if t.strip()]
+
         st = "TN"
-        if len(tokens) >= 2 and len(tokens[-2]) == 2 and tokens[-2].isalpha():
-            st = tokens[-2].upper()
-            city = " ".join(tokens[:-2]).strip()
-        elif len(tokens) >= 1:
-            # sometimes it's just city
-            city = " ".join([t for t in tokens if not (t.isdigit() and len(t) == 5)]).strip()
-        else:
-            city = tail
-        city = city.strip()
+        city_tokens = tail_tokens[:]
+        # find state token position if present
+        for i, t in enumerate(tail_tokens):
+            if len(t) == 2 and t.isalpha():
+                st = _normalize_state(t)
+                city_tokens = tail_tokens[:i]
+                break
+
+        city = _clean_spaces(" ".join(city_tokens))
+        city = re.sub(r"\bTN\b", "", city, flags=re.I).strip(" ,")
         if not city:
             city = "Nashville"
         return street, f"{city}, {st}"
 
-    # No commas: try heuristic "street ... city state zip"
-    tokens = addr.split()
-    # find state token
+    # No commas: heuristic
+    tokens = raw.split()
+    # look for state token
     st_idx = None
     for i, t in enumerate(tokens):
-        if len(t) == 2 and t.isalpha() and t.upper() in ("TN", "KY", "AL", "MS", "GA", "NC", "SC", "VA", "AR"):
+        tt = fix_state_token(t).upper()
+        if tt in ("TN", "KY", "AL", "MS", "GA", "NC", "SC", "VA", "AR"):
             st_idx = i
             break
     if st_idx is not None and st_idx >= 1:
-        st = tokens[st_idx].upper()
+        st = _normalize_state(tokens[st_idx])
+        # assume token before state is city
         city = tokens[st_idx - 1]
         street = " ".join(tokens[: st_idx - 1]).strip()
-        if street:
+        if street and city:
             return street, f"{city}, {st}"
 
-    # Fallback: assume Nashville, TN (keeps system moving)
-    return addr, "Nashville, TN"
+    # Last-resort: if last token is alphabetic, treat it as city (common bad input)
+    if len(tokens) >= 3 and tokens[-1].isalpha():
+        city = tokens[-1]
+        street = " ".join(tokens[:-1]).strip()
+        return street, f"{city}, TN"
+
+    # fallback
+    return raw, "Nashville, TN"
+
+
+def _extract_avm_low_high_conf(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    try:
+        prop_list = avm_payload.get("property")
+        if isinstance(prop_list, list) and prop_list:
+            prop = prop_list[0]
+        else:
+            prop = {}
+        avm = prop.get("avm") if isinstance(prop, dict) else {}
+        if not isinstance(avm, dict):
+            avm = {}
+        low = _safe_float(avm.get("valueRangeLow"))
+        high = _safe_float(avm.get("valueRangeHigh"))
+        conf = _safe_float(avm.get("confidenceScore"))
+        return low, high, conf
+    except Exception:
+        return None, None, None
 
 
 def run() -> Dict[str, int]:
@@ -130,6 +211,7 @@ def run() -> Dict[str, int]:
     pages = query_database(filter_obj, page_size=50, max_pages=10)
 
     enriched = 0
+    enriched_with_value = 0
     skipped_missing_address = 0
     skipped_already_enriched = 0
     skipped_no_match = 0
@@ -150,8 +232,8 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # skip if already enriched
-        if (fields.get("estimated_value_low") or fields.get("estimated_value_high")) or str(fields.get("enrichment_json") or "").strip():
+        # skip if already enriched WITH VALUE
+        if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
@@ -162,29 +244,37 @@ def run() -> Dict[str, int]:
 
         try:
             detail = client.property_detail(address1=address1, address2=address2)
+            if _looks_like_no_result(detail):
+                skipped_no_match += 1
+                if DEBUG:
+                    print(f"[ATTOM][DEBUG] no-result detail {address1} | {address2} msg={_status_msg(detail)}")
+                continue
+
             avm = client.avm_detail(address1=address1, address2=address2)
+            if _looks_like_no_result(avm):
+                skipped_no_match += 1
+                if DEBUG:
+                    print(f"[ATTOM][DEBUG] no-result avm {address1} | {address2} msg={_status_msg(avm)}")
+                continue
 
-            avm_low = None
-            avm_high = None
-            avm_conf = None
+            avm_low, avm_high, avm_conf = _extract_avm_low_high_conf(avm)
 
-            try:
-                prop = (avm.get("property") or [{}])[0]
-                avm_obj = prop.get("avm") or {}
-                avm_low = _safe_float(avm_obj.get("valueRangeLow"))
-                avm_high = _safe_float(avm_obj.get("valueRangeHigh"))
-                avm_conf = _safe_float(avm_obj.get("confidenceScore"))
-            except Exception:
-                pass
-
-            bundle = {"attom_detail": detail, "attom_avm": avm, "meta": {"address1": address1, "address2": address2}}
-
-            write_obj = {
-                "estimated_value_low": avm_low,
-                "estimated_value_high": avm_high,
-                "enrichment_confidence": avm_conf,
-                "enrichment_json": _clip_json(bundle),
+            bundle = {
+                "attom_detail": detail,
+                "attom_avm": avm,
+                "meta": {"address1": address1, "address2": address2},
             }
+
+            write_obj: Dict[str, Any] = {
+                "enrichment_json": _clip_json(bundle),
+                "enrichment_confidence": avm_conf,
+            }
+
+            # Only write value fields if we actually got them
+            if avm_low is not None or avm_high is not None:
+                write_obj["estimated_value_low"] = avm_low
+                write_obj["estimated_value_high"] = avm_high
+                enriched_with_value += 1
 
             props = build_extra_properties(write_obj)
             update_lead(page_id, props)
@@ -203,6 +293,7 @@ def run() -> Dict[str, int]:
 
     summary = {
         "enriched_count": enriched,
+        "enriched_with_value_count": enriched_with_value,
         "skipped_enrich_missing_address": skipped_missing_address,
         "skipped_enrich_already_enriched": skipped_already_enriched,
         "skipped_enrich_no_match": skipped_no_match,
