@@ -14,14 +14,10 @@ from ..notion_client import (
     build_extra_properties,
     update_lead,
 )
-from ..settings import get_dts_window
+from ..settings import get_dts_window, is_allowed_county
 from .attom_client import AttomClient, AttomError
 
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
-
-
-# Stage 1 geo constraints (hard rule)
-ALLOWED_COUNTIES = ["Davidson", "Williamson", "Rutherford", "Wilson", "Sumner"]
 
 
 def _clip_json(obj: Any, max_chars: int = 1800) -> str:
@@ -205,13 +201,111 @@ def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _already_has_attom_avm(enrichment_json: str) -> bool:
+# =========================================================
+# INSTITUTIONAL / LOW-PROBABILITY FILTER (TN-native)
+# =========================================================
+
+_DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS = [
+    # TN trustee mills / high-volume foreclosure firms observed in your Notion export
+    "mackie wolf zientz & mann",
+    "mackie, wolf, zientz & mann",
+    "western progressive",
+    "winchester sellers foster & steele",
+    "henry, henry & underwood",
+    "kizer, bonds, hughes & bowen",
+    "crawford & von keller",
+    "burr & forman",
+    "polsinelli",
+]
+
+_DEFAULT_INSTITUTIONAL_CONTEXT_KEYWORDS = [
+    # optional extra context flags (kept minimal; only add if you actually see them in your pipeline)
+    # (leave empty by default to avoid false positives)
+]
+
+
+def _load_keyword_list(env_var: str, default_list: list[str]) -> list[str]:
+    raw = os.getenv(env_var, "").strip()
+    if not raw:
+        return default_list[:]
+    parts = []
+    for p in raw.split(","):
+        p = _clean_spaces(p).lower()
+        if p:
+            parts.append(p)
+    return parts or default_list[:]
+
+
+def _detect_institutional(fields: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
-    Cheap skip: if enrichment_json contains attom_avm, do not call ATTOM again.
+    Returns {"matched_in": <field>, "keyword": <kw>} if institutional/low-probability.
+    Otherwise returns None.
     """
-    if not enrichment_json:
-        return False
-    return "attom_avm" in enrichment_json
+    trustee = _clean_spaces(str(fields.get("trustee_attorney") or "")).lower()
+    contact = _clean_spaces(str(fields.get("contact_info") or "")).lower()
+    raw_snip = _clean_spaces(str(fields.get("raw_snippet") or "")).lower()
+    url = _clean_spaces(str(fields.get("url") or "")).lower()
+
+    trustee_kws = _load_keyword_list("FALCO_INSTITUTIONAL_TRUSTEE_KEYWORDS", _DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS)
+    ctx_kws = _load_keyword_list("FALCO_INSTITUTIONAL_CONTEXT_KEYWORDS", _DEFAULT_INSTITUTIONAL_CONTEXT_KEYWORDS)
+
+    def has_any(text: str, kws: list[str]) -> Optional[str]:
+        for kw in kws:
+            if kw and kw in text:
+                return kw
+        return None
+
+    m = has_any(trustee, trustee_kws)
+    if m:
+        return {"matched_in": "Trustee/Attorney", "keyword": m}
+
+    m = has_any(contact, trustee_kws)
+    if m:
+        return {"matched_in": "Contact Info", "keyword": m}
+
+    m = has_any(raw_snip, trustee_kws)
+    if m:
+        return {"matched_in": "Raw Snippet", "keyword": m}
+
+    m = has_any(url, trustee_kws)
+    if m:
+        return {"matched_in": "URL", "keyword": m}
+
+    # optional: broader context keywords (kept empty by default)
+    if ctx_kws:
+        m = has_any(raw_snip, ctx_kws)
+        if m:
+            return {"matched_in": "Raw Snippet", "keyword": m}
+
+    return None
+
+
+def _mark_institutional_skip(page_id: str, *, reason: Dict[str, str], now: datetime) -> None:
+    """
+    Writes a no-call marker to Notion so we don't keep reconsidering the same page.
+    This does NOT hit ATTOM.
+    """
+    try:
+        write_obj = {
+            "status_flag": "INSTITUTIONAL_SKIP",
+            "enrichment_json": _clip_json(
+                {
+                    "falco": {
+                        "attom": {
+                            "skipped": True,
+                            "skip_reason": "institutional_trustee",
+                            "matched_in": reason.get("matched_in"),
+                            "keyword": reason.get("keyword"),
+                            "ts": now.isoformat().replace("+00:00", "Z"),
+                        }
+                    }
+                }
+            ),
+        }
+        update_lead(page_id, build_extra_properties(write_obj))
+    except Exception as e:
+        if DEBUG:
+            print(f"[ATTOM][DEBUG] failed to mark institutional skip page_id={page_id}: {type(e).__name__}: {e}")
 
 
 def run() -> Dict[str, int]:
@@ -224,26 +318,18 @@ def run() -> Dict[str, int]:
     max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))
     cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
+    # Hard cost controls
+    skip_institutional = os.getenv("FALCO_SKIP_INSTITUTIONAL_ENRICH", "1").strip() not in ("", "0", "false", "False")
+    mark_institutional = os.getenv("FALCO_MARK_INSTITUTIONAL_SKIP", "1").strip() not in ("", "0", "false", "False")
+
     client = AttomClient(api_key=api_key)
 
-    # COST CONTROL + GEO CONTROL:
-    # - Only allowed counties
-    # - Only pages that are not already enriched (Enrichment JSON empty AND Estimated Value fields empty)
-    county_or = [{"property": "County", "select": {"equals": c}} for c in ALLOWED_COUNTIES]
-
+    # IMPORTANT: Notion filter object goes under "filter" in query_database()
     filter_obj = {
         "and": [
             {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
             {"property": "Days to Sale", "number": {"less_than_or_equal_to": dts_max}},
             {"property": "Address", "rich_text": {"is_not_empty": True}},
-            {"or": county_or},
-            {
-                "and": [
-                    {"property": "Enrichment JSON", "rich_text": {"is_empty": True}},
-                    {"property": "Estimated Value Low", "number": {"is_empty": True}},
-                    {"property": "Estimated Value High", "number": {"is_empty": True}},
-                ]
-            },
         ]
     }
 
@@ -255,6 +341,8 @@ def run() -> Dict[str, int]:
     skipped_already_enriched = 0
     skipped_no_match = 0
     skipped_cooldown = 0
+    skipped_out_of_geo = 0
+    skipped_institutional = 0
     errors = 0
 
     now = datetime.now(timezone.utc)
@@ -269,34 +357,40 @@ def run() -> Dict[str, int]:
         fields = extract_page_fields(page)
         page_id = fields.get("page_id") or ""
         address = fields.get("address") or ""
-        county = (fields.get("county") or "").replace(" County", "").strip()
+        county = fields.get("county") or ""
 
         if not page_id:
+            continue
+
+        # Keep Stage 2 aligned with Stage 1 geo constraints
+        if county and not is_allowed_county(county):
+            skipped_out_of_geo += 1
             continue
 
         if not str(address).strip():
             skipped_missing_address += 1
             continue
 
-        # Extra safety: never enrich out-of-geo even if query returns something weird
-        if county and county not in ALLOWED_COUNTIES:
-            skipped_already_enriched += 1
-            continue
+        # Skip institutional / already-controlled trustee leads to protect ATTOM budget
+        if skip_institutional:
+            reason = _detect_institutional(fields)
+            if reason:
+                skipped_institutional += 1
+                if mark_institutional:
+                    _mark_institutional_skip(page_id, reason=reason, now=now)
+                if DEBUG:
+                    print(f"[ATTOM][DEBUG] institutional skip page_id={page_id} matched_in={reason.get('matched_in')} kw={reason.get('keyword')}")
+                continue
 
-        # already enriched with numeric value fields
+        # already enriched with value fields (if DB has them)
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
-        # already enriched via json blob
-        ej = str(fields.get("enrichment_json") or "").strip()
-        if _already_has_attom_avm(ej):
-            skipped_already_enriched += 1
-            continue
-
         # cooldown skip if prior no-result marker exists
+        ej = str(fields.get("enrichment_json") or "").strip()
         marker = _read_no_result_marker(ej)
-        if marker and marker.get("no_result") is True and marker.get("ts"):
+        if marker and (marker.get("no_result") is True) and marker.get("ts"):
             try:
                 ts = datetime.fromisoformat(str(marker["ts"]).replace("Z", "+00:00"))
                 if now - ts < cooldown:
@@ -357,7 +451,7 @@ def run() -> Dict[str, int]:
 
             v, lo, hi = _extract_value_from_attom_avm(avm)
 
-            # store the AVM blob inside Enrichment JSON so Stage2/3 can read it
+            # store the AVM blob inside Enrichment JSON so Stage2/3 can read it even if DB lacks number fields
             p0a = _get_p0(avm)
             avm_blob = p0a.get("avm") if isinstance(p0a, dict) else None
 
@@ -368,7 +462,7 @@ def run() -> Dict[str, int]:
             enrichment_payload = {
                 "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
                 "meta": {"address1": address1, "address2": address2, "value_source": "avm.amount"},
-                "attom_avm": avm_blob,
+                "attom_avm": avm_blob,  # <-- critical for downstream fallback
             }
 
             write_obj: Dict[str, Any] = {
@@ -376,6 +470,7 @@ def run() -> Dict[str, int]:
                 "enrichment_confidence": None,
             }
 
+            # If DB has numeric fields, write them too (if not, schema filter will drop safely)
             if v is not None:
                 write_obj["estimated_value_low"] = float(lo if lo is not None else v)
                 write_obj["estimated_value_high"] = float(hi if hi is not None else v)
@@ -402,6 +497,8 @@ def run() -> Dict[str, int]:
         "skipped_enrich_already_enriched": skipped_already_enriched,
         "skipped_enrich_no_match": skipped_no_match,
         "skipped_enrich_cooldown": skipped_cooldown,
+        "skipped_enrich_out_of_geo": skipped_out_of_geo,
+        "skipped_enrich_institutional": skipped_institutional,
         "errors": errors,
         "attom_call_count": client.call_count,
         "attom_call_count_by_path": client.call_count_by_path,
