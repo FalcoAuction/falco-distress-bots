@@ -18,7 +18,7 @@ HEADERS = {
 
 
 # =========================================================
-# SAFE PROPERTY EXTRACTORS
+# LOW-LEVEL HELPERS
 # =========================================================
 
 def _safe_get_rich_text(prop: Dict[str, Any]) -> str:
@@ -42,41 +42,22 @@ def _safe_get_number(prop: Dict[str, Any]) -> Optional[float]:
         return None
 
 
-def _safe_get_select(prop: Dict[str, Any]) -> Optional[str]:
-    try:
-        if not prop:
-            return None
-        sel = prop.get("select")
-        if not sel:
-            return None
-        return sel.get("name")
-    except Exception:
-        return None
-
-
 # =========================================================
 # READ
 # =========================================================
 
 def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extracts normalized fields from a Notion page.
-
-    CRITICAL FIX:
-    Properly extracts 'Enrichment JSON' so Stage 2 works.
-    """
-
     props = page.get("properties", {})
     fields: Dict[str, Any] = {}
 
-    # Stage 1 fields
+    # ---- ORIGINAL FIELDS ----
     fields["lead_key"] = _safe_get_rich_text(props.get("Lead Key"))
     fields["address"] = _safe_get_rich_text(props.get("Address"))
     fields["county"] = _safe_get_rich_text(props.get("County"))
     fields["state"] = _safe_get_rich_text(props.get("State"))
     fields["event_date"] = _safe_get_rich_text(props.get("Event Date"))
 
-    # Stage 2 critical enrichment field
+    # ---- STAGE 2 FIX ----
     enrichment_raw = _safe_get_rich_text(props.get("Enrichment JSON"))
     fields["enrichment_json"] = enrichment_raw
 
@@ -88,7 +69,6 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     else:
         fields["enrichment_json_parsed"] = None
 
-    # Optional numeric fields
     fields["estimated_value"] = _safe_get_number(props.get("Estimated Value"))
     fields["value_band_low"] = _safe_get_number(props.get("Value Band Low"))
     fields["value_band_high"] = _safe_get_number(props.get("Value Band High"))
@@ -97,7 +77,7 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =========================================================
-# WRITE — STAGE 1 COMPATIBILITY
+# WRITE (Stage 1 original compatibility)
 # =========================================================
 
 def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -105,42 +85,27 @@ def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if "lead_key" in fields:
         props["Lead Key"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": fields["lead_key"] or ""}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": fields["lead_key"] or ""}}]
         }
 
     if "address" in fields:
         props["Address"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": fields["address"] or ""}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": fields["address"] or ""}}]
         }
 
     if "county" in fields:
         props["County"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": fields["county"] or ""}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": fields["county"] or ""}}]
         }
 
     if "state" in fields:
         props["State"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": fields["state"] or ""}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": fields["state"] or ""}}]
         }
 
     if "event_date" in fields:
         props["Event Date"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": fields["event_date"] or ""}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": fields["event_date"] or ""}}]
         }
 
     return props
@@ -151,26 +116,17 @@ def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
 
     if "enrichment_json" in extra_fields and extra_fields["enrichment_json"]:
         properties["Enrichment JSON"] = {
-            "rich_text": [{
-                "type": "text",
-                "text": {"content": extra_fields["enrichment_json"]}
-            }]
+            "rich_text": [{"type": "text", "text": {"content": extra_fields["enrichment_json"]}}]
         }
 
     if "estimated_value" in extra_fields and extra_fields["estimated_value"] is not None:
-        properties["Estimated Value"] = {
-            "number": extra_fields["estimated_value"]
-        }
+        properties["Estimated Value"] = {"number": extra_fields["estimated_value"]}
 
     if "value_band_low" in extra_fields and extra_fields["value_band_low"] is not None:
-        properties["Value Band Low"] = {
-            "number": extra_fields["value_band_low"]
-        }
+        properties["Value Band Low"] = {"number": extra_fields["value_band_low"]}
 
     if "value_band_high" in extra_fields and extra_fields["value_band_high"] is not None:
-        properties["Value Band High"] = {
-            "number": extra_fields["value_band_high"]
-        }
+        properties["Value Band High"] = {"number": extra_fields["value_band_high"]}
 
     return properties
 
@@ -181,34 +137,39 @@ def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_lead(properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages"
-
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": properties
-    }
-
+    payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
     r = requests.post(url, headers=HEADERS, json=payload)
-
     if r.status_code >= 300:
         print("[NOTION] create error:", r.status_code, r.text)
 
 
 def update_lead(page_id: str, properties: Dict[str, Any]) -> None:
-    """
-    Alias required by Stage 1 bots.
-    """
-    update_page(page_id, properties)
-
-
-def update_page(page_id: str, properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages/{page_id}"
-
     payload = {"properties": properties}
-
     r = requests.patch(url, headers=HEADERS, json=payload)
-
     if r.status_code >= 300:
         print("[NOTION] update error:", r.status_code, r.text)
+
+
+# =========================================================
+# FIND EXISTING (RESTORED)
+# =========================================================
+
+def find_existing_by_lead_key(lead_key: str) -> Optional[Dict[str, Any]]:
+    payload = {
+        "filter": {
+            "property": "Lead Key",
+            "rich_text": {"equals": lead_key}
+        }
+    }
+
+    results = query_database(payload)
+    pages = results.get("results", [])
+
+    if pages:
+        return pages[0]
+
+    return None
 
 
 # =========================================================
@@ -217,7 +178,6 @@ def update_page(page_id: str, properties: Dict[str, Any]) -> None:
 
 def query_database(filter_payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{BASE_URL}/databases/{NOTION_DATABASE_ID}/query"
-
     r = requests.post(url, headers=HEADERS, json=filter_payload)
 
     if r.status_code >= 300:
