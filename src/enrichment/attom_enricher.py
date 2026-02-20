@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import json
 import re
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, Tuple
 
 from ..notion_client import (
@@ -19,7 +20,7 @@ from .attom_client import AttomClient, AttomError
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
 
-def _clip_json(obj: Any, max_chars: int = 1800) -> str:
+def _clip_json(obj: Any, max_chars: int = 1400) -> str:
     try:
         s = json.dumps(obj, ensure_ascii=False)
     except Exception:
@@ -53,15 +54,19 @@ def _status_msg(payload: Dict[str, Any]) -> str:
     return ""
 
 
-def _looks_like_no_result(payload: Dict[str, Any]) -> bool:
+def _is_success_without_result(payload: Dict[str, Any]) -> bool:
     msg = (_status_msg(payload) or "").lower()
     if "successwithoutresult" in msg:
         return True
-    # some responses return empty property[]
     prop = payload.get("property")
     if isinstance(prop, list) and len(prop) == 0:
         return True
     return False
+
+
+def _has_property(payload: Dict[str, Any]) -> bool:
+    prop = payload.get("property")
+    return isinstance(prop, list) and len(prop) > 0 and isinstance(prop[0], dict)
 
 
 def _clean_spaces(s: str) -> str:
@@ -76,54 +81,38 @@ def _normalize_state(st: str) -> str:
     st = (st or "").strip().upper()
     if len(st) == 2 and st.isalpha():
         return st
-    # fall back (we're TN-only right now)
     return "TN"
 
 
 def _parse_address(addr: str) -> Tuple[str, str]:
-    """
-    Returns (address1, address2='City, ST') for ATTOM tenant.
-
-    Handles messy inputs like:
-      "409-A Eastboro Drive, Nashville, Tennessee 37209, Nashville, TN 37209"
-      "98 Randy Road,\r\nMadison, TN, Madison, TN 37115"
-      "2654 Fizer Road Memphis"  (tries to infer city if last token is a known city word)
-    """
     raw = _clean_spaces(str(addr or ""))
     if not raw:
         return "", ""
 
-    # Normalize commas and remove duplicate whitespace/newlines
     raw = raw.replace("\n", " ").replace("\r", " ")
     raw = _clean_spaces(raw)
 
-    # Split by commas
     parts = [p.strip() for p in raw.split(",") if p.strip()]
 
-    # Helper: if we see "Tennessee" convert to TN
     def fix_state_token(token: str) -> str:
         t = (token or "").strip()
         if t.lower() == "tennessee":
             return "TN"
         return t
 
-    # Try canonical: street, city, state/zip...
     if len(parts) >= 3:
         street = parts[0]
-        city = parts[1]
+        city = _strip_zip(parts[1])
+        city = re.sub(r"\bTN\b", "", city, flags=re.I).strip(" ,")
+        city = _clean_spaces(city)
+
         st_part = _strip_zip(parts[2])
         st_tokens = [fix_state_token(t) for t in st_part.replace(",", " ").split() if t.strip()]
         st = _normalize_state(st_tokens[0] if st_tokens else "TN")
 
-        # If city itself contains "TN" etc, clean it
-        city = _strip_zip(city)
-        city = re.sub(r"\bTN\b", "", city, flags=re.I).strip(" ,")
-        city = _clean_spaces(city)
-
         if street and city:
             return street, f"{city}, {st}"
 
-    # If two parts: street + (city/state/zip)
     if len(parts) == 2:
         street = parts[0]
         tail = _strip_zip(parts[1])
@@ -131,7 +120,6 @@ def _parse_address(addr: str) -> Tuple[str, str]:
 
         st = "TN"
         city_tokens = tail_tokens[:]
-        # find state token position if present
         for i, t in enumerate(tail_tokens):
             if len(t) == 2 and t.isalpha():
                 st = _normalize_state(t)
@@ -144,9 +132,8 @@ def _parse_address(addr: str) -> Tuple[str, str]:
             city = "Nashville"
         return street, f"{city}, {st}"
 
-    # No commas: heuristic
     tokens = raw.split()
-    # look for state token
+
     st_idx = None
     for i, t in enumerate(tokens):
         tt = fix_state_token(t).upper()
@@ -155,19 +142,17 @@ def _parse_address(addr: str) -> Tuple[str, str]:
             break
     if st_idx is not None and st_idx >= 1:
         st = _normalize_state(tokens[st_idx])
-        # assume token before state is city
         city = tokens[st_idx - 1]
         street = " ".join(tokens[: st_idx - 1]).strip()
         if street and city:
             return street, f"{city}, {st}"
 
-    # Last-resort: if last token is alphabetic, treat it as city (common bad input)
+    # last resort: assume last token is city
     if len(tokens) >= 3 and tokens[-1].isalpha():
         city = tokens[-1]
         street = " ".join(tokens[:-1]).strip()
         return street, f"{city}, TN"
 
-    # fallback
     return raw, "Nashville, TN"
 
 
@@ -177,16 +162,32 @@ def _extract_avm_low_high_conf(avm_payload: Dict[str, Any]) -> Tuple[Optional[fl
         if isinstance(prop_list, list) and prop_list:
             prop = prop_list[0]
         else:
-            prop = {}
+            return None, None, None
         avm = prop.get("avm") if isinstance(prop, dict) else {}
         if not isinstance(avm, dict):
-            avm = {}
+            return None, None, None
         low = _safe_float(avm.get("valueRangeLow"))
         high = _safe_float(avm.get("valueRangeHigh"))
         conf = _safe_float(avm.get("confidenceScore"))
         return low, high, conf
     except Exception:
         return None, None, None
+
+
+def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
+    if not enrichment_json:
+        return None
+    try:
+        # it's clipped, so we only look for a tiny embedded object we control
+        # we store as {"falco":{"attom":{"no_result":true,"ts":"..."}}}
+        m = re.search(r'("falco"\s*:\s*\{.*?\})', enrichment_json)
+        if not m:
+            return None
+        frag = "{" + m.group(1) + "}"
+        obj = json.loads(frag)
+        return obj.get("falco", {}).get("attom")
+    except Exception:
+        return None
 
 
 def run() -> Dict[str, int]:
@@ -196,7 +197,10 @@ def run() -> Dict[str, int]:
         return {"enriched_count": 0, "skipped_enrich_missing_key": 1}
 
     dts_min, dts_max = get_dts_window("ENRICH")
-    max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "20"))
+
+    # Cost controls
+    max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))  # keep low during testing
+    cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
     client = AttomClient(api_key=api_key)
 
@@ -215,7 +219,11 @@ def run() -> Dict[str, int]:
     skipped_missing_address = 0
     skipped_already_enriched = 0
     skipped_no_match = 0
+    skipped_cooldown = 0
     errors = 0
+
+    now = datetime.now(timezone.utc)
+    cooldown = timedelta(hours=cooldown_hours)
 
     for page in pages:
         if enriched >= max_enrich:
@@ -232,10 +240,22 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # skip if already enriched WITH VALUE
+        # Skip if already enriched with value
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
+
+        # Skip if we recently tried and got no result
+        ej = str(fields.get("enrichment_json") or "").strip()
+        marker = _read_no_result_marker(ej)
+        if marker and marker.get("no_result") is True and marker.get("ts"):
+            try:
+                ts = datetime.fromisoformat(str(marker["ts"]).replace("Z", "+00:00"))
+                if now - ts < cooldown:
+                    skipped_cooldown += 1
+                    continue
+            except Exception:
+                pass
 
         address1, address2 = _parse_address(address)
         if not address1 or not address2:
@@ -244,33 +264,49 @@ def run() -> Dict[str, int]:
 
         try:
             detail = client.property_detail(address1=address1, address2=address2)
-            if _looks_like_no_result(detail):
+            if _is_success_without_result(detail) or not _has_property(detail):
                 skipped_no_match += 1
+                # write no-result marker so we don't burn calls again tomorrow
+                write_obj = {
+                    "enrichment_json": _clip_json(
+                        {"falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "detail_no_result"}},
+                         "meta": {"address1": address1, "address2": address2}}
+                    )
+                }
+                props = build_extra_properties(write_obj)
+                update_lead(page_id, props)
                 if DEBUG:
                     print(f"[ATTOM][DEBUG] no-result detail {address1} | {address2} msg={_status_msg(detail)}")
                 continue
 
+            # Only call AVM if detail matched (prevents burning 2 calls on bad leads)
             avm = client.avm_detail(address1=address1, address2=address2)
-            if _looks_like_no_result(avm):
+            if _is_success_without_result(avm) or not _has_property(avm):
                 skipped_no_match += 1
+                write_obj = {
+                    "enrichment_json": _clip_json(
+                        {"falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "avm_no_result"}},
+                         "meta": {"address1": address1, "address2": address2}}
+                    )
+                }
+                props = build_extra_properties(write_obj)
+                update_lead(page_id, props)
                 if DEBUG:
                     print(f"[ATTOM][DEBUG] no-result avm {address1} | {address2} msg={_status_msg(avm)}")
                 continue
 
             avm_low, avm_high, avm_conf = _extract_avm_low_high_conf(avm)
 
+            # Always store a compact bundle, but only set values if present
             bundle = {
-                "attom_detail": detail,
-                "attom_avm": avm,
+                "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
                 "meta": {"address1": address1, "address2": address2},
             }
-
             write_obj: Dict[str, Any] = {
                 "enrichment_json": _clip_json(bundle),
                 "enrichment_confidence": avm_conf,
             }
 
-            # Only write value fields if we actually got them
             if avm_low is not None or avm_high is not None:
                 write_obj["estimated_value_low"] = avm_low
                 write_obj["estimated_value_high"] = avm_high
@@ -286,7 +322,7 @@ def run() -> Dict[str, int]:
         except AttomError as e:
             skipped_no_match += 1
             if DEBUG:
-                print(f"[ATTOM][DEBUG] no-match {address1} | {address2}: {e}")
+                print(f"[ATTOM][DEBUG] error {address1} | {address2}: {e}")
         except Exception as e:
             errors += 1
             print(f"[ATTOM] ERROR {address1} | {address2}: {type(e).__name__}: {e}")
@@ -297,6 +333,7 @@ def run() -> Dict[str, int]:
         "skipped_enrich_missing_address": skipped_missing_address,
         "skipped_enrich_already_enriched": skipped_already_enriched,
         "skipped_enrich_no_match": skipped_no_match,
+        "skipped_enrich_cooldown": skipped_cooldown,
         "errors": errors,
         "attom_call_count": client.call_count,
         "attom_call_count_by_path": client.call_count_by_path,
