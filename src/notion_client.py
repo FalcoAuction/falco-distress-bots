@@ -1,13 +1,12 @@
 import os
 import json
 import requests
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
 NOTION_VERSION = "2022-06-28"
-
 BASE_URL = "https://api.notion.com/v1"
 
 HEADERS = {
@@ -18,7 +17,7 @@ HEADERS = {
 
 
 # =========================================================
-# LOW-LEVEL SAFE HELPERS
+# SAFE HELPERS
 # =========================================================
 
 def _safe_get_rich_text(prop: Dict[str, Any]) -> str:
@@ -47,22 +46,15 @@ def _safe_get_number(prop: Dict[str, Any]) -> Optional[float]:
 # =========================================================
 
 def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Extracts normalized fields from a Notion page.
-    Stage 1 + Stage 2 compatible.
-    """
-
     props = page.get("properties", {})
     fields: Dict[str, Any] = {}
 
-    # ---- Stage 1 fields ----
     fields["lead_key"] = _safe_get_rich_text(props.get("Lead Key"))
     fields["address"] = _safe_get_rich_text(props.get("Address"))
     fields["county"] = _safe_get_rich_text(props.get("County"))
     fields["state"] = _safe_get_rich_text(props.get("State"))
     fields["event_date"] = _safe_get_rich_text(props.get("Event Date"))
 
-    # ---- Stage 2 enrichment ----
     enrichment_raw = _safe_get_rich_text(props.get("Enrichment JSON"))
     fields["enrichment_json"] = enrichment_raw
 
@@ -82,7 +74,7 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # =========================================================
-# WRITE — STAGE 1 COMPATIBILITY
+# WRITE
 # =========================================================
 
 def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -142,25 +134,16 @@ def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
 
 def create_lead(properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages"
-
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": properties
-    }
-
+    payload = {"parent": {"database_id": NOTION_DATABASE_ID}, "properties": properties}
     r = requests.post(url, headers=HEADERS, json=payload)
-
     if r.status_code >= 300:
         print("[NOTION] create error:", r.status_code, r.text)
 
 
 def update_lead(page_id: str, properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages/{page_id}"
-
     payload = {"properties": properties}
-
     r = requests.patch(url, headers=HEADERS, json=payload)
-
     if r.status_code >= 300:
         print("[NOTION] update error:", r.status_code, r.text)
 
@@ -177,7 +160,7 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[Dict[str, Any]]:
         }
     }
 
-    results = query_database(filter_payload=payload)
+    results = query_database(filter_payload=payload, page_size=1)
     pages = results.get("results", [])
 
     if pages:
@@ -187,37 +170,54 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[Dict[str, Any]]:
 
 
 # =========================================================
-# QUERY — FULL STAGE 2 COMPATIBILITY
+# FULL COMPATIBILITY QUERY
 # =========================================================
 
 def query_database(
     filter_payload: Optional[Dict[str, Any]] = None,
     page_size: int = 100,
-    start_cursor: Optional[str] = None
+    start_cursor: Optional[str] = None,
+    sorts: Optional[List[Dict[str, Any]]] = None,
+    max_pages: int = 1
 ) -> Dict[str, Any]:
-    """
-    Supports:
-    - Stage 1 bots
-    - Stage 2 enrichment
-    - Pagination
-    """
 
     url = f"{BASE_URL}/databases/{NOTION_DATABASE_ID}/query"
 
-    payload: Dict[str, Any] = {
-        "page_size": page_size
+    all_results: List[Dict[str, Any]] = []
+    cursor = start_cursor
+    pages_fetched = 0
+
+    while True:
+        payload: Dict[str, Any] = {
+            "page_size": page_size
+        }
+
+        if filter_payload:
+            payload.update(filter_payload)
+
+        if sorts:
+            payload["sorts"] = sorts
+
+        if cursor:
+            payload["start_cursor"] = cursor
+
+        r = requests.post(url, headers=HEADERS, json=payload)
+
+        if r.status_code >= 300:
+            print("[NOTION] query error:", r.status_code, r.text)
+            return {}
+
+        data = r.json()
+        results = data.get("results", [])
+        all_results.extend(results)
+
+        pages_fetched += 1
+
+        if not data.get("has_more") or pages_fetched >= max_pages:
+            break
+
+        cursor = data.get("next_cursor")
+
+    return {
+        "results": all_results
     }
-
-    if filter_payload:
-        payload.update(filter_payload)
-
-    if start_cursor:
-        payload["start_cursor"] = start_cursor
-
-    r = requests.post(url, headers=HEADERS, json=payload)
-
-    if r.status_code >= 300:
-        print("[NOTION] query error:", r.status_code, r.text)
-        return {}
-
-    return r.json()
