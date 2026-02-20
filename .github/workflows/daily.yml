@@ -3,24 +3,27 @@ name: Falco Daily Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"  # runs daily at 12:00 UTC (7am CST)
+    - cron: "0 12 * * *"  # daily at 12:00 UTC (7am CST)
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
 
     env:
-      # === REQUIRED SECRETS ===
+      # REQUIRED SECRETS
       FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
 
-      # === DEBUG (TEMPORARY) ===
+      # DEBUG (TEMP during buildout)
       FALCO_ENRICH_DEBUG: "1"
 
-      # === CONTROL VARS ===
-      FALCO_MAX_ENRICH_PER_RUN: "40"
-      FALCO_MAX_COMPS_PER_RUN: "12"
+      # COST CONTROL DURING TESTING
+      FALCO_MAX_ENRICH_PER_RUN: "10"
+      FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS: "72"
+
+      # existing knobs (fine to keep)
+      FALCO_MAX_COMPS_PER_RUN: "6"
       FALCO_COMPS_RADIUS_MILES: "1.0"
       FALCO_COMPS_LOOKBACK_DAYS: "180"
       FALCO_TIER2_MIN_EQUITY_PCT: "0.15"
