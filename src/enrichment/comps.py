@@ -20,6 +20,14 @@ def _safe_float(x: Any) -> Optional[float]:
     try:
         if x is None:
             return None
+        if isinstance(x, (int, float)):
+            return float(x)
+        if isinstance(x, dict):
+            # common nested shapes
+            for k in ("value", "amount", "val"):
+                if k in x:
+                    return _safe_float(x.get(k))
+            return None
         s = str(x).strip()
         if not s:
             return None
@@ -68,6 +76,69 @@ def _parse_comps_from_enrichment_json(enrichment_json: str) -> List[dict]:
         return []
 
 
+def _extract_estimated_value_from_enrichment_json(enrichment_json: str) -> Optional[float]:
+    """
+    ATTOM AVM shape we observed:
+      {"falco":{"attom":{"meta":...}}} OR {"falco":{"attom":...}} plus meta
+    But we also logged:
+      avm.avm={"eventDate": "...", "amount": {"scr":95,"value":529582,"high":..., "low":..., ...}}
+    We try a few tolerant paths.
+    """
+    if not enrichment_json:
+        return None
+    try:
+        obj = json.loads(enrichment_json)
+        if not isinstance(obj, dict):
+            return None
+
+        # Most recent pattern we wrote:
+        # {"falco":{"attom":{"no_result":..., "ts":...}}, "meta":{"address1":...,"value_source":...}}
+        falco = obj.get("falco")
+        if isinstance(falco, dict):
+            attom = falco.get("attom")
+            if isinstance(attom, dict):
+                # if we later store a direct value, catch it
+                for k in ("avm_value", "value", "estimated_value", "estimatedValue"):
+                    v = _safe_float(attom.get(k))
+                    if v is not None:
+                        return v
+
+        # Also try to pull from a raw-ish stored AVM object if present:
+        # {"attom_avm": {"eventDate":..., "amount": {"value":...}}}
+        for key in ("attom_avm", "avm", "attom", "attomAVM"):
+            maybe = obj.get(key)
+            if isinstance(maybe, dict):
+                amt = maybe.get("amount")
+                if isinstance(amt, dict):
+                    v = _safe_float(amt.get("value"))
+                    if v is not None:
+                        return v
+                v2 = _safe_float(maybe.get("value"))
+                if v2 is not None:
+                    return v2
+
+        # Deep search (last resort): find first dict that looks like {"scr":..,"value":..,"high":..,"low":..}
+        def dfs(x: Any) -> Optional[float]:
+            if isinstance(x, dict):
+                if "value" in x and ("high" in x or "low" in x or "scr" in x):
+                    return _safe_float(x.get("value"))
+                for vv in x.values():
+                    out = dfs(vv)
+                    if out is not None:
+                        return out
+            elif isinstance(x, list):
+                for it in x:
+                    out = dfs(it)
+                    if out is not None:
+                        return out
+            return None
+
+        return dfs(obj)
+
+    except Exception:
+        return None
+
+
 def _compute_liquidity(county_full: str, comps_count: int, dts: Optional[float]) -> float:
     base = 2.0
     county = (county_full or "").replace(" County", "").strip()
@@ -104,9 +175,6 @@ def _value_band_from_comps(comps: List[dict], subject_sqft: Optional[float]) -> 
     median_price = _median(prices)
     median_ppsf = _median(ppsf)
 
-    # band logic:
-    # - prefer ppsf if we have subject sqft
-    # - else band around median_price
     band_low = None
     band_high = None
 
@@ -130,7 +198,6 @@ def run() -> Dict[str, int]:
     dts_min, dts_max = get_dts_window("COMPS")
     max_items = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "25"))  # share limit with enrich by default
 
-    # Query candidates: within DTS window, address not empty.
     filter_obj = {
         "and": [
             {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
@@ -159,7 +226,7 @@ def run() -> Dict[str, int]:
         page_id = fields.get("page_id") or ""
         addr = (fields.get("address") or "").strip()
 
-        if not addr:
+        if not page_id or not addr:
             continue
 
         # already computed?
@@ -172,14 +239,23 @@ def run() -> Dict[str, int]:
 
         if not comps:
             skipped_missing_enrichment += 1
-            # fallback: use estimated value if we have it (still produce band)
+
+            # fallback: use estimated value if we have it (or can extract it from enrichment_json)
             ev_low = fields.get("estimated_value_low")
             ev_high = fields.get("estimated_value_high")
+
+            if ev_low is None and ev_high is None:
+                ev = _extract_estimated_value_from_enrichment_json(enrichment_json)
+                if ev is not None:
+                    ev_low = ev
+                    ev_high = ev
+
             if ev_low or ev_high:
                 low = float(ev_low) if ev_low else float(ev_high) * 0.9
                 high = float(ev_high) if ev_high else float(ev_low) * 1.1
                 liquidity = _compute_liquidity(fields.get("county") or "", 0, fields.get("days_to_sale"))
-                summary = f"Value band derived from estimated value (no comps provided)."
+                summary = "Value band derived from estimated value (no comps provided)."
+
                 data = {
                     "value_band_low": round(low, 0),
                     "value_band_high": round(high, 0),
@@ -191,6 +267,8 @@ def run() -> Dict[str, int]:
                     props = build_extra_properties(data)
                     update_lead(page_id, props)
                     computed += 1
+                    if DEBUG:
+                        print(f"[CompsEngine] fallback-band page_id={page_id} addr={addr} band=({low},{high})")
                     continue
                 except Exception as e:
                     skipped_errors += 1
@@ -205,7 +283,6 @@ def run() -> Dict[str, int]:
             median_price, median_ppsf, band_low, band_high = _value_band_from_comps(comps, subject_sqft)
             liquidity = _compute_liquidity(fields.get("county") or "", len(comps), fields.get("days_to_sale"))
 
-            # human summary (short)
             parts = []
             if median_price is not None:
                 parts.append(f"Median sale price: ${median_price:,.0f}")
