@@ -128,7 +128,6 @@ def _parse_date_str(date_str: str, now_year: int) -> Optional[str]:
         except Exception:
             continue
 
-    # Missing year -> assume current year (then next year)
     m = re.match(rf"^({_MONTHS})\s+(\d{{1,2}})$", s, flags=re.IGNORECASE)
     if m:
         month = m.group(1)
@@ -227,7 +226,7 @@ def _extract_county(text: str) -> str:
 
 
 # ============================================================
-# Address extraction (normalize TN. 37066. -> TN 37066)
+# Address extraction
 # ============================================================
 
 _ADDR_LABEL_RX = re.compile(
@@ -252,19 +251,13 @@ _ADDR_LEADING_JUNK = re.compile(
 def _cleanup_address(cand: str) -> str:
     c = _norm_ws(cand).strip(" ,;\t")
     c = _ADDR_LEADING_JUNK.sub("", c).strip(" ,;\t")
-
-    # normalize TN. ZIP -> TN ZIP
     c = re.sub(r"\bTN\.\s*(\d{5}(?:-\d{4})?)\b", r"TN \1", c, flags=re.IGNORECASE)
-
-    # strip trailing fragments
     c = re.split(
         r"\b(Parcel|Tax\s+Map|Book\s+and\s+Page|Deed\s+of\s+Trust|Instrument\s+No\.|Being\s+the\s+same\s+property|Assignment)\b",
         c,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip(" ,;\t")
-
-    # remove any trailing solitary period
     c = c.rstrip(".").strip()
     return c
 
@@ -289,10 +282,10 @@ def _extract_address(lines: List[str], full_text: str) -> str:
 
 
 # ============================================================
-# Trustee / firm extraction (NEW: signature-block + firm heuristics)
+# Trustee / firm extraction (STRICT + negative filtering)
 # ============================================================
 
-# Very common firms / tokens in TN foreclosure notices.
+# Known firms / tokens (useful when the notice just lists the firm)
 _KNOWN_FIRM_RX = re.compile(
     r"\b("
     r"Wilson\s*&\s*Associates|"
@@ -303,28 +296,32 @@ _KNOWN_FIRM_RX = re.compile(
     r"Aldridge\s+Pite|"
     r"Rubin\s+Lublin|"
     r"Padgett\s+Law\s+Group|"
-    r"Brock\s*&\s*Scott|"
-    r"Default\s+Servicing|"
-    r"Mortgage\s+Foreclosure"
+    r"Brock\s*&\s*Scott"
     r")\b",
     re.IGNORECASE,
 )
 
-# Labeled patterns: try to grab the actual name / firm.
+# ✅ IMPORTANT: only accept explicitly labeled trustee lines with delimiter.
+# This prevents matching random occurrences of the word "Trustee" in statutory sections.
 _TRUSTEE_LABELED_RXES = [
     re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
     re.compile(r"\bTrustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
     re.compile(r"\bAttorney\s+for\s+the\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
-    re.compile(r"\b(acting\s+as\s+)?Substitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
-    re.compile(r"\bSubstitute\s+Trustee\s*,\s*([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
+    re.compile(r"\bSubstitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
 ]
 
-# “Firm-like” line heuristic for signature blocks near the end.
+# Signature/firm-ish line heuristic
 _FIRMISH_LINE_RX = re.compile(
+    r"\b(PLLC|P\.?L\.?L\.?C\.?|LLC|P\.?C\.?|LLP|L\.?L\.?P\.?|LAW\s+GROUP|ATTORNEYS|ASSOCIATES|COUNSEL)\b",
+    re.IGNORECASE,
+)
+
+# Hard negative filters for the bad capture you saw
+_BAD_TRUSTEE_RX = re.compile(
     r"\b("
-    r"PLLC|P\.?L\.?L\.?C\.?|LLC|P\.?C\.?|LLP|L\.?L\.?P\.?|"
-    r"LAW\s+GROUP|ATTORNEYS|ATTORNEY\s+AT\s+LAW|LEGAL|"
-    r"ASSOCIATES|FIRM|COUNSEL"
+    r"party\s+interested|record\s+book|warranty\s+deed|deed\s+of\s+trust|"
+    r"tennessee\s+code\s+annotated|§\s*\d+|t\.c\.a\.|"
+    r"instrument\s+no\.|parcel|tax\s+map|book\s+and\s+page"
     r")\b",
     re.IGNORECASE,
 )
@@ -332,7 +329,10 @@ _FIRMISH_LINE_RX = re.compile(
 
 def _sanitize_trustee(cand: str) -> str:
     c = _norm_ws(cand).strip(" ,;\t")
-    # trim if it accidentally captured too much
+    # If it contains clear non-trustee content, reject
+    if _BAD_TRUSTEE_RX.search(c):
+        return ""
+    # trim contact tails if captured
     c = re.split(r"\b(Phone|Tel|Facsimile|Fax|Email|Address|P\.?\s*O\.?\s*Box)\b", c, maxsplit=1, flags=re.IGNORECASE)[0]
     c = c.strip(" ,;\t")
     if len(c) > 160:
@@ -346,9 +346,7 @@ def _extract_trustee(lines: List[str], full_text: str) -> str:
         for rx in _TRUSTEE_LABELED_RXES:
             m = rx.search(ln)
             if m:
-                # prefer last captured group if multiple
-                cand = m.group(m.lastindex) if m.lastindex else m.group(0)
-                cand = _sanitize_trustee(cand)
+                cand = _sanitize_trustee(m.group(1))
                 if 3 <= len(cand) <= 160:
                     return cand
 
@@ -356,32 +354,35 @@ def _extract_trustee(lines: List[str], full_text: str) -> str:
     for rx in _TRUSTEE_LABELED_RXES:
         m = rx.search(full_text)
         if m:
-            cand = m.group(m.lastindex) if m.lastindex else m.group(0)
-            cand = _sanitize_trustee(cand)
+            cand = _sanitize_trustee(m.group(1))
             if 3 <= len(cand) <= 160:
                 return cand
 
     # Tier C: known firm anywhere
     mfirm = _KNOWN_FIRM_RX.search(full_text)
     if mfirm:
-        return _sanitize_trustee(mfirm.group(0))
+        cand = _sanitize_trustee(mfirm.group(0))
+        if 3 <= len(cand) <= 160:
+            return cand
 
-    # Tier D: signature heuristic (scan last ~35 lines for a "firmish" line)
-    tail = lines[-35:] if len(lines) > 35 else lines
-    # Prefer tail lines that also mention trustee/sale
+    # Tier D: tail heuristic (last ~40 lines), prefer ones that mention trustee/sale/auction
+    tail = lines[-40:] if len(lines) > 40 else lines
     for ln in reversed(tail):
+        if _BAD_TRUSTEE_RX.search(ln):
+            continue
         low = ln.lower()
         if _FIRMISH_LINE_RX.search(ln) and ("trustee" in low or "sale" in low or "auction" in low):
             cand = _sanitize_trustee(ln)
             if 3 <= len(cand) <= 160:
                 return cand
 
-    # If that fails, accept any "firmish" tail line that isn't obviously boilerplate
+    # Tier E: any firm-ish tail line that isn't boilerplate
     for ln in reversed(tail):
+        if _BAD_TRUSTEE_RX.search(ln):
+            continue
+        if "attempt to collect a debt" in ln.lower():
+            continue
         if _FIRMISH_LINE_RX.search(ln):
-            # skip common boilerplate debt-collection lines
-            if "attempt to collect a debt" in ln.lower():
-                continue
             cand = _sanitize_trustee(ln)
             if 3 <= len(cand) <= 160:
                 return cand
