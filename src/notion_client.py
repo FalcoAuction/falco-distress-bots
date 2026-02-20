@@ -17,15 +17,11 @@ HEADERS = {
 }
 
 
-# ---------------------------------------------------------
-# Core Helpers
-# ---------------------------------------------------------
+# =========================================================
+# SAFE EXTRACT HELPERS
+# =========================================================
 
 def _safe_get_rich_text(prop: Dict[str, Any]) -> str:
-    """
-    Safely extracts plain text from a rich_text Notion property.
-    Returns empty string if missing.
-    """
     try:
         if not prop:
             return ""
@@ -58,37 +54,32 @@ def _safe_get_select(prop: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-# ---------------------------------------------------------
+# =========================================================
 # READ
-# ---------------------------------------------------------
+# =========================================================
 
 def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extracts normalized fields from a Notion page.
 
-    CRITICAL FIX:
-    We now explicitly map "Enrichment JSON" from rich_text into
-    fields["enrichment_json"].
-
-    This is what Stage 2 expects.
+    FIX:
+    Properly extracts 'Enrichment JSON' rich_text so Stage 2 works.
     """
 
     props = page.get("properties", {})
-
     fields = {}
 
-    # --- Core Stage 1 fields ---
+    # Stage 1 fields (must not break)
     fields["lead_key"] = _safe_get_rich_text(props.get("Lead Key"))
     fields["address"] = _safe_get_rich_text(props.get("Address"))
     fields["county"] = _safe_get_rich_text(props.get("County"))
     fields["state"] = _safe_get_rich_text(props.get("State"))
     fields["event_date"] = _safe_get_rich_text(props.get("Event Date"))
 
-    # --- Stage 2 critical field ---
+    # Stage 2 critical field
     enrichment_raw = _safe_get_rich_text(props.get("Enrichment JSON"))
     fields["enrichment_json"] = enrichment_raw
 
-    # Optional parsed version
     if enrichment_raw:
         try:
             fields["enrichment_json_parsed"] = json.loads(enrichment_raw)
@@ -97,7 +88,7 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     else:
         fields["enrichment_json_parsed"] = None
 
-    # --- Optional numeric values (if present in DB) ---
+    # Optional numeric fields
     fields["estimated_value"] = _safe_get_number(props.get("Estimated Value"))
     fields["value_band_low"] = _safe_get_number(props.get("Value Band Low"))
     fields["value_band_high"] = _safe_get_number(props.get("Value Band High"))
@@ -105,38 +96,83 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     return fields
 
 
-# ---------------------------------------------------------
+# =========================================================
 # WRITE
-# ---------------------------------------------------------
+# =========================================================
+
+def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    ORIGINAL Stage 1 compatibility layer.
+
+    This preserves Stage 1 behavior.
+    """
+
+    props = {}
+
+    if "lead_key" in fields:
+        props["Lead Key"] = {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": fields["lead_key"] or ""}
+            }]
+        }
+
+    if "address" in fields:
+        props["Address"] = {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": fields["address"] or ""}
+            }]
+        }
+
+    if "county" in fields:
+        props["County"] = {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": fields["county"] or ""}
+            }]
+        }
+
+    if "state" in fields:
+        props["State"] = {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": fields["state"] or ""}
+            }]
+        }
+
+    if "event_date" in fields:
+        props["Event Date"] = {
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": fields["event_date"] or ""}
+            }]
+        }
+
+    return props
+
 
 def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Converts internal field dict into Notion property payload.
-
-    NON-DESTRUCTIVE:
-    Only includes fields explicitly provided.
+    Stage 2+ writer.
+    Non-destructive.
     """
 
     properties = {}
 
-    # Enrichment JSON
     if "enrichment_json" in extra_fields and extra_fields["enrichment_json"]:
         properties["Enrichment JSON"] = {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {"content": extra_fields["enrichment_json"]},
-                }
-            ]
+            "rich_text": [{
+                "type": "text",
+                "text": {"content": extra_fields["enrichment_json"]}
+            }]
         }
 
-    # Estimated Value
     if "estimated_value" in extra_fields and extra_fields["estimated_value"] is not None:
         properties["Estimated Value"] = {
             "number": extra_fields["estimated_value"]
         }
 
-    # Value Bands
     if "value_band_low" in extra_fields and extra_fields["value_band_low"] is not None:
         properties["Value Band Low"] = {
             "number": extra_fields["value_band_low"]
@@ -151,15 +187,9 @@ def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def update_page(page_id: str, properties: Dict[str, Any]) -> None:
-    """
-    Non-destructive update.
-    """
-
     url = f"{BASE_URL}/pages/{page_id}"
 
-    payload = {
-        "properties": properties
-    }
+    payload = {"properties": properties}
 
     r = requests.patch(url, headers=HEADERS, json=payload)
 
@@ -167,9 +197,9 @@ def update_page(page_id: str, properties: Dict[str, Any]) -> None:
         print("[NOTION] update error:", r.status_code, r.text)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # QUERY
-# ---------------------------------------------------------
+# =========================================================
 
 def query_database(filter_payload: Dict[str, Any]) -> Dict[str, Any]:
     url = f"{BASE_URL}/databases/{NOTION_DATABASE_ID}/query"
