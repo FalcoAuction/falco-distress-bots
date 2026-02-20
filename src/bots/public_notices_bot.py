@@ -69,12 +69,11 @@ def _clean_lines(s: str) -> List[str]:
 
 
 def _text_from_main_content(soup: BeautifulSoup) -> str:
+    """Primary: the notice body."""
     selectors = [
         "article .entry-content",
         "main .entry-content",
         "div.entry-content",
-        "article",
-        "main",
     ]
     for sel in selectors:
         node = soup.select_one(sel)
@@ -82,6 +81,19 @@ def _text_from_main_content(soup: BeautifulSoup) -> str:
             txt = node.get_text("\n")
             if txt and len(txt.strip()) > 50:
                 return txt
+    # fallback
+    node = soup.select_one("article") or soup.select_one("main")
+    return node.get_text("\n") if node else soup.get_text("\n")
+
+
+def _text_from_article_all(soup: BeautifulSoup) -> str:
+    """Secondary: include the whole article (captures signature/meta blocks missing in entry-content)."""
+    node = soup.select_one("article")
+    if node:
+        return node.get_text("\n")
+    node = soup.select_one("main")
+    if node:
+        return node.get_text("\n")
     return soup.get_text("\n")
 
 
@@ -282,10 +294,9 @@ def _extract_address(lines: List[str], full_text: str) -> str:
 
 
 # ============================================================
-# Trustee / firm extraction (STRICT + negative filtering)
+# Trustee / firm extraction
 # ============================================================
 
-# Known firms / tokens (useful when the notice just lists the firm)
 _KNOWN_FIRM_RX = re.compile(
     r"\b("
     r"Wilson\s*&\s*Associates|"
@@ -301,8 +312,7 @@ _KNOWN_FIRM_RX = re.compile(
     re.IGNORECASE,
 )
 
-# ✅ IMPORTANT: only accept explicitly labeled trustee lines with delimiter.
-# This prevents matching random occurrences of the word "Trustee" in statutory sections.
+# Only accept explicit labels with delimiters (prevents statute bait)
 _TRUSTEE_LABELED_RXES = [
     re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
     re.compile(r"\bTrustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
@@ -310,13 +320,17 @@ _TRUSTEE_LABELED_RXES = [
     re.compile(r"\bSubstitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
 ]
 
-# Signature/firm-ish line heuristic
+# Added: common inline forms
+_TRUSTEE_INLINE_RXES = [
+    re.compile(r"\b([A-Z][A-Za-z0-9&.,'\-\s]{3,120}),\s+as\s+Substitute\s+Trustee\b", re.IGNORECASE),
+    re.compile(r"\bSubstitute\s+Trustee\s*,\s*([A-Z][A-Za-z0-9&.,'\-\s]{3,120})\b", re.IGNORECASE),
+]
+
 _FIRMISH_LINE_RX = re.compile(
     r"\b(PLLC|P\.?L\.?L\.?C\.?|LLC|P\.?C\.?|LLP|L\.?L\.?P\.?|LAW\s+GROUP|ATTORNEYS|ASSOCIATES|COUNSEL)\b",
     re.IGNORECASE,
 )
 
-# Hard negative filters for the bad capture you saw
 _BAD_TRUSTEE_RX = re.compile(
     r"\b("
     r"party\s+interested|record\s+book|warranty\s+deed|deed\s+of\s+trust|"
@@ -329,10 +343,10 @@ _BAD_TRUSTEE_RX = re.compile(
 
 def _sanitize_trustee(cand: str) -> str:
     c = _norm_ws(cand).strip(" ,;\t")
-    # If it contains clear non-trustee content, reject
+    if not c:
+        return ""
     if _BAD_TRUSTEE_RX.search(c):
         return ""
-    # trim contact tails if captured
     c = re.split(r"\b(Phone|Tel|Facsimile|Fax|Email|Address|P\.?\s*O\.?\s*Box)\b", c, maxsplit=1, flags=re.IGNORECASE)[0]
     c = c.strip(" ,;\t")
     if len(c) > 160:
@@ -358,15 +372,23 @@ def _extract_trustee(lines: List[str], full_text: str) -> str:
             if 3 <= len(cand) <= 160:
                 return cand
 
-    # Tier C: known firm anywhere
+    # Tier C: inline patterns in full text
+    for rx in _TRUSTEE_INLINE_RXES:
+        m = rx.search(full_text)
+        if m:
+            cand = _sanitize_trustee(m.group(1))
+            if 3 <= len(cand) <= 160:
+                return cand
+
+    # Tier D: known firm anywhere
     mfirm = _KNOWN_FIRM_RX.search(full_text)
     if mfirm:
         cand = _sanitize_trustee(mfirm.group(0))
         if 3 <= len(cand) <= 160:
             return cand
 
-    # Tier D: tail heuristic (last ~40 lines), prefer ones that mention trustee/sale/auction
-    tail = lines[-40:] if len(lines) > 40 else lines
+    # Tier E: tail heuristic (last ~45 lines)
+    tail = lines[-45:] if len(lines) > 45 else lines
     for ln in reversed(tail):
         if _BAD_TRUSTEE_RX.search(ln):
             continue
@@ -376,7 +398,6 @@ def _extract_trustee(lines: List[str], full_text: str) -> str:
             if 3 <= len(cand) <= 160:
                 return cand
 
-    # Tier E: any firm-ish tail line that isn't boilerplate
     for ln in reversed(tail):
         if _BAD_TRUSTEE_RX.search(ln):
             continue
@@ -532,12 +553,19 @@ def run():
         notice_pages_fetched_ok += 1
 
         soup = BeautifulSoup(r.text, "html.parser")
-        body_text = _text_from_main_content(soup)
-        lines = _clean_lines(body_text)
-        full_text = "\n".join(lines) if lines else body_text
-        full_text_norm = _norm_ws(full_text)
 
-        sale_date_iso, dts, candidates = _pick_sale_date_in_window(full_text_norm, dts_min, dts_max)
+        # IMPORTANT: use entry-content for snippet/body, but also include full article for trustee extraction.
+        body_text = _text_from_main_content(soup)
+        article_all_text = _text_from_article_all(soup)
+
+        body_lines = _clean_lines(body_text)
+        body_full = "\n".join(body_lines) if body_lines else body_text
+
+        # Combined text improves trustee/firm extraction without polluting the snippet
+        combined_text = "\n".join([body_full, article_all_text])
+        combined_text_norm = _norm_ws(combined_text)
+
+        sale_date_iso, dts, candidates = _pick_sale_date_in_window(combined_text_norm, dts_min, dts_max)
         if not sale_date_iso:
             if candidates:
                 skipped_outside_window += 1
@@ -556,7 +584,7 @@ def run():
             _sample("expired", f"url={url} sale={sale_date_iso} dts={dts}")
             continue
 
-        county_full = _extract_county(full_text)
+        county_full = _extract_county(combined_text)
         if not county_full:
             skipped_county_missing += 1
             if len(sample_county_missing) < 5:
@@ -570,8 +598,8 @@ def run():
             _sample("out_of_geo", f"url={url} county={county_full}")
             continue
 
-        address = _extract_address(lines, full_text)
-        trustee = _extract_trustee(lines, full_text)
+        address = _extract_address(body_lines, combined_text)
+        trustee = _extract_trustee(_clean_lines(article_all_text), combined_text)
 
         lead_key = make_lead_key(
             "PublicNotices",
@@ -591,11 +619,11 @@ def run():
             county_full=county_full,
             trustee=trustee,
             address=address,
-            lines=lines,
+            lines=body_lines,  # snippet stays based on the notice body
             max_chars=min(MAX_SNIPPET_LEN, 1900),
         )
 
-        flags = detect_risk_flags(full_text_norm)
+        flags = detect_risk_flags(combined_text_norm)
         county_b = county_base(county_full) or ""
         has_contact = bool(trustee.strip())
         score = score_v2("Foreclosure", county_b, dts, has_contact)
