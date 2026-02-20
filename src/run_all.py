@@ -18,13 +18,38 @@ def run_bot(name: str, fn):
 
 
 def main():
-    print("RUN_ALL VERSION CHECK - 2026-02-18")
+    print("RUN_ALL VERSION CHECK - 2026-02-19 (stage2-3 scaffold)")
     print(f"RUN_ALL UTC START: {datetime.utcnow().isoformat()}")
 
+    # ---------------- Stage 1: Ingestion ----------------
     run_bot("ForeclosureTennesseeBot", foreclosure_tennessee_bot.run)
     run_bot("TNForeclosureNoticesBot", tn_foreclosure_notices_bot.run)
     run_bot("PublicNoticesBot", public_notices_bot.run)
     run_bot("TaxPagesBot", tax_pages_bot.run)
+
+    # ---------------- Stage 2: Enrichment + Comps ----------------
+    def _run_enrichment():
+        from .enrichment.propstream_enricher import run as _run
+        _run()
+
+    def _run_comps():
+        from .enrichment.comps import run as _run
+        _run()
+
+    run_bot("Stage2_PropStreamEnrichment", _run_enrichment)
+    run_bot("Stage2_CompsEngine", _run_comps)
+
+    # ---------------- Stage 3: Grading + Packaging ----------------
+    def _run_grading():
+        from .grading.grade import run as _run
+        _run()
+
+    def _run_packaging():
+        from .packaging.packager import run as _run
+        _run()
+
+    run_bot("Stage3_AuctionFitGrading", _run_grading)
+    run_bot("Stage3_PDFPackaging", _run_packaging)
 
     print(f"RUN_ALL UTC END: {datetime.utcnow().isoformat()}")
 
