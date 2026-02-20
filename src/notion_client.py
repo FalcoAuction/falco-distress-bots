@@ -60,23 +60,23 @@ def _safe_get_select(prop: Dict[str, Any]) -> Optional[str]:
 
 def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Normalizes Notion page fields.
+    Extracts normalized fields from a Notion page.
 
     CRITICAL FIX:
-    Properly extracts 'Enrichment JSON' from rich_text so Stage 2 works.
+    Properly extracts 'Enrichment JSON' so Stage 2 works.
     """
 
     props = page.get("properties", {})
     fields: Dict[str, Any] = {}
 
-    # Stage 1 fields (DO NOT BREAK)
+    # Stage 1 fields
     fields["lead_key"] = _safe_get_rich_text(props.get("Lead Key"))
     fields["address"] = _safe_get_rich_text(props.get("Address"))
     fields["county"] = _safe_get_rich_text(props.get("County"))
     fields["state"] = _safe_get_rich_text(props.get("State"))
     fields["event_date"] = _safe_get_rich_text(props.get("Event Date"))
 
-    # Stage 2 critical field
+    # Stage 2 critical enrichment field
     enrichment_raw = _safe_get_rich_text(props.get("Enrichment JSON"))
     fields["enrichment_json"] = enrichment_raw
 
@@ -88,7 +88,7 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
     else:
         fields["enrichment_json_parsed"] = None
 
-    # Optional numeric fields (if present in DB)
+    # Optional numeric fields
     fields["estimated_value"] = _safe_get_number(props.get("Estimated Value"))
     fields["value_band_low"] = _safe_get_number(props.get("Value Band Low"))
     fields["value_band_high"] = _safe_get_number(props.get("Value Band High"))
@@ -101,11 +101,6 @@ def extract_page_fields(page: Dict[str, Any]) -> Dict[str, Any]:
 # =========================================================
 
 def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Original Stage 1 property builder.
-    Must exist for bots import compatibility.
-    """
-
     props: Dict[str, Any] = {}
 
     if "lead_key" in fields:
@@ -152,11 +147,6 @@ def build_properties(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Stage 2+ property builder.
-    Non-destructive.
-    """
-
     properties: Dict[str, Any] = {}
 
     if "enrichment_json" in extra_fields and extra_fields["enrichment_json"]:
@@ -185,12 +175,11 @@ def build_extra_properties(extra_fields: Dict[str, Any]) -> Dict[str, Any]:
     return properties
 
 
-def create_lead(properties: Dict[str, Any]) -> None:
-    """
-    Stage 1 create function.
-    Must exist for bot compatibility.
-    """
+# =========================================================
+# CREATE / UPDATE
+# =========================================================
 
+def create_lead(properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages"
 
     payload = {
@@ -204,11 +193,14 @@ def create_lead(properties: Dict[str, Any]) -> None:
         print("[NOTION] create error:", r.status_code, r.text)
 
 
-def update_page(page_id: str, properties: Dict[str, Any]) -> None:
+def update_lead(page_id: str, properties: Dict[str, Any]) -> None:
     """
-    Non-destructive update.
+    Alias required by Stage 1 bots.
     """
+    update_page(page_id, properties)
 
+
+def update_page(page_id: str, properties: Dict[str, Any]) -> None:
     url = f"{BASE_URL}/pages/{page_id}"
 
     payload = {"properties": properties}
