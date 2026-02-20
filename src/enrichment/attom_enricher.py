@@ -147,7 +147,6 @@ def _parse_address(addr: str) -> Tuple[str, str]:
         if street and city:
             return street, f"{city}, {st}"
 
-    # last resort: assume last token is city
     if len(tokens) >= 3 and tokens[-1].isalpha():
         city = tokens[-1]
         street = " ".join(tokens[:-1]).strip()
@@ -156,30 +155,84 @@ def _parse_address(addr: str) -> Tuple[str, str]:
     return raw, "Nashville, TN"
 
 
-def _extract_avm_low_high_conf(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def _extract_avm(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Try multiple shapes because ATTOM tenants vary.
+    """
+    # Shape A: property[0].avm.{valueRangeLow,valueRangeHigh,confidenceScore}
     try:
         prop_list = avm_payload.get("property")
         if isinstance(prop_list, list) and prop_list:
             prop = prop_list[0]
-        else:
-            return None, None, None
-        avm = prop.get("avm") if isinstance(prop, dict) else {}
-        if not isinstance(avm, dict):
-            return None, None, None
-        low = _safe_float(avm.get("valueRangeLow"))
-        high = _safe_float(avm.get("valueRangeHigh"))
-        conf = _safe_float(avm.get("confidenceScore"))
-        return low, high, conf
+            if isinstance(prop, dict):
+                avm = prop.get("avm") or {}
+                if isinstance(avm, dict):
+                    low = _safe_float(avm.get("valueRangeLow"))
+                    high = _safe_float(avm.get("valueRangeHigh"))
+                    conf = _safe_float(avm.get("confidenceScore"))
+                    if low is not None or high is not None:
+                        return low, high, conf
     except Exception:
-        return None, None, None
+        pass
+
+    # Shape B: property[0].avmAmount or similar
+    try:
+        prop_list = avm_payload.get("property")
+        if isinstance(prop_list, list) and prop_list:
+            prop = prop_list[0]
+            if isinstance(prop, dict):
+                low = _safe_float(prop.get("value") or prop.get("avmValue") or prop.get("avmamount"))
+                if low is not None:
+                    return low, low, _safe_float(prop.get("confidenceScore"))
+    except Exception:
+        pass
+
+    return None, None, None
+
+
+def _extract_homeequity(he_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Tenant variability: attempt common fields.
+    """
+    try:
+        prop_list = he_payload.get("property")
+        if isinstance(prop_list, list) and prop_list:
+            prop = prop_list[0]
+        else:
+            prop = {}
+        if not isinstance(prop, dict):
+            return None, None, None
+
+        # Common: prop['homeEquity']['estimatedValue'] or prop['valuation'] etc.
+        for path in [
+            ("homeEquity", "estimatedValue"),
+            ("homeEquity", "estimatedvalue"),
+            ("homeEquity", "marketValue"),
+            ("valuation", "estimatedValue"),
+            ("valuation", "value"),
+        ]:
+            a = prop.get(path[0]) or {}
+            if isinstance(a, dict):
+                v = _safe_float(a.get(path[1]))
+                if v is not None:
+                    # no range, so set low=high=v
+                    conf = _safe_float(a.get("confidenceScore") or a.get("confidence"))
+                    return v, v, conf
+
+        # fallback: prop['estimatedValue']
+        v2 = _safe_float(prop.get("estimatedValue") or prop.get("marketValue"))
+        if v2 is not None:
+            return v2, v2, _safe_float(prop.get("confidenceScore"))
+    except Exception:
+        pass
+
+    return None, None, None
 
 
 def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
     if not enrichment_json:
         return None
     try:
-        # it's clipped, so we only look for a tiny embedded object we control
-        # we store as {"falco":{"attom":{"no_result":true,"ts":"..."}}}
         m = re.search(r'("falco"\s*:\s*\{.*?\})', enrichment_json)
         if not m:
             return None
@@ -198,8 +251,7 @@ def run() -> Dict[str, int]:
 
     dts_min, dts_max = get_dts_window("ENRICH")
 
-    # Cost controls
-    max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))  # keep low during testing
+    max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))
     cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
     client = AttomClient(api_key=api_key)
@@ -221,9 +273,12 @@ def run() -> Dict[str, int]:
     skipped_no_match = 0
     skipped_cooldown = 0
     errors = 0
+    he_fallback_calls = 0
 
     now = datetime.now(timezone.utc)
     cooldown = timedelta(hours=cooldown_hours)
+
+    logged_avm_shape = False
 
     for page in pages:
         if enriched >= max_enrich:
@@ -240,12 +295,10 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # Skip if already enriched with value
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
-        # Skip if we recently tried and got no result
         ej = str(fields.get("enrichment_json") or "").strip()
         marker = _read_no_result_marker(ej)
         if marker and marker.get("no_result") is True and marker.get("ts"):
@@ -266,44 +319,71 @@ def run() -> Dict[str, int]:
             detail = client.property_detail(address1=address1, address2=address2)
             if _is_success_without_result(detail) or not _has_property(detail):
                 skipped_no_match += 1
-                # write no-result marker so we don't burn calls again tomorrow
                 write_obj = {
                     "enrichment_json": _clip_json(
-                        {"falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "detail_no_result"}},
-                         "meta": {"address1": address1, "address2": address2}}
+                        {
+                            "falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "detail_no_result"}},
+                            "meta": {"address1": address1, "address2": address2},
+                        }
                     )
                 }
-                props = build_extra_properties(write_obj)
-                update_lead(page_id, props)
+                update_lead(page_id, build_extra_properties(write_obj))
                 if DEBUG:
                     print(f"[ATTOM][DEBUG] no-result detail {address1} | {address2} msg={_status_msg(detail)}")
                 continue
 
-            # Only call AVM if detail matched (prevents burning 2 calls on bad leads)
             avm = client.avm_detail(address1=address1, address2=address2)
             if _is_success_without_result(avm) or not _has_property(avm):
                 skipped_no_match += 1
                 write_obj = {
                     "enrichment_json": _clip_json(
-                        {"falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "avm_no_result"}},
-                         "meta": {"address1": address1, "address2": address2}}
+                        {
+                            "falco": {"attom": {"no_result": True, "ts": now.isoformat().replace("+00:00", "Z"), "reason": "avm_no_result"}},
+                            "meta": {"address1": address1, "address2": address2},
+                        }
                     )
                 }
-                props = build_extra_properties(write_obj)
-                update_lead(page_id, props)
+                update_lead(page_id, build_extra_properties(write_obj))
                 if DEBUG:
                     print(f"[ATTOM][DEBUG] no-result avm {address1} | {address2} msg={_status_msg(avm)}")
                 continue
 
-            avm_low, avm_high, avm_conf = _extract_avm_low_high_conf(avm)
+            # Log AVM shape once (NO extra calls)
+            if DEBUG and not logged_avm_shape:
+                logged_avm_shape = True
+                try:
+                    p0 = (avm.get("property") or [{}])[0]
+                    keys = sorted(list(p0.keys())) if isinstance(p0, dict) else []
+                    print(f"[ATTOM][DEBUG] AVM property[0] keys={keys}")
+                    if isinstance(p0, dict) and "avm" in p0 and isinstance(p0["avm"], dict):
+                        print(f"[ATTOM][DEBUG] AVM avm keys={sorted(list(p0['avm'].keys()))}")
+                except Exception:
+                    pass
 
-            # Always store a compact bundle, but only set values if present
-            bundle = {
-                "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
-                "meta": {"address1": address1, "address2": address2},
-            }
+            avm_low, avm_high, avm_conf = _extract_avm(avm)
+
+            # Fallback: home equity endpoint only if AVM didn't provide value
+            if avm_low is None and avm_high is None:
+                try:
+                    he = client.valuation_home_equity(address1=address1, address2=address2)
+                    he_fallback_calls += 1
+                    if not _is_success_without_result(he) and _has_property(he):
+                        he_low, he_high, he_conf = _extract_homeequity(he)
+                        if he_low is not None or he_high is not None:
+                            avm_low, avm_high = he_low, he_high
+                            if avm_conf is None:
+                                avm_conf = he_conf
+                except Exception:
+                    pass
+
+            # Write compact record
             write_obj: Dict[str, Any] = {
-                "enrichment_json": _clip_json(bundle),
+                "enrichment_json": _clip_json(
+                    {
+                        "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
+                        "meta": {"address1": address1, "address2": address2},
+                    }
+                ),
                 "enrichment_confidence": avm_conf,
             }
 
@@ -312,8 +392,7 @@ def run() -> Dict[str, int]:
                 write_obj["estimated_value_high"] = avm_high
                 enriched_with_value += 1
 
-            props = build_extra_properties(write_obj)
-            update_lead(page_id, props)
+            update_lead(page_id, build_extra_properties(write_obj))
 
             enriched += 1
             if DEBUG:
@@ -335,6 +414,7 @@ def run() -> Dict[str, int]:
         "skipped_enrich_no_match": skipped_no_match,
         "skipped_enrich_cooldown": skipped_cooldown,
         "errors": errors,
+        "he_fallback_calls": he_fallback_calls,
         "attom_call_count": client.call_count,
         "attom_call_count_by_path": client.call_count_by_path,
     }
