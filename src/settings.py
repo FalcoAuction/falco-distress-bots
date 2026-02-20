@@ -1,21 +1,44 @@
 # src/settings.py
+"""Shared configuration + normalization helpers used by all bots.
+
+Hard goals:
+- Keep signatures stable across bot imports (back/forward compat).
+- Centralize: allowed counties, county normalization, target-county filtering,
+  distress time window (days-to-sale), and raw snippet clipping.
+
+Env vars (backwards compatible):
+- FALCO_ALLOWED_COUNTIES: CSV of county base names (e.g. Davidson,Williamson)
+- FALCO_DTS_MIN, FALCO_DTS_MAX: default days-to-sale window
+- FALCO_PUBLIC_DTS_MIN, FALCO_PUBLIC_DTS_MAX: PublicNoticesBot override window
+- FALCO_MAX_RAW_SNIPPET_CHARS: default snippet length (1200)
+"""
+
+from __future__ import annotations
 
 import os
+from typing import Optional, Tuple
+
 
 # ============================================================
 # COUNTY HELPERS
 # ============================================================
 
-def county_base(name: str | None) -> str | None:
+def _norm_ws(s: str) -> str:
+    return " ".join(str(s).strip().split())
+
+
+def county_base(name: Optional[str]) -> Optional[str]:
+    """Return base county name without 'County' suffix, normalized whitespace."""
     if not name:
         return None
-    n = " ".join(str(name).strip().split())
+    n = _norm_ws(name)
     if n.lower().endswith(" county"):
         n = n[:-7].strip()
-    return n
+    return n or None
 
 
-def normalize_county(name: str | None) -> str | None:
+def normalize_county(name: Optional[str]) -> Optional[str]:
+    """Return 'X County' canonical form (or None)."""
     b = county_base(name)
     if not b:
         return None
@@ -23,18 +46,14 @@ def normalize_county(name: str | None) -> str | None:
 
 
 # Back-compat alias (some bots import this)
-def normalize_county_full(name: str | None) -> str | None:
+def normalize_county_full(name: Optional[str]) -> Optional[str]:
     return normalize_county(name)
 
 
 def get_allowed_counties_base() -> set[str]:
-    """
-    Reads allowed counties from env:
-      FALCO_ALLOWED_COUNTIES="Davidson,Williamson,..."
-    Returns a set of base county names (no 'County' suffix).
-    """
+    """Read allowlist from env and return a set of base names."""
     raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford,Wilson,Sumner")
-    vals = []
+    vals: list[str] = []
     for part in raw.split(","):
         p = part.strip()
         if p:
@@ -42,23 +61,16 @@ def get_allowed_counties_base() -> set[str]:
     return {county_base(v) for v in vals if county_base(v)}
 
 
-def is_allowed_county(county_name: str | None) -> bool:
-    """
-    Back-compat function used by multiple bots.
-    Accepts 'Davidson' or 'Davidson County' and checks against env allowlist.
-    """
+def is_allowed_county(county_name: Optional[str]) -> bool:
+    """Accepts 'X' or 'X County' and checks against env allowlist."""
     b = county_base(county_name)
     if not b:
         return False
-    allowed = get_allowed_counties_base()
-    return b in allowed
+    return b in get_allowed_counties_base()
 
 
 def _get_config_target_counties_fallback() -> list[str]:
-    """
-    If a bot calls within_target_counties(county) with no 2nd arg,
-    we try to pull TARGET_COUNTIES from src.config if it exists.
-    """
+    """If a bot calls within_target_counties(county) with no 2nd arg, try src.config.TARGET_COUNTIES."""
     try:
         from .config import TARGET_COUNTIES  # type: ignore
         if isinstance(TARGET_COUNTIES, list):
@@ -68,12 +80,11 @@ def _get_config_target_counties_fallback() -> list[str]:
         return []
 
 
-def within_target_counties(county_name: str | None, target_counties: list[str] | None = None) -> bool:
-    """
-    BACKWARD + FORWARD COMPAT:
+def within_target_counties(county_name: Optional[str], target_counties: Optional[list[str]] = None) -> bool:
+    """BACKWARD + FORWARD COMPAT target-county filter.
 
-    - Old call style: within_target_counties(county)
-    - New call style: within_target_counties(county, TARGET_COUNTIES)
+    - Old call: within_target_counties(county)
+    - New call: within_target_counties(county, TARGET_COUNTIES)
 
     If target_counties is None, we fallback to src.config.TARGET_COUNTIES if present.
     If still empty/None => allow.
@@ -88,11 +99,7 @@ def within_target_counties(county_name: str | None, target_counties: list[str] |
     if not b:
         return False
 
-    targets_base = {
-        county_base(t).lower()
-        for t in target_counties
-        if county_base(t)
-    }
+    targets_base = {county_base(t).lower() for t in target_counties if county_base(t)}
     return b.lower() in targets_base
 
 
@@ -100,18 +107,33 @@ def within_target_counties(county_name: str | None, target_counties: list[str] |
 # DISTRESS WINDOW CONTROL
 # ============================================================
 
-def get_dts_window(source: str | None = None):
-    """
-    Returns (min_days, max_days) window for filtering.
-    Bots may call: get_dts_window("FORECLOSURE_TN") etc.
+def get_dts_window(source: Optional[str] = None, *args, **kwargs) -> Tuple[int, int]:
+    """Return (min_days, max_days) days-to-sale window.
 
-    Uses environment variables:
-      FALCO_DTS_MIN
-      FALCO_DTS_MAX
+    Stable signature: accepts optional `source` plus *args/**kwargs so older/newer callers won't crash.
 
-    Defaults:
-      21 to 90 days
+    Default env vars:
+      FALCO_DTS_MIN (default 21)
+      FALCO_DTS_MAX (default 90)
+
+    PublicNoticesBot override (if source indicates public notices):
+      FALCO_PUBLIC_DTS_MIN (default falls back to FALCO_DTS_MIN or 0)
+      FALCO_PUBLIC_DTS_MAX (default falls back to FALCO_DTS_MAX or 120)
     """
+    src = (source or "").upper()
+
+    if "PUBLIC" in src:
+        # More permissive defaults to avoid silent skips.
+        try:
+            dts_min = int(os.getenv("FALCO_PUBLIC_DTS_MIN", os.getenv("FALCO_DTS_MIN", "0")))
+        except Exception:
+            dts_min = 0
+        try:
+            dts_max = int(os.getenv("FALCO_PUBLIC_DTS_MAX", os.getenv("FALCO_DTS_MAX", "120")))
+        except Exception:
+            dts_max = 120
+        return dts_min, dts_max
+
     try:
         dts_min = int(os.getenv("FALCO_DTS_MIN", "21"))
     except Exception:
@@ -129,10 +151,10 @@ def get_dts_window(source: str | None = None):
 # RAW SNIPPET CONTROL
 # ============================================================
 
-def clip_raw_snippet(text: str, max_chars: int | None = None) -> str:
-    """
-    Central place to keep Notion 'Raw Snippet' short so it doesn't become the full notice.
-    Controlled by:
+def clip_raw_snippet(text: Optional[str], max_chars: Optional[int] = None) -> str:
+    """Clip + normalize Raw Snippet so Notion doesn't store full notice bodies.
+
+    Env:
       FALCO_MAX_RAW_SNIPPET_CHARS (default 1200)
     """
     if text is None:
@@ -151,9 +173,7 @@ def clip_raw_snippet(text: str, max_chars: int | None = None) -> str:
     if max_chars <= 0:
         return ""
 
-    # collapse whitespace
     s = " ".join(s.split())
-
     if len(s) <= max_chars:
         return s
 
