@@ -9,8 +9,8 @@ jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      NOTION_TOKEN: ${{ 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 }}
+      NOTION_DATABASE_ID: ${{ 30b891c048598090addce9b11128c94e }}
 
       # FalcoFB Tier-1 tightening (copy/paste)
       FALCO_ALLOWED_COUNTIES: Davidson,Williamson,Rutherford,Wilson,Sumner
