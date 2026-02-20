@@ -1,8 +1,14 @@
-import re
-import requests
+# src/utils.py
+from __future__ import annotations
+
 import hashlib
-from bs4 import BeautifulSoup
+import re
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
+
+import requests
+from bs4 import BeautifulSoup
+
 
 def fetch(url: str) -> str:
     headers = {
@@ -12,16 +18,21 @@ def fetch(url: str) -> str:
     r.raise_for_status()
     return r.text
 
+
 def contains_any(text: str, keywords: list[str]) -> bool:
     t = (text or "").lower()
     return any(k.lower() in t for k in keywords)
 
+
 def find_date_iso(text: str) -> str:
+    """Attempts to find a date like:
+    - January 5, 2026
+    - 01/05/2026
+    Returns ISO date (YYYY-MM-DD) or "".
     """
-    Attempts to find a date like:
-    January 5, 2026
-    01/05/2026
-    """
+    if not text:
+        return ""
+
     # Month word format
     month_pattern = r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}"
     match = re.search(month_pattern, text, re.IGNORECASE)
@@ -29,7 +40,7 @@ def find_date_iso(text: str) -> str:
         try:
             d = datetime.strptime(match.group(0), "%B %d, %Y")
             return d.date().isoformat()
-        except:
+        except Exception:
             pass
 
     # Numeric format
@@ -39,23 +50,29 @@ def find_date_iso(text: str) -> str:
         try:
             d = datetime.strptime(match.group(0), "%m/%d/%Y")
             return d.date().isoformat()
-        except:
+        except Exception:
             pass
 
     return ""
 
+
 def guess_county(text: str) -> str:
+    """Very light heuristic: returns the first county base name found in text."""
     counties = [
         "Davidson","Williamson","Rutherford","Sumner","Wilson","Maury",
         "Montgomery","Robertson","Dickson","Bedford","Putnam",
         "Shelby","Hamilton","Knox","Bledsoe","Rhea"
     ]
+    t = (text or "").lower()
     for c in counties:
-        if c.lower() in text.lower():
+        if c.lower() in t:
             return c
     return ""
 
+
 def extract_contact(text: str) -> str:
+    if not text:
+        return ""
     email_match = re.search(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b", text)
     if email_match:
         return email_match.group(0)
@@ -66,32 +83,49 @@ def extract_contact(text: str) -> str:
 
     return ""
 
+
 def extract_address(text: str) -> str:
-    addr_pattern = r"\d{1,5}\s+[A-Za-z0-9.\s]+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Court|Ct|Boulevard|Blvd)"
+    """Best-effort street address extraction."""
+    if not text:
+        return ""
+    addr_pattern = (
+        r"\b\d{1,6}\s+[A-Za-z0-9#.,'\-\s]{2,80}\s+"
+        r"(Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Boulevard|Blvd\.?|Way|Place|Pl\.?|Circle|Cir\.?|Pike|Hwy|Highway)\b"
+        r"(?:[^\n,]{0,40})"
+    )
     match = re.search(addr_pattern, text, re.IGNORECASE)
     if match:
-        return match.group(0)
+        return match.group(0).strip(" ,;\n\t")
     return ""
+
 
 def extract_trustee_or_attorney(text: str) -> str:
-    trustee_pattern = r"(Substitute Trustee|Trustee|Attorney)[^,.]{0,120}"
+    """Best-effort trustee/attorney extraction."""
+    if not text:
+        return ""
+    trustee_pattern = r"\b(Substitute\s+Trustee|Trustee|Attorney)\b[^\n,.]{0,140}"
     match = re.search(trustee_pattern, text, re.IGNORECASE)
     if match:
-        return match.group(0)
+        return match.group(0).strip()
     return ""
 
-def make_lead_key(distress_type: str, county: str, sale_date_iso: str, address: str, trustee: str, url: str) -> str:
-    base = "|".join([
-        (distress_type or "").strip().lower(),
-        (county or "").strip().lower(),
-        (sale_date_iso or "").strip().lower(),
-        (address or "").strip().lower(),
-        (trustee or "").strip().lower(),
-        (url or "").strip().lower(),
-    ])
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()[:16]
-import hashlib
-import re
+
+# ----------------------------
+# URL + Lead key
+# ----------------------------
+
+def canonicalize_url(url: str) -> str:
+    """Remove query/fragment and normalize scheme/netloc for key stability."""
+    if not url:
+        return ""
+    try:
+        p = urlparse(url.strip())
+        scheme = (p.scheme or "https").lower()
+        netloc = (p.netloc or "").lower()
+        path = re.sub(r"/+$", "", p.path or "")
+        return urlunparse((scheme, netloc, path, "", "", ""))
+    except Exception:
+        return (url or "").strip()
 
 
 def _norm_key_part(s: str) -> str:
@@ -99,9 +133,23 @@ def _norm_key_part(s: str) -> str:
 
 
 def make_lead_key(*parts: str) -> str:
+    """Return a deterministic Lead Key (SHA1 hex = 40 chars).
+
+    Backward compatible with previous bots: they pass parts like
+      (distress_type, county, sale_date_iso, address, trustee, url)
+
+    Stability hardening:
+    - whitespace normalization on every part
+    - URL canonicalization (strip query/fragment, normalize host)
+    - still omits empty parts (to avoid breaking existing lead_key values already stored in Notion)
     """
-    Returns a stable fixed-length Lead Key (SHA1 hex = 40 chars).
-    This prevents truncation mismatch and makes dedupe deterministic.
-    """
-    base = "|".join(_norm_key_part(p) for p in parts if p)
+    normed: list[str] = []
+    for i, p in enumerate(parts):
+        if not p:
+            continue
+        if i == len(parts) - 1 and isinstance(p, str) and (p.startswith("http://") or p.startswith("https://")):
+            p = canonicalize_url(p)
+        normed.append(_norm_key_part(p))
+
+    base = "|".join(normed)
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
