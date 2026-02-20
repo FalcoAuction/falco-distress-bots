@@ -81,7 +81,6 @@ def _text_from_main_content(soup: BeautifulSoup) -> str:
             txt = node.get_text("\n")
             if txt and len(txt.strip()) > 50:
                 return txt
-    # fallback
     node = soup.select_one("article") or soup.select_one("main")
     return node.get_text("\n") if node else soup.get_text("\n")
 
@@ -294,7 +293,7 @@ def _extract_address(lines: List[str], full_text: str) -> str:
 
 
 # ============================================================
-# Trustee / firm extraction
+# Trustee / firm extraction (NOW catches: no-delimiter + next-line)
 # ============================================================
 
 _KNOWN_FIRM_RX = re.compile(
@@ -312,7 +311,6 @@ _KNOWN_FIRM_RX = re.compile(
     re.IGNORECASE,
 )
 
-# Only accept explicit labels with delimiters (prevents statute bait)
 _TRUSTEE_LABELED_RXES = [
     re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
     re.compile(r"\bTrustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
@@ -320,10 +318,15 @@ _TRUSTEE_LABELED_RXES = [
     re.compile(r"\bSubstitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
 ]
 
-# Added: common inline forms
 _TRUSTEE_INLINE_RXES = [
     re.compile(r"\b([A-Z][A-Za-z0-9&.,'\-\s]{3,120}),\s+as\s+Substitute\s+Trustee\b", re.IGNORECASE),
     re.compile(r"\bSubstitute\s+Trustee\s*,\s*([A-Z][A-Za-z0-9&.,'\-\s]{3,120})\b", re.IGNORECASE),
+]
+
+# NEW: label with no delimiter (only accept if it looks like a firm/person, not statute text)
+_TRUSTEE_NO_DELIM_RXES = [
+    re.compile(r"\bSubstitute\s+Trustee\s+([A-Z][A-Za-z0-9&.,'\-\s]{3,160})\b", re.IGNORECASE),
+    re.compile(r"\bTrustee\s+([A-Z][A-Za-z0-9&.,'\-\s]{3,160})\b", re.IGNORECASE),
 ]
 
 _FIRMISH_LINE_RX = re.compile(
@@ -354,48 +357,88 @@ def _sanitize_trustee(cand: str) -> str:
     return c
 
 
-def _extract_trustee(lines: List[str], full_text: str) -> str:
+def _looks_like_real_trustee(cand: str) -> bool:
+    """Guardrail: accept only if it resembles a person/firm."""
+    if not cand or len(cand) < 3:
+        return False
+    low = cand.lower()
+    if _BAD_TRUSTEE_RX.search(cand):
+        return False
+    # firm-ish tokens or known firm name are strong signals
+    if _FIRMISH_LINE_RX.search(cand):
+        return True
+    if _KNOWN_FIRM_RX.search(cand):
+        return True
+    # person-ish: contains at least two words and not purely numbers
+    if len(cand.split()) >= 2 and not re.fullmatch(r"[0-9\W_]+", cand):
+        return True
+    return False
+
+
+def _extract_trustee(article_lines: List[str], combined_text: str) -> str:
     # Tier A: labeled patterns line-by-line
-    for ln in lines:
+    for ln in article_lines:
         for rx in _TRUSTEE_LABELED_RXES:
             m = rx.search(ln)
             if m:
                 cand = _sanitize_trustee(m.group(1))
-                if 3 <= len(cand) <= 160:
+                if _looks_like_real_trustee(cand):
                     return cand
 
     # Tier B: labeled patterns in full text
     for rx in _TRUSTEE_LABELED_RXES:
-        m = rx.search(full_text)
+        m = rx.search(combined_text)
         if m:
             cand = _sanitize_trustee(m.group(1))
-            if 3 <= len(cand) <= 160:
+            if _looks_like_real_trustee(cand):
                 return cand
 
-    # Tier C: inline patterns in full text
+    # Tier C: inline patterns
     for rx in _TRUSTEE_INLINE_RXES:
-        m = rx.search(full_text)
+        m = rx.search(combined_text)
         if m:
             cand = _sanitize_trustee(m.group(1))
-            if 3 <= len(cand) <= 160:
+            if _looks_like_real_trustee(cand):
                 return cand
 
-    # Tier D: known firm anywhere
-    mfirm = _KNOWN_FIRM_RX.search(full_text)
+    # Tier D: no-delimiter patterns (guarded)
+    for rx in _TRUSTEE_NO_DELIM_RXES:
+        m = rx.search(combined_text)
+        if m:
+            cand = _sanitize_trustee(m.group(1))
+            if _looks_like_real_trustee(cand):
+                return cand
+
+    # Tier E: label on one line, firm on next line (very common with <br>)
+    for i, ln in enumerate(article_lines[:-1]):
+        low = ln.lower()
+        if low in ("substitute trustee", "trustee", "substitute trustee.", "trustee."):
+            nxt = article_lines[i + 1]
+            cand = _sanitize_trustee(nxt)
+            if _looks_like_real_trustee(cand):
+                return cand
+        if "substitute trustee" in low and len(low.strip()) <= 22:  # e.g. "SUBSTITUTE TRUSTEE"
+            nxt = article_lines[i + 1]
+            cand = _sanitize_trustee(nxt)
+            if _looks_like_real_trustee(cand):
+                return cand
+
+    # Tier F: known firm anywhere
+    mfirm = _KNOWN_FIRM_RX.search(combined_text)
     if mfirm:
         cand = _sanitize_trustee(mfirm.group(0))
-        if 3 <= len(cand) <= 160:
+        if _looks_like_real_trustee(cand):
             return cand
 
-    # Tier E: tail heuristic (last ~45 lines)
-    tail = lines[-45:] if len(lines) > 45 else lines
+    # Tier G: tail heuristic
+    tail = article_lines[-45:] if len(article_lines) > 45 else article_lines
     for ln in reversed(tail):
         if _BAD_TRUSTEE_RX.search(ln):
             continue
         low = ln.lower()
         if _FIRMISH_LINE_RX.search(ln) and ("trustee" in low or "sale" in low or "auction" in low):
             cand = _sanitize_trustee(ln)
-            if 3 <= len(cand) <= 160:
+            if _looks_like_real_trustee(cand):
                 return cand
 
     for ln in reversed(tail):
@@ -405,7 +448,7 @@ def _extract_trustee(lines: List[str], full_text: str) -> str:
             continue
         if _FIRMISH_LINE_RX.search(ln):
             cand = _sanitize_trustee(ln)
-            if 3 <= len(cand) <= 160:
+            if _looks_like_real_trustee(cand):
                 return cand
 
     return ""
@@ -554,14 +597,12 @@ def run():
 
         soup = BeautifulSoup(r.text, "html.parser")
 
-        # IMPORTANT: use entry-content for snippet/body, but also include full article for trustee extraction.
         body_text = _text_from_main_content(soup)
         article_all_text = _text_from_article_all(soup)
 
         body_lines = _clean_lines(body_text)
         body_full = "\n".join(body_lines) if body_lines else body_text
 
-        # Combined text improves trustee/firm extraction without polluting the snippet
         combined_text = "\n".join([body_full, article_all_text])
         combined_text_norm = _norm_ws(combined_text)
 
@@ -599,7 +640,9 @@ def run():
             continue
 
         address = _extract_address(body_lines, combined_text)
-        trustee = _extract_trustee(_clean_lines(article_all_text), combined_text)
+
+        article_lines = _clean_lines(article_all_text)
+        trustee = _extract_trustee(article_lines, combined_text)
 
         lead_key = make_lead_key(
             "PublicNotices",
