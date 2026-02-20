@@ -195,6 +195,56 @@ def build_properties(*args, **kwargs) -> Dict[str, Any]:
 
 
 # ----------------------------
+# Non-destructive update helpers
+# ----------------------------
+
+def _is_empty_prop(prop: Dict[str, Any]) -> bool:
+    """Return True if a Notion property payload represents 'empty' and should not overwrite existing data."""
+    if not isinstance(prop, dict):
+        return True
+
+    if "title" in prop:
+        return not prop.get("title")
+    if "rich_text" in prop:
+        return not prop.get("rich_text")
+    if "select" in prop:
+        return prop.get("select") is None
+    if "number" in prop:
+        return prop.get("number") is None
+    if "date" in prop:
+        return prop.get("date") is None
+    if "url" in prop:
+        return prop.get("url") is None
+
+    # Unknown type: be conservative (don't overwrite)
+    return True
+
+
+def prune_empty_properties(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop empty properties so updates never clobber populated Notion fields with blanks."""
+    if not properties:
+        return {}
+    out: Dict[str, Any] = {}
+    for k, v in properties.items():
+        try:
+            if isinstance(v, dict) and _is_empty_prop(v):
+                continue
+            out[k] = v
+        except Exception:
+            # If something is weird, keep it for safety rather than dropping unexpectedly
+            out[k] = v
+    return out
+
+
+def _extract_url_from_properties(properties: Dict[str, Any]) -> str:
+    try:
+        u = properties.get("URL", {}).get("url")  # type: ignore
+        return str(u).strip() if u else ""
+    except Exception:
+        return ""
+
+
+# ----------------------------
 # CRUD / UPSERT
 # ----------------------------
 
@@ -215,6 +265,24 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
     return results[0].get("id")
 
 
+def find_existing_by_url(url: str) -> Optional[str]:
+    """Fallback dedupe: if Lead Key algorithm changes, match an existing page by URL."""
+    if not NOTION_DATABASE_ID:
+        raise RuntimeError("Missing NOTION_DATABASE_ID env var.")
+    if not url:
+        return None
+
+    body = {
+        "filter": {"property": "URL", "url": {"equals": url}},
+        "page_size": 1,
+    }
+    res = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", json=body)
+    results = res.get("results") or []
+    if not results:
+        return None
+    return results[0].get("id")
+
+
 def create_lead(properties: Dict[str, Any]) -> str:
     if not NOTION_DATABASE_ID:
         raise RuntimeError("Missing NOTION_DATABASE_ID env var.")
@@ -224,15 +292,37 @@ def create_lead(properties: Dict[str, Any]) -> str:
 
 
 def update_lead(page_id: str, properties: Dict[str, Any]) -> str:
+    properties = prune_empty_properties(properties)
     body = {"properties": properties}
     res = _request("PATCH", f"/pages/{page_id}", json=body)
     return res.get("id")
 
 
 def upsert_lead(lead_key: str, properties: Dict[str, Any]) -> Tuple[str, str]:
+    """Upsert by Lead Key with URL fallback + non-destructive updates.
+
+    Safety rules:
+    - Never overwrite populated fields with empty values.
+    - If Lead Key lookup misses but URL matches an existing page, update that page
+      and write the new Lead Key to it (lightweight migration).
+    """
+    if not lead_key:
+        raise ValueError("lead_key required for upsert_lead")
+
     existing_id = find_existing_by_lead_key(lead_key)
+    if not existing_id:
+        url = _extract_url_from_properties(properties)
+        if url:
+            existing_id = find_existing_by_url(url)
+
     if existing_id:
+        # Ensure Lead Key is present on matched records (migration / stability)
+        try:
+            properties.setdefault("Lead Key", _rich_text_prop(lead_key))
+        except Exception:
+            pass
         update_lead(existing_id, properties)
         return existing_id, "updated"
+
     new_id = create_lead(properties)
     return new_id, "created"
