@@ -25,7 +25,6 @@ def main():
     run_bot("ForeclosureTennesseeBot", foreclosure_tennessee_bot.run)
     run_bot("TNForeclosureNoticesBot", tn_foreclosure_notices_bot.run)
     run_bot("PublicNoticesBot", public_notices_bot.run)
-    run_bot("TaxPagesBot", public_notices_bot.run)
     run_bot("TaxPagesBot", tax_pages_bot.run)
 
     # ---------------- Stage 2: Enrichment + Comps ----------------
