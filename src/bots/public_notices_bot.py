@@ -13,9 +13,9 @@ Required behaviors:
 - Run-level debug artifacts: skip reason counts + sample_kept + sample_county_missing
 
 Notes:
-- This bot intentionally uses a slightly more permissive days-to-sale window by default.
-  See src.settings.get_dts_window(source="PUBLIC_NOTICES") and env overrides:
+- This bot uses the standard days-to-sale window by default unless overridden via:
     FALCO_PUBLIC_DTS_MIN / FALCO_PUBLIC_DTS_MAX
+  The value printed comes from src.settings.get_dts_window("PUBLIC_NOTICES").
 """
 
 from __future__ import annotations
@@ -93,16 +93,14 @@ def _text_from_main_content(soup: BeautifulSoup) -> str:
     for sel in selectors:
         node = soup.select_one(sel)
         if node:
-            # Keep line breaks for later key-line extraction
             txt = node.get_text("\n")
             if txt and len(txt.strip()) > 50:
                 return txt
-    # Fallback
     return soup.get_text("\n")
 
 
 # ============================================================
-# Sale date extraction
+# Sale date extraction (robust candidate selection)
 # ============================================================
 
 _MONTHS = (
@@ -111,25 +109,23 @@ _MONTHS = (
 )
 
 _DATE_PATTERNS = [
-    # Month name formats (with comma year optional)
     re.compile(rf"\b({_MONTHS})\s+\d{{1,2}}(?:st|nd|rd|th)?[,]?\s+\d{{4}}\b", re.IGNORECASE),
     re.compile(rf"\b({_MONTHS})\s+\d{{1,2}}(?:st|nd|rd|th)?\b", re.IGNORECASE),  # year missing
-    # Numeric
     re.compile(r"\b\d{1,2}/\d{1,2}/\d{2,4}\b"),
     re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
 ]
 
-# extra context tokens that often surround the auction date
 _DATE_CONTEXT_TOKENS = [
-    "sale", "sold", "auction", "public auction", "foreclosure", "trustee", "will be sold", "to be sold",
-    "on", "at", "p.m.", "a.m."
+    "sale", "sold", "auction", "public auction", "foreclosure", "trustee",
+    "will be sold", "to be sold", "substitute trustee", "at the", "front door",
+    "p.m.", "a.m.", "courthouse", "chancery", "circuit"
 ]
 
 
 def _parse_date_str(date_str: str, now_year: int) -> Optional[str]:
     s = _norm_ws(date_str)
     s = re.sub(r"(st|nd|rd|th)\b", "", s, flags=re.IGNORECASE).strip()
-    # Normalize month abbreviations for strptime where possible
+
     fmts = [
         "%B %d, %Y",
         "%b %d, %Y",
@@ -146,11 +142,13 @@ def _parse_date_str(date_str: str, now_year: int) -> Optional[str]:
         except Exception:
             continue
 
-    # If the date is missing a year (common on some snippets), assume current year, then next year if already past
+    # If missing year, assume current year, then next year if the assumed date already passed recently.
     m = re.match(rf"^({_MONTHS})\s+(\d{{1,2}})$", s, flags=re.IGNORECASE)
     if m:
         month = m.group(1)
         day = m.group(2)
+
+        # Try current year first
         for year in (now_year, now_year + 1):
             for fmt in ("%B %d %Y", "%b %d %Y"):
                 try:
@@ -166,41 +164,67 @@ def _extract_date_candidates(text: str) -> List[Tuple[str, int]]:
     """Return list of (iso_date, score) based on context proximity."""
     if not text:
         return []
-    t = text
+
     now_year = datetime.utcnow().year
     candidates: List[Tuple[str, int]] = []
     for pat in _DATE_PATTERNS:
-        for m in pat.finditer(t):
+        for m in pat.finditer(text):
             raw = m.group(0)
             iso = _parse_date_str(raw, now_year)
             if not iso:
                 continue
-            # score based on context around match
-            start = max(0, m.start() - 120)
-            end = min(len(t), m.end() + 120)
-            ctx = t[start:end].lower()
+
+            start = max(0, m.start() - 140)
+            end = min(len(text), m.end() + 140)
+            ctx = text[start:end].lower()
+
             score = 1
             for tok in _DATE_CONTEXT_TOKENS:
                 if tok in ctx:
                     score += 1
+
             candidates.append((iso, score))
+
     # de-dupe by iso keeping max score
     best: Dict[str, int] = {}
     for iso, sc in candidates:
         best[iso] = max(best.get(iso, 0), sc)
+
+    # sort by score desc, then date asc (stable)
     return sorted(best.items(), key=lambda x: (-x[1], x[0]))
 
 
 def _pick_sale_date_in_window(text: str, dts_min: int, dts_max: int) -> Tuple[str, Optional[int], List[Tuple[str, int]]]:
-    """Pick best sale date candidate within window. Returns (sale_date_iso, dts, candidates)."""
+    """Pick best sale date candidate within window.
+
+    Improvements vs prior:
+    - Evaluate ALL candidates and choose:
+        highest context score
+        then closest days-to-sale within window (smallest dts)
+    """
     cands = _extract_date_candidates(text)
-    for iso, _score in cands:
+    best_iso = ""
+    best_dts: Optional[int] = None
+    best_score = -1
+
+    for iso, sc in cands:
         dts = days_to_sale(iso)
         if dts is None:
             continue
-        if dts_min <= dts <= dts_max:
-            return iso, dts, cands
-    # If none within window, return empty but still return candidates for debug
+        if not (dts_min <= dts <= dts_max):
+            continue
+
+        if sc > best_score:
+            best_score = sc
+            best_iso = iso
+            best_dts = dts
+        elif sc == best_score and best_dts is not None and dts < best_dts:
+            best_iso = iso
+            best_dts = dts
+
+    if best_iso:
+        return best_iso, best_dts, cands
+
     return "", None, cands
 
 
@@ -215,7 +239,6 @@ _IN_COUNTY_RX = re.compile(r"\bCounty\s+of\s+([A-Za-z]+)\b|\bin\s+the\s+County\s
 def _extract_county(text: str) -> str:
     if not text:
         return ""
-    # Prefer explicit "X County"
     m = _COUNTY_RX.search(text)
     if m:
         return normalize_county_full(m.group(1)) or ""
@@ -224,7 +247,6 @@ def _extract_county(text: str) -> str:
         g = m2.group(1) or m2.group(2)
         return normalize_county_full(g) or ""
 
-    # Fallback: if any allowed county base name appears anywhere, use it
     allowed = get_allowed_counties_base()
     low = text.lower()
     for base in sorted(allowed, key=len, reverse=True):
@@ -234,10 +256,13 @@ def _extract_county(text: str) -> str:
 
 
 # ============================================================
-# Address extraction
+# Address extraction (fixes "of the described property is 101..." leakage)
 # ============================================================
 
-_ADDR_LABEL_RX = re.compile(r"\b(Property\s+Address|Street\s+Address|Address\s+of\s+Property|Located\s+at)\b\s*[:\-]?\s*(.+)", re.IGNORECASE)
+_ADDR_LABEL_RX = re.compile(
+    r"\b(Property\s+Address|Street\s+Address|Address\s+of\s+Property|Located\s+at|Property\s+is\s+located\s+at)\b\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
+)
 _ADDR_TN_ZIP_RX = re.compile(
     r"\b\d{1,6}\s+[A-Za-z0-9#.,'\-\s]{2,80}\s+(Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Boulevard|Blvd\.?|Way|Place|Pl\.?|Circle|Cir\.?|Pike|Hwy|Highway)\b[^\n]{0,60}\bTN\b\s*\d{5}(?:-\d{4})?\b",
     re.IGNORECASE,
@@ -247,67 +272,84 @@ _ADDR_GENERIC_RX = re.compile(
     re.IGNORECASE,
 )
 
+_ADDR_LEADING_JUNK = re.compile(
+    r"^(the\s+)?(address\s+)?(of\s+)?(the\s+)?(described\s+)?(property\s+)?(is\s+)?(located\s+)?(at\s+)?",
+    re.IGNORECASE,
+)
+
+
+def _cleanup_address(cand: str) -> str:
+    c = _norm_ws(cand).strip(" ,;\t")
+    # remove common sentence-leads that sneak in
+    c = _ADDR_LEADING_JUNK.sub("", c).strip(" ,;\t")
+    # remove trailing fragments
+    c = re.split(
+        r"\b(Parcel|Tax\s+Map|Book\s+and\s+Page|Deed\s+of\s+Trust|Instrument\s+No\.|Being\s+the\s+same\s+property|Assignment)\b",
+        c,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,;\t")
+    return c
+
 
 def _extract_address(lines: List[str], full_text: str) -> str:
     # 1) Label-based
     for ln in lines:
         m = _ADDR_LABEL_RX.search(ln)
         if m:
-            cand = _norm_ws(m.group(2))
-            # sometimes label line continues on next line
-            if len(cand) < 10:
-                continue
-            # avoid grabbing a full paragraph; clip at common delimiters
-            cand = re.split(r"\b(Parcel|Tax\s+Map|Book\s+and\s+Page|Deed\s+of\s+Trust|Instrument\s+No\.|Being\s+the\s+same\s+property)\b", cand, maxsplit=1)[0]
-            cand = cand.strip(" ,;\t")
-            if 6 <= len(cand) <= 180:
+            cand = _cleanup_address(m.group(2))
+            if 8 <= len(cand) <= 180:
                 return cand
 
     # 2) Strong TN+ZIP pattern
     m = _ADDR_TN_ZIP_RX.search(full_text)
     if m:
-        return _norm_ws(m.group(0)).strip(" ,;")
+        return _cleanup_address(m.group(0))
 
-    # 3) Generic street pattern (may miss city/state)
+    # 3) Generic street pattern
     m2 = _ADDR_GENERIC_RX.search(full_text)
     if m2:
-        return _norm_ws(m2.group(0)).strip(" ,;")
+        return _cleanup_address(m2.group(0))
 
     return ""
 
 
 # ============================================================
-# Trustee / firm extraction
+# Trustee / firm extraction (adds more patterns + better fallback)
 # ============================================================
 
 _TRUSTEE_RXES = [
-    re.compile(r"\bSubstitute\s+Trustee\b\s*[:\-]?\s*([^\n]{3,160})", re.IGNORECASE),
-    re.compile(r"\bTrustee\b\s*[:\-]?\s*([^\n]{3,160})", re.IGNORECASE),
-    re.compile(r"\bAttorney\s+for\s+the\s+Trustee\b\s*[:\-]?\s*([^\n]{3,160})", re.IGNORECASE),
-    re.compile(r"\b(Shapiro\s+Ingrassia|Wilson\s+&\s+Associates|Barrett\s+Frappier|McCalla\s+Raymer|Sirote\s+&\s+Permutt|Aldridge\s+Pite|Rubin\s+Lublin)\b[^\n]{0,120}", re.IGNORECASE),
+    re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
+    re.compile(r"\bTrustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
+    re.compile(r"\bAttorney\s+for\s+the\s+Trustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
+    re.compile(r"\b(acting\s+as\s+)?Substitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
+    re.compile(r"\bSubstitute\s+Trustee\s*,\s*([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
+    # common TN foreclosure firms
+    re.compile(r"\b(Wilson\s*&\s*Associates|Shapiro\s+Ingrassia|McCalla\s+Raymer|Barrett\s+Frappier|Sirote\s*&\s*Permutt|Aldridge\s+Pite|Rubin\s+Lublin)\b[^\n]{0,140}", re.IGNORECASE),
 ]
 
 
 def _extract_trustee(lines: List[str], full_text: str) -> str:
-    # 1) line-based (avoids grabbing huge paragraphs)
+    # 1) line-based (avoids huge captures)
     for ln in lines:
         for rx in _TRUSTEE_RXES:
             m = rx.search(ln)
             if m:
-                if m.lastindex:
-                    cand = _norm_ws(m.group(1))
+                if m.lastindex and m.lastindex >= 1:
+                    # prefer last captured group if multiple
+                    cand = m.group(m.lastindex)
                 else:
-                    cand = _norm_ws(m.group(0))
-                cand = cand.strip(" ,;\t")
+                    cand = m.group(0)
+                cand = _norm_ws(cand).strip(" ,;\t")
                 if 3 <= len(cand) <= 160:
                     return cand
 
-    # 2) full-text regex
+    # 2) full-text search
     for rx in _TRUSTEE_RXES:
         m = rx.search(full_text)
         if m:
-            cand = _norm_ws(m.group(1) if m.lastindex else m.group(0))
-            cand = cand.strip(" ,;\t")
+            cand = m.group(m.lastindex) if (m.lastindex and m.lastindex >= 1) else m.group(0)
+            cand = _norm_ws(cand).strip(" ,;\t")
             if 3 <= len(cand) <= 160:
                 return cand
 
@@ -337,11 +379,11 @@ def _build_raw_snippet(
     if address:
         header_lines.append(f"Address: {address}")
 
-    # Choose 2-3 high-signal lines from the notice body
+    # Choose a few high-signal lines (don’t dump full body)
     signal_lines: List[str] = []
     keywords = (
         "sale", "sold", "auction", "public auction", "property address",
-        "located at", "substitute trustee", "trustee"
+        "located at", "substitute trustee", "trustee", "front door", "courthouse"
     )
     for ln in lines:
         low = ln.lower()
@@ -361,13 +403,10 @@ def _build_raw_snippet(
 
 def _list_pages_for_seed(seed: str) -> List[str]:
     if "tnlegalpub.com/notice_type/" in seed:
-        # WordPress pagination: /page/2/
         pages = [seed]
         for i in range(2, MAX_LIST_PAGES + 1):
             pages.append(seed.rstrip("/") + f"/page/{i}/")
         return pages
-
-    # Light/no-op for other sources unless they expose direct links on the page
     return [seed]
 
 
@@ -388,6 +427,7 @@ def run():
     dts_min, dts_max = get_dts_window("PUBLIC_NOTICES")
     allowed = sorted(get_allowed_counties_base())
     print(f"[PublicNoticesBot] SEEDS={SEEDS} allowed_counties={allowed} dts_window=[{dts_min},{dts_max}]")
+
     session = requests.Session()
 
     list_pages_fetched = 0
@@ -432,7 +472,6 @@ def run():
     skipped_dup_in_run = 0
     skipped_http = 0
 
-    # sample artifacts
     sample_kept: List[str] = []
     sample_county_missing: List[str] = []
     sample_skipped_reason: Dict[str, List[str]] = {}
@@ -528,7 +567,7 @@ def run():
             trustee=trustee,
             address=address,
             lines=lines,
-            max_chars=min(MAX_SNIPPET_LEN, 1900),  # Notion rich_text cap handled too
+            max_chars=min(MAX_SNIPPET_LEN, 1900),
         )
 
         # ---- scoring + status
@@ -557,10 +596,9 @@ def run():
 
         props = build_properties(payload)
 
-        # non-destructive updates happen inside notion_client.update_lead via pruning empties
         existing = find_existing_by_lead_key(lead_key)
         if existing:
-            update_lead(existing, props)
+            update_lead(existing, props)  # non-destructive pruning happens inside notion_client.update_lead
             updated += 1
         else:
             create_lead(props)
@@ -570,7 +608,10 @@ def run():
         filtered_in += 1
 
         if len(sample_kept) < 5:
-            sample_kept.append(f"county={county_full} sale={sale_date_iso} dts={dts} addr={address or '[missing]'} trustee={trustee or '[missing]'}")
+            sample_kept.append(
+                f"county={county_full} sale={sale_date_iso} dts={dts} "
+                f"addr={address or '[missing]'} trustee={trustee or '[missing]'}"
+            )
 
     print(
         "[PublicNoticesBot] summary "
