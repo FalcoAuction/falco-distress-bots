@@ -2,11 +2,11 @@
 """
 ATTOM Data Property API (Premium) client.
 
-Design goals:
-- requests-only
-- safe no-op behavior handled by caller (enricher checks key)
-- centralized call counting for cost control
-- resilient parsing helpers
+Key changes vs prior:
+- Default base URL uses v1.0.0 (common in ATTOM gateway deployments)
+- Adds lightweight debug sampling of non-200 responses (first few only)
+- Central call counting + per-path breakdown
+- requests-only, no heavy deps
 """
 
 from __future__ import annotations
@@ -19,26 +19,26 @@ from typing import Any, Dict, Optional
 import requests
 
 
-DEFAULT_BASE_URL = os.getenv("FALCO_ATTOM_BASE_URL", "https://api.gateway.attomdata.com/propertyapi/v1.0").rstrip("/")
+def _truthy(val: str) -> bool:
+    return str(val or "").strip() not in ("", "0", "false", "False", "no", "No")
+
+
+def _clip(s: str, n: int = 500) -> str:
+    s = s or ""
+    if len(s) <= n:
+        return s
+    return s[: n - 1] + "…"
+
+
+DEFAULT_BASE_URL = os.getenv(
+    "FALCO_ATTOM_BASE_URL",
+    # NOTE: many ATTOM gateway tenants use v1.0.0
+    "https://api.gateway.attomdata.com/propertyapi/v1.0.0",
+).rstrip("/")
 
 
 class AttomError(RuntimeError):
     pass
-
-
-def _is_truthy_env(val: str) -> bool:
-    return val.strip() not in ("", "0", "false", "False", "no", "No")
-
-
-def _clip_json(obj: Any, max_chars: int = 4500) -> str:
-    try:
-        import json
-        s = json.dumps(obj, ensure_ascii=False)
-    except Exception:
-        s = str(obj)
-    if len(s) <= max_chars:
-        return s
-    return s[: max_chars - 1] + "…"
 
 
 @dataclass
@@ -48,14 +48,17 @@ class AttomClient:
     timeout_s: int = 30
     max_retries: int = 2
     retry_backoff_s: float = 1.2
-    debug: bool = field(default_factory=lambda: _is_truthy_env(os.getenv("FALCO_ENRICH_DEBUG", "")))
+    debug: bool = field(default_factory=lambda: _truthy(os.getenv("FALCO_ENRICH_DEBUG", "")))
 
     # counters
     call_count: int = 0
     call_count_by_path: Dict[str, int] = field(default_factory=dict)
 
+    # debug sampling (avoid log spam)
+    _debug_fail_samples_left: int = 5
+
     def _headers(self) -> Dict[str, str]:
-        # ATTOM uses "apikey" header for the gateway.
+        # ATTOM gateway expects "apikey" header
         return {
             "Accept": "application/json",
             "apikey": self.api_key,
@@ -72,13 +75,25 @@ class AttomClient:
                 self.call_count_by_path[path] = self.call_count_by_path.get(path, 0) + 1
 
                 r = requests.get(url, headers=self._headers(), params=params, timeout=self.timeout_s)
+
                 if r.status_code == 200:
                     return r.json() if r.text else {}
 
-                # retryable
+                # debug sample a few failures so we can see root cause quickly
+                if self.debug and self._debug_fail_samples_left > 0:
+                    self._debug_fail_samples_left -= 1
+                    print(
+                        f"[ATTOM][DEBUG] non200 path={path} status={r.status_code} "
+                        f"params={params} body={_clip(r.text, 600)}"
+                    )
+
+                # retryable statuses
                 if r.status_code in (429, 500, 502, 503, 504):
-                    raise AttomError(f"ATTOM {r.status_code} retryable: {r.text[:400]}")
-                raise AttomError(f"ATTOM {r.status_code}: {r.text[:400]}")
+                    raise AttomError(f"ATTOM {r.status_code} retryable: {_clip(r.text, 300)}")
+
+                # non-retryable
+                raise AttomError(f"ATTOM {r.status_code}: {_clip(r.text, 300)}")
+
             except Exception as e:
                 last_err = e
                 if attempt >= self.max_retries:
@@ -149,9 +164,10 @@ class AttomClient:
 
         params["radius"] = float(radius_miles)
 
-        # Many ATTOM implementations accept "startdate" (yyyy-mm-dd)
+        # Many ATTOM gateway tenants accept startdate as YYYY-MM-DD
         try:
             from datetime import date, timedelta
+
             start = (date.today() - timedelta(days=int(days_back))).isoformat()
             params["startdate"] = start
         except Exception:
@@ -160,7 +176,7 @@ class AttomClient:
         return self._request("/salescomparables", params=params)
 
     # -----------------------
-    # Parsing helpers
+    # Response helpers
     # -----------------------
 
     @staticmethod
@@ -169,8 +185,7 @@ class AttomClient:
             return None
         prop = payload.get("property")
         if isinstance(prop, list) and prop:
-            if isinstance(prop[0], dict):
-                return prop[0]
+            return prop[0] if isinstance(prop[0], dict) else None
         if isinstance(prop, dict):
             return prop
         return None
@@ -187,6 +202,4 @@ class AttomClient:
             msg = str(status.get("msg") or status.get("message") or "").lower()
             if "success" in msg:
                 return True
-        if payload.get("property"):
-            return True
-        return False
+        return bool(payload.get("property"))
