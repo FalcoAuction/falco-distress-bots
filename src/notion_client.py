@@ -1,89 +1,35 @@
-# src/notion_client.py
-
 import os
-import time
-import random
+import json
+import requests
 from typing import Any, Dict, Optional, Tuple
 
-import requests
-
-
-NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
-NOTION_DATABASE_ID = os.environ.get("NOTION_DATABASE_ID", "").strip()
+NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
+NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID", "")
 
 NOTION_API_BASE = "https://api.notion.com/v1"
-NOTION_VERSION = os.environ.get("NOTION_VERSION", "2022-06-28")
-
-# Network hardening (fixes ReadTimeout in Actions)
-REQUEST_TIMEOUT_SECS = int(os.environ.get("NOTION_TIMEOUT_SECS", "90"))
-MAX_RETRIES = int(os.environ.get("NOTION_MAX_RETRIES", "7"))
-
-_session = requests.Session()
+NOTION_VERSION = os.getenv("NOTION_VERSION", "2022-06-28")
 
 
 def _headers() -> Dict[str, str]:
-    if not NOTION_TOKEN:
-        raise RuntimeError("Missing NOTION_TOKEN env var.")
+    if not NOTION_API_KEY:
+        raise RuntimeError("Missing NOTION_API_KEY env var.")
     return {
-        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Authorization": f"Bearer {NOTION_API_KEY}",
         "Notion-Version": NOTION_VERSION,
         "Content-Type": "application/json",
     }
 
 
-def _sleep_backoff(attempt: int) -> None:
-    base = 0.7 * (2 ** max(0, attempt - 1))  # 0.7, 1.4, 2.8, 5.6...
-    jitter = random.uniform(0.0, 0.5)
-    time.sleep(min(15.0, base + jitter))
-
-
-def _request(method: str, path: str, json: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    url = f"{NOTION_API_BASE}{path}"
-    last_err: Optional[Exception] = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            resp = _session.request(
-                method=method,
-                url=url,
-                headers=_headers(),
-                json=json,
-                timeout=REQUEST_TIMEOUT_SECS,
-            )
-
-            if resp.status_code == 429:
-                retry_after = resp.headers.get("retry-after")
-                if retry_after:
-                    try:
-                        time.sleep(float(retry_after))
-                    except Exception:
-                        _sleep_backoff(attempt)
-                else:
-                    _sleep_backoff(attempt)
-                continue
-
-            if 500 <= resp.status_code <= 599:
-                _sleep_backoff(attempt)
-                continue
-
-            if resp.status_code >= 400:
-                raise RuntimeError(f"Notion API {resp.status_code}: {resp.text}")
-
-            return resp.json()
-
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError) as e:
-            last_err = e
-            _sleep_backoff(attempt)
-            continue
-        except Exception as e:
-            last_err = e
-            break
-
-    raise RuntimeError(f"Notion request failed after {MAX_RETRIES} attempts: {method} {path} :: {last_err}")
+def _request(method: str, path: str, json: Optional[dict] = None) -> dict:
+    url = NOTION_API_BASE + path
+    r = requests.request(method, url, headers=_headers(), json=json, timeout=30)
+    if r.status_code >= 300:
+        raise RuntimeError(f"Notion API error {r.status_code}: {r.text}")
+    return r.json()
 
 
 # ----------------------------
-# Property helpers
+# PROPERTY BUILDERS
 # ----------------------------
 
 def _title_prop(text: str) -> Dict[str, Any]:
@@ -107,19 +53,19 @@ def _select_prop(name: Optional[str]) -> Dict[str, Any]:
     return {"select": {"name": str(name)}}
 
 
-def _number_prop(n: Optional[Any]) -> Dict[str, Any]:
-    if n is None:
-        return {"number": None}
+def _number_prop(n: Any) -> Dict[str, Any]:
     try:
+        if n is None:
+            return {"number": None}
         return {"number": float(n)}
     except Exception:
         return {"number": None}
 
 
-def _date_prop(iso_date: Optional[str]) -> Dict[str, Any]:
-    if not iso_date:
+def _date_prop(iso: Optional[str]) -> Dict[str, Any]:
+    if not iso:
         return {"date": None}
-    return {"date": {"start": iso_date}}
+    return {"date": {"start": str(iso)}}
 
 
 def _url_prop(url: Optional[str]) -> Dict[str, Any]:
@@ -127,10 +73,6 @@ def _url_prop(url: Optional[str]) -> Dict[str, Any]:
         return {"url": None}
     return {"url": str(url)}
 
-
-# ----------------------------
-# build_properties (FIXES Days-to-Sale publishing)
-# ----------------------------
 
 def build_properties(*args, **kwargs) -> Dict[str, Any]:
     """
@@ -187,61 +129,61 @@ def build_properties(*args, **kwargs) -> Dict[str, Any]:
         "Raw Snippet": _rich_text_prop(data.get("raw_snippet")),
         "URL": _url_prop(data.get("url")),
         "Lead Key": _rich_text_prop(data.get("lead_key")),
-        # ✅ THIS is what fixes Days-to-Sale not publishing:
+        # ✅ Days-to-Sale
         "Days to Sale": _number_prop(data.get("days_to_sale")),
     }
 
     return props
 
 
-# ----------------------------
-# Non-destructive update helpers
-# ----------------------------
-
 def _is_empty_prop(prop: Dict[str, Any]) -> bool:
-    """Return True if a Notion property payload represents 'empty' and should not overwrite existing data."""
-    if not isinstance(prop, dict):
+    """Return True if a Notion property payload is 'empty' and would clear existing data."""
+    if prop is None:
         return True
-
-    if "title" in prop:
-        return not prop.get("title")
     if "rich_text" in prop:
         return not prop.get("rich_text")
+    if "title" in prop:
+        t = prop.get("title") or []
+        if not t:
+            return True
+        try:
+            content = (t[0].get("text") or {}).get("content", "")
+        except Exception:
+            content = ""
+        return not str(content).strip()
     if "select" in prop:
         return prop.get("select") is None
-    if "number" in prop:
-        return prop.get("number") is None
     if "date" in prop:
         return prop.get("date") is None
     if "url" in prop:
-        return prop.get("url") is None
+        return prop.get("url") in (None, "")
+    if "number" in prop:
+        return prop.get("number") is None
+    return False
 
-    # Unknown type: be conservative (don't overwrite)
-    return True
 
-
-def prune_empty_properties(properties: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop empty properties so updates never clobber populated Notion fields with blanks."""
+def prune_empty_properties_for_update(properties: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Non-destructive updates:
+    - If a property payload is empty (rich_text:[], select:None, etc),
+      DO NOT include it in PATCH, so we don't overwrite existing non-empty values.
+    """
     if not properties:
         return {}
     out: Dict[str, Any] = {}
     for k, v in properties.items():
-        try:
-            if isinstance(v, dict) and _is_empty_prop(v):
+        if _is_empty_prop(v):
+            continue
+        # extra guard: don't overwrite title with placeholder
+        if k == "Property Name":
+            try:
+                content = ((v.get("title") or [])[0].get("text") or {}).get("content", "")
+            except Exception:
+                content = ""
+            if not str(content).strip() or str(content).strip().lower() in {"unknown", "foreclosure notice"}:
                 continue
-            out[k] = v
-        except Exception:
-            # If something is weird, keep it for safety rather than dropping unexpectedly
-            out[k] = v
+        out[k] = v
     return out
-
-
-def _extract_url_from_properties(properties: Dict[str, Any]) -> str:
-    try:
-        u = properties.get("URL", {}).get("url")  # type: ignore
-        return str(u).strip() if u else ""
-    except Exception:
-        return ""
 
 
 # ----------------------------
@@ -255,29 +197,13 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
         return None
 
     body = {
-        "filter": {"property": "Lead Key", "rich_text": {"equals": lead_key}},
-        "page_size": 1,
+        "filter": {
+            "property": "Lead Key",
+            "rich_text": {"contains": lead_key},
+        }
     }
     res = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", json=body)
-    results = res.get("results") or []
-    if not results:
-        return None
-    return results[0].get("id")
-
-
-def find_existing_by_url(url: str) -> Optional[str]:
-    """Fallback dedupe: if Lead Key algorithm changes, match an existing page by URL."""
-    if not NOTION_DATABASE_ID:
-        raise RuntimeError("Missing NOTION_DATABASE_ID env var.")
-    if not url:
-        return None
-
-    body = {
-        "filter": {"property": "URL", "url": {"equals": url}},
-        "page_size": 1,
-    }
-    res = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", json=body)
-    results = res.get("results") or []
+    results = res.get("results", [])
     if not results:
         return None
     return results[0].get("id")
@@ -292,37 +218,19 @@ def create_lead(properties: Dict[str, Any]) -> str:
 
 
 def update_lead(page_id: str, properties: Dict[str, Any]) -> str:
-    properties = prune_empty_properties(properties)
-    body = {"properties": properties}
+    # Non-destructive update: do not send empty properties that would clear existing values.
+    safe_props = prune_empty_properties_for_update(properties)
+    if not safe_props:
+        return page_id
+    body = {"properties": safe_props}
     res = _request("PATCH", f"/pages/{page_id}", json=body)
     return res.get("id")
 
 
 def upsert_lead(lead_key: str, properties: Dict[str, Any]) -> Tuple[str, str]:
-    """Upsert by Lead Key with URL fallback + non-destructive updates.
-
-    Safety rules:
-    - Never overwrite populated fields with empty values.
-    - If Lead Key lookup misses but URL matches an existing page, update that page
-      and write the new Lead Key to it (lightweight migration).
-    """
-    if not lead_key:
-        raise ValueError("lead_key required for upsert_lead")
-
     existing_id = find_existing_by_lead_key(lead_key)
-    if not existing_id:
-        url = _extract_url_from_properties(properties)
-        if url:
-            existing_id = find_existing_by_url(url)
-
     if existing_id:
-        # Ensure Lead Key is present on matched records (migration / stability)
-        try:
-            properties.setdefault("Lead Key", _rich_text_prop(lead_key))
-        except Exception:
-            pass
         update_lead(existing_id, properties)
         return existing_id, "updated"
-
     new_id = create_lead(properties)
     return new_id, "created"
