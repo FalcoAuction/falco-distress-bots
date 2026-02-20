@@ -15,7 +15,10 @@ jobs:
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
 
-      # === OPTIONAL CONTROL VARS ===
+      # === DEBUG (TEMPORARY) ===
+      FALCO_ENRICH_DEBUG: "1"
+
+      # === CONTROL VARS ===
       FALCO_MAX_ENRICH_PER_RUN: "40"
       FALCO_MAX_COMPS_PER_RUN: "12"
       FALCO_COMPS_RADIUS_MILES: "1.0"
