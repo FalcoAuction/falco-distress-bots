@@ -155,78 +155,24 @@ def _parse_address(addr: str) -> Tuple[str, str]:
     return raw, "Nashville, TN"
 
 
-def _extract_avm(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+def _extract_avm_amount(avm_payload: Dict[str, Any]) -> Optional[float]:
     """
-    Try multiple shapes because ATTOM tenants vary.
+    Your tenant shape:
+      property[0].avm.amount
     """
-    # Shape A: property[0].avm.{valueRangeLow,valueRangeHigh,confidenceScore}
     try:
         prop_list = avm_payload.get("property")
-        if isinstance(prop_list, list) and prop_list:
-            prop = prop_list[0]
-            if isinstance(prop, dict):
-                avm = prop.get("avm") or {}
-                if isinstance(avm, dict):
-                    low = _safe_float(avm.get("valueRangeLow"))
-                    high = _safe_float(avm.get("valueRangeHigh"))
-                    conf = _safe_float(avm.get("confidenceScore"))
-                    if low is not None or high is not None:
-                        return low, high, conf
+        if not (isinstance(prop_list, list) and prop_list):
+            return None
+        p0 = prop_list[0]
+        if not isinstance(p0, dict):
+            return None
+        avm = p0.get("avm") or {}
+        if not isinstance(avm, dict):
+            return None
+        return _safe_float(avm.get("amount"))
     except Exception:
-        pass
-
-    # Shape B: property[0].avmAmount or similar
-    try:
-        prop_list = avm_payload.get("property")
-        if isinstance(prop_list, list) and prop_list:
-            prop = prop_list[0]
-            if isinstance(prop, dict):
-                low = _safe_float(prop.get("value") or prop.get("avmValue") or prop.get("avmamount"))
-                if low is not None:
-                    return low, low, _safe_float(prop.get("confidenceScore"))
-    except Exception:
-        pass
-
-    return None, None, None
-
-
-def _extract_homeequity(he_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Tenant variability: attempt common fields.
-    """
-    try:
-        prop_list = he_payload.get("property")
-        if isinstance(prop_list, list) and prop_list:
-            prop = prop_list[0]
-        else:
-            prop = {}
-        if not isinstance(prop, dict):
-            return None, None, None
-
-        # Common: prop['homeEquity']['estimatedValue'] or prop['valuation'] etc.
-        for path in [
-            ("homeEquity", "estimatedValue"),
-            ("homeEquity", "estimatedvalue"),
-            ("homeEquity", "marketValue"),
-            ("valuation", "estimatedValue"),
-            ("valuation", "value"),
-        ]:
-            a = prop.get(path[0]) or {}
-            if isinstance(a, dict):
-                v = _safe_float(a.get(path[1]))
-                if v is not None:
-                    # no range, so set low=high=v
-                    conf = _safe_float(a.get("confidenceScore") or a.get("confidence"))
-                    return v, v, conf
-
-        # fallback: prop['estimatedValue']
-        v2 = _safe_float(prop.get("estimatedValue") or prop.get("marketValue"))
-        if v2 is not None:
-            return v2, v2, _safe_float(prop.get("confidenceScore"))
-    except Exception:
-        pass
-
-    return None, None, None
+        return None
 
 
 def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
@@ -251,6 +197,7 @@ def run() -> Dict[str, int]:
 
     dts_min, dts_max = get_dts_window("ENRICH")
 
+    # cost controls (keep tight while building)
     max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))
     cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
@@ -273,12 +220,9 @@ def run() -> Dict[str, int]:
     skipped_no_match = 0
     skipped_cooldown = 0
     errors = 0
-    he_fallback_calls = 0
 
     now = datetime.now(timezone.utc)
     cooldown = timedelta(hours=cooldown_hours)
-
-    logged_avm_shape = False
 
     for page in pages:
         if enriched >= max_enrich:
@@ -295,10 +239,12 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
+        # Already enriched with value?
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
+        # cooldown skip if prior no-result
         ej = str(fields.get("enrichment_json") or "").strip()
         marker = _read_no_result_marker(ej)
         if marker and marker.get("no_result") is True and marker.get("ts"):
@@ -348,35 +294,8 @@ def run() -> Dict[str, int]:
                     print(f"[ATTOM][DEBUG] no-result avm {address1} | {address2} msg={_status_msg(avm)}")
                 continue
 
-            # Log AVM shape once (NO extra calls)
-            if DEBUG and not logged_avm_shape:
-                logged_avm_shape = True
-                try:
-                    p0 = (avm.get("property") or [{}])[0]
-                    keys = sorted(list(p0.keys())) if isinstance(p0, dict) else []
-                    print(f"[ATTOM][DEBUG] AVM property[0] keys={keys}")
-                    if isinstance(p0, dict) and "avm" in p0 and isinstance(p0["avm"], dict):
-                        print(f"[ATTOM][DEBUG] AVM avm keys={sorted(list(p0['avm'].keys()))}")
-                except Exception:
-                    pass
+            amount = _extract_avm_amount(avm)
 
-            avm_low, avm_high, avm_conf = _extract_avm(avm)
-
-            # Fallback: home equity endpoint only if AVM didn't provide value
-            if avm_low is None and avm_high is None:
-                try:
-                    he = client.valuation_home_equity(address1=address1, address2=address2)
-                    he_fallback_calls += 1
-                    if not _is_success_without_result(he) and _has_property(he):
-                        he_low, he_high, he_conf = _extract_homeequity(he)
-                        if he_low is not None or he_high is not None:
-                            avm_low, avm_high = he_low, he_high
-                            if avm_conf is None:
-                                avm_conf = he_conf
-                except Exception:
-                    pass
-
-            # Write compact record
             write_obj: Dict[str, Any] = {
                 "enrichment_json": _clip_json(
                     {
@@ -384,19 +303,20 @@ def run() -> Dict[str, int]:
                         "meta": {"address1": address1, "address2": address2},
                     }
                 ),
-                "enrichment_confidence": avm_conf,
+                # tenant doesn't provide confidenceScore here
+                "enrichment_confidence": None,
             }
 
-            if avm_low is not None or avm_high is not None:
-                write_obj["estimated_value_low"] = avm_low
-                write_obj["estimated_value_high"] = avm_high
+            if amount is not None:
+                write_obj["estimated_value_low"] = amount
+                write_obj["estimated_value_high"] = amount
                 enriched_with_value += 1
 
             update_lead(page_id, build_extra_properties(write_obj))
 
             enriched += 1
             if DEBUG:
-                print(f"[ATTOM] enriched {address1} | {address2} avm_low={avm_low} conf={avm_conf}")
+                print(f"[ATTOM] enriched {address1} | {address2} avm_amount={amount}")
 
         except AttomError as e:
             skipped_no_match += 1
@@ -414,7 +334,6 @@ def run() -> Dict[str, int]:
         "skipped_enrich_no_match": skipped_no_match,
         "skipped_enrich_cooldown": skipped_cooldown,
         "errors": errors,
-        "he_fallback_calls": he_fallback_calls,
         "attom_call_count": client.call_count,
         "attom_call_count_by_path": client.call_count_by_path,
     }
