@@ -20,6 +20,10 @@ from .attom_client import AttomClient, AttomError
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
 
+# Stage 1 geo constraints (hard rule)
+ALLOWED_COUNTIES = ["Davidson", "Williamson", "Rutherford", "Wilson", "Sumner"]
+
+
 def _clip_json(obj: Any, max_chars: int = 1800) -> str:
     try:
         s = json.dumps(obj, ensure_ascii=False)
@@ -179,7 +183,6 @@ def _extract_value_from_attom_avm(avm_payload: Dict[str, Any]) -> Tuple[Optional
         return None, None, None
     amt = avm.get("amount")
     if not isinstance(amt, dict):
-        # sometimes amount is numeric
         v = _safe_float(avm.get("amount"))
         return v, None, None
     v = _safe_float(amt.get("value"))
@@ -202,6 +205,15 @@ def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _already_has_attom_avm(enrichment_json: str) -> bool:
+    """
+    Cheap skip: if enrichment_json contains attom_avm, do not call ATTOM again.
+    """
+    if not enrichment_json:
+        return False
+    return "attom_avm" in enrichment_json
+
+
 def run() -> Dict[str, int]:
     api_key = os.getenv("FALCO_ATTOM_API_KEY", "").strip()
     if not api_key:
@@ -214,11 +226,24 @@ def run() -> Dict[str, int]:
 
     client = AttomClient(api_key=api_key)
 
+    # COST CONTROL + GEO CONTROL:
+    # - Only allowed counties
+    # - Only pages that are not already enriched (Enrichment JSON empty AND Estimated Value fields empty)
+    county_or = [{"property": "County", "select": {"equals": c}} for c in ALLOWED_COUNTIES]
+
     filter_obj = {
         "and": [
             {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
             {"property": "Days to Sale", "number": {"less_than_or_equal_to": dts_max}},
             {"property": "Address", "rich_text": {"is_not_empty": True}},
+            {"or": county_or},
+            {
+                "and": [
+                    {"property": "Enrichment JSON", "rich_text": {"is_empty": True}},
+                    {"property": "Estimated Value Low", "number": {"is_empty": True}},
+                    {"property": "Estimated Value High", "number": {"is_empty": True}},
+                ]
+            },
         ]
     }
 
@@ -244,6 +269,7 @@ def run() -> Dict[str, int]:
         fields = extract_page_fields(page)
         page_id = fields.get("page_id") or ""
         address = fields.get("address") or ""
+        county = (fields.get("county") or "").replace(" County", "").strip()
 
         if not page_id:
             continue
@@ -252,13 +278,23 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # already enriched with value fields (if DB has them)
+        # Extra safety: never enrich out-of-geo even if query returns something weird
+        if county and county not in ALLOWED_COUNTIES:
+            skipped_already_enriched += 1
+            continue
+
+        # already enriched with numeric value fields
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
-        # cooldown skip if prior no-result marker exists
+        # already enriched via json blob
         ej = str(fields.get("enrichment_json") or "").strip()
+        if _already_has_attom_avm(ej):
+            skipped_already_enriched += 1
+            continue
+
+        # cooldown skip if prior no-result marker exists
         marker = _read_no_result_marker(ej)
         if marker and marker.get("no_result") is True and marker.get("ts"):
             try:
@@ -321,7 +357,7 @@ def run() -> Dict[str, int]:
 
             v, lo, hi = _extract_value_from_attom_avm(avm)
 
-            # store the AVM blob inside Enrichment JSON so Stage2/3 can read it even if DB lacks number fields
+            # store the AVM blob inside Enrichment JSON so Stage2/3 can read it
             p0a = _get_p0(avm)
             avm_blob = p0a.get("avm") if isinstance(p0a, dict) else None
 
@@ -332,7 +368,7 @@ def run() -> Dict[str, int]:
             enrichment_payload = {
                 "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
                 "meta": {"address1": address1, "address2": address2, "value_source": "avm.amount"},
-                "attom_avm": avm_blob,  # <-- critical for downstream fallback
+                "attom_avm": avm_blob,
             }
 
             write_obj: Dict[str, Any] = {
@@ -340,7 +376,6 @@ def run() -> Dict[str, int]:
                 "enrichment_confidence": None,
             }
 
-            # If DB has numeric fields, write them too (if not, schema filter will drop safely)
             if v is not None:
                 write_obj["estimated_value_low"] = float(lo if lo is not None else v)
                 write_obj["estimated_value_high"] = float(hi if hi is not None else v)
