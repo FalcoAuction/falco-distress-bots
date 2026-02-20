@@ -18,25 +18,26 @@ def run_bot(name: str, fn):
 
 
 def main():
-    print("RUN_ALL VERSION CHECK - 2026-02-19 (stage2-3 scaffold)")
+    print("RUN_ALL VERSION CHECK - 2026-02-20 (ATTOM premium operational)")
     print(f"RUN_ALL UTC START: {datetime.utcnow().isoformat()}")
 
     # ---------------- Stage 1: Ingestion ----------------
     run_bot("ForeclosureTennesseeBot", foreclosure_tennessee_bot.run)
     run_bot("TNForeclosureNoticesBot", tn_foreclosure_notices_bot.run)
     run_bot("PublicNoticesBot", public_notices_bot.run)
+    run_bot("TaxPagesBot", public_notices_bot.run)
     run_bot("TaxPagesBot", tax_pages_bot.run)
 
     # ---------------- Stage 2: Enrichment + Comps ----------------
-    def _run_enrichment():
-        from .enrichment.propstream_enricher import run as _run
+    def _run_attom_enrichment():
+        from .enrichment.attom_enricher import run as _run
         _run()
 
     def _run_comps():
         from .enrichment.comps import run as _run
         _run()
 
-    run_bot("Stage2_PropStreamEnrichment", _run_enrichment)
+    run_bot("Stage2_ATTOMEnrichment", _run_attom_enrichment)
     run_bot("Stage2_CompsEngine", _run_comps)
 
     # ---------------- Stage 3: Grading + Packaging ----------------
