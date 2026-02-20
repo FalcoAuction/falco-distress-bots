@@ -20,7 +20,7 @@ from .attom_client import AttomClient, AttomError
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
 
-def _clip_json(obj: Any, max_chars: int = 1400) -> str:
+def _clip_json(obj: Any, max_chars: int = 1200) -> str:
     try:
         s = json.dumps(obj, ensure_ascii=False)
     except Exception:
@@ -36,6 +36,12 @@ def _safe_float(x: Any) -> Optional[float]:
             return None
         if isinstance(x, (int, float)):
             return float(x)
+        if isinstance(x, dict):
+            # common nested shapes: {"value":123} / {"amount":123}
+            for k in ("value", "amount", "amt", "val"):
+                if k in x:
+                    return _safe_float(x.get(k))
+            return None
         s = str(x).replace("$", "").replace(",", "").strip()
         if not s:
             return None
@@ -155,24 +161,63 @@ def _parse_address(addr: str) -> Tuple[str, str]:
     return raw, "Nashville, TN"
 
 
-def _extract_avm_amount(avm_payload: Dict[str, Any]) -> Optional[float]:
+def _get_p0(payload: Dict[str, Any]) -> Dict[str, Any]:
+    prop = payload.get("property")
+    if isinstance(prop, list) and prop and isinstance(prop[0], dict):
+        return prop[0]
+    return {}
+
+
+def _extract_best_value(detail: Dict[str, Any], avm: Dict[str, Any]) -> Tuple[Optional[float], Optional[str]]:
     """
-    Your tenant shape:
-      property[0].avm.amount
+    Returns (value, source_label)
+    Priority:
+      1) AVM amount
+      2) Assessment market total
+      3) Assessment assessed total
+      4) Last sale amount
     """
-    try:
-        prop_list = avm_payload.get("property")
-        if not (isinstance(prop_list, list) and prop_list):
-            return None
-        p0 = prop_list[0]
-        if not isinstance(p0, dict):
-            return None
-        avm = p0.get("avm") or {}
-        if not isinstance(avm, dict):
-            return None
-        return _safe_float(avm.get("amount"))
-    except Exception:
-        return None
+    p_avm = _get_p0(avm)
+    avm_obj = p_avm.get("avm") if isinstance(p_avm, dict) else {}
+    if isinstance(avm_obj, dict):
+        v = _safe_float(avm_obj.get("amount"))
+        if v is not None:
+            return v, "avm.amount"
+
+    p_det = _get_p0(detail)
+
+    # assessment.market.* (ATTOM commonly uses these keys; we try a few)
+    assess = p_det.get("assessment") if isinstance(p_det, dict) else {}
+    if isinstance(assess, dict):
+        market = assess.get("market")
+        if isinstance(market, dict):
+            for k in ("mktttlvalue", "mktTotalValue", "totalValue", "value", "marketValue"):
+                v = _safe_float(market.get(k))
+                if v is not None:
+                    return v, f"assessment.market.{k}"
+
+        assessed = assess.get("assessed")
+        if isinstance(assessed, dict):
+            for k in ("assdttlvalue", "assdTotalValue", "totalValue", "value", "assessedValue"):
+                v = _safe_float(assessed.get(k))
+                if v is not None:
+                    return v, f"assessment.assessed.{k}"
+
+        # sometimes assessment has a top-level total
+        for k in ("totalValue", "assessedValue", "marketValue"):
+            v = _safe_float(assess.get(k))
+            if v is not None:
+                return v, f"assessment.{k}"
+
+    # last sale (last resort)
+    sale = p_det.get("sale") if isinstance(p_det, dict) else {}
+    if isinstance(sale, dict):
+        for k in ("amount", "saleAmount", "price"):
+            v = _safe_float(sale.get(k))
+            if v is not None:
+                return v, f"sale.{k}"
+
+    return None, None
 
 
 def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
@@ -197,7 +242,6 @@ def run() -> Dict[str, int]:
 
     dts_min, dts_max = get_dts_window("ENRICH")
 
-    # cost controls (keep tight while building)
     max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))
     cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
@@ -224,6 +268,8 @@ def run() -> Dict[str, int]:
     now = datetime.now(timezone.utc)
     cooldown = timedelta(hours=cooldown_hours)
 
+    logged_shapes = False
+
     for page in pages:
         if enriched >= max_enrich:
             break
@@ -239,12 +285,10 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # Already enriched with value?
         if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
             skipped_already_enriched += 1
             continue
 
-        # cooldown skip if prior no-result
         ej = str(fields.get("enrichment_json") or "").strip()
         marker = _read_no_result_marker(ej)
         if marker and marker.get("no_result") is True and marker.get("ts"):
@@ -294,29 +338,40 @@ def run() -> Dict[str, int]:
                     print(f"[ATTOM][DEBUG] no-result avm {address1} | {address2} msg={_status_msg(avm)}")
                 continue
 
-            amount = _extract_avm_amount(avm)
+            # Log one sample shape (no extra calls)
+            if DEBUG and not logged_shapes:
+                logged_shapes = True
+                try:
+                    p0a = _get_p0(avm)
+                    p0d = _get_p0(detail)
+                    print(f"[ATTOM][DEBUG] sample avm.avm={_clip_json(p0a.get('avm'))}")
+                    assess = p0d.get("assessment") if isinstance(p0d, dict) else None
+                    print(f"[ATTOM][DEBUG] sample detail.assessment={_clip_json(assess)}")
+                except Exception:
+                    pass
+
+            value, source = _extract_best_value(detail, avm)
 
             write_obj: Dict[str, Any] = {
                 "enrichment_json": _clip_json(
                     {
                         "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
-                        "meta": {"address1": address1, "address2": address2},
+                        "meta": {"address1": address1, "address2": address2, "value_source": source},
                     }
                 ),
-                # tenant doesn't provide confidenceScore here
                 "enrichment_confidence": None,
             }
 
-            if amount is not None:
-                write_obj["estimated_value_low"] = amount
-                write_obj["estimated_value_high"] = amount
+            if value is not None:
+                write_obj["estimated_value_low"] = value
+                write_obj["estimated_value_high"] = value
                 enriched_with_value += 1
 
             update_lead(page_id, build_extra_properties(write_obj))
 
             enriched += 1
             if DEBUG:
-                print(f"[ATTOM] enriched {address1} | {address2} avm_amount={amount}")
+                print(f"[ATTOM] enriched {address1} | {address2} value={value} source={source}")
 
         except AttomError as e:
             skipped_no_match += 1
