@@ -28,7 +28,7 @@ DEFAULT_BASE_URL = os.getenv(
 
 
 class AttomError(RuntimeError):
-    pass
+    """Raised for non-success ATTOM calls."""
 
 
 @dataclass
@@ -36,8 +36,11 @@ class AttomClient:
     api_key: str
     base_url: str = DEFAULT_BASE_URL
     timeout_s: int = 30
+
+    # IMPORTANT: retries cost money; only retry 429/5xx
     max_retries: int = 1
     retry_backoff_s: float = 1.1
+
     debug: bool = field(default_factory=lambda: _truthy(os.getenv("FALCO_ENRICH_DEBUG", "")))
 
     call_count: int = 0
@@ -50,7 +53,7 @@ class AttomClient:
     @staticmethod
     def _clean_address2(address2: str) -> str:
         """
-        ATTOM wants Address2 like: "Nashville, TN"
+        ATTOM tenant requires Address2 like "Nashville, TN"
         """
         a2 = (address2 or "").strip()
 
@@ -74,52 +77,79 @@ class AttomClient:
 
         r = requests.get(url, headers=self._headers(), params=params, timeout=self.timeout_s)
 
-        if r.status_code == 200:
-            return r.json() if r.text else {}
+        # ATTOM sometimes returns 400 with msg=SuccessWithoutResult (not an error for our logic)
+        if r.status_code in (200, 400):
+            try:
+                payload = r.json() if r.text else {}
+            except Exception:
+                payload = {}
+            if r.status_code == 200:
+                return payload
 
+            # 400: return payload if SuccessWithoutResult so caller can treat as "no match"
+            try:
+                status = payload.get("status") or {}
+                msg = str(status.get("msg") or status.get("message") or "")
+                if "SuccessWithoutResult" in msg:
+                    return payload
+            except Exception:
+                pass
+
+            # Otherwise treat 400 as non-retryable error
+            if self.debug and self._debug_fail_samples_left > 0:
+                self._debug_fail_samples_left -= 1
+                print(f"[ATTOM][DEBUG] non200 path={path} status={r.status_code} params={params} body={_clip(r.text)}")
+            raise AttomError(f"NONRETRY|ATTOM 400: {_clip(r.text, 320)}")
+
+        # non-200/400:
         if self.debug and self._debug_fail_samples_left > 0:
             self._debug_fail_samples_left -= 1
             print(f"[ATTOM][DEBUG] non200 path={path} status={r.status_code} params={params} body={_clip(r.text)}")
 
         if r.status_code in (429, 500, 502, 503, 504):
-            raise AttomError(f"ATTOM {r.status_code} retryable: {_clip(r.text, 300)}")
+            raise AttomError(f"RETRY|ATTOM {r.status_code}: {_clip(r.text, 320)}")
 
-        raise AttomError(f"ATTOM {r.status_code}: {_clip(r.text, 300)}")
+        raise AttomError(f"NONRETRY|ATTOM {r.status_code}: {_clip(r.text, 320)}")
 
     def _request(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
         last: Optional[Exception] = None
         for attempt in range(self.max_retries + 1):
             try:
                 return self._request_once(path, params)
-            except Exception as e:
+            except AttomError as e:
                 last = e
-                if attempt >= self.max_retries:
+                msg = str(e)
+                # Only retry if explicitly marked RETRY|
+                if not msg.startswith("RETRY|") or attempt >= self.max_retries:
                     break
                 time.sleep(self.retry_backoff_s * (attempt + 1))
+            except Exception as e:
+                last = e
+                break
         raise AttomError(str(last) if last else "ATTOM request failed")
 
     def _params(self, *, address1: str, address2: str) -> Dict[str, Any]:
         a1 = (address1 or "").strip()
         a2 = self._clean_address2(address2)
         if not a1 or not a2:
-            raise AttomError("ATTOM requires address1 and address2")
+            raise AttomError("NONRETRY|ATTOM requires address1 and address2")
         return {"address1": a1, "address2": a2}
 
     # -----------------------
-    # Endpoint wrappers (YOUR TENANT: address1+address2 only)
+    # Endpoint wrappers (tenant: address1 + address2 only)
     # -----------------------
 
     def property_detail(self, *, address1: str, address2: str) -> Dict[str, Any]:
         return self._request("/property/detail", self._params(address1=address1, address2=address2))
 
-    def property_detail_mortgage(self, *, address1: str, address2: str) -> Dict[str, Any]:
-        return self._request("/property/detailmortgage", self._params(address1=address1, address2=address2))
+    def avm_detail(self, *, address1: str, address2: str) -> Dict[str, Any]:
+        return self._request("/attomavm/detail", self._params(address1=address1, address2=address2))
 
     def property_detail_owner(self, *, address1: str, address2: str) -> Dict[str, Any]:
         return self._request("/property/detailowner", self._params(address1=address1, address2=address2))
 
-    def avm_detail(self, *, address1: str, address2: str) -> Dict[str, Any]:
-        return self._request("/attomavm/detail", self._params(address1=address1, address2=address2))
+    def property_detail_mortgage(self, *, address1: str, address2: str) -> Dict[str, Any]:
+        return self._request("/property/detailmortgage", self._params(address1=address1, address2=address2))
 
     def valuation_home_equity(self, *, address1: str, address2: str) -> Dict[str, Any]:
         return self._request("/valuation/homeequity", self._params(address1=address1, address2=address2))
@@ -143,18 +173,3 @@ class AttomClient:
         except Exception:
             pass
         return self._request("/salescomparables", params)
-
-    # -----------------------
-    # Response helpers
-    # -----------------------
-
-    @staticmethod
-    def first_property(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        if not isinstance(payload, dict):
-            return None
-        prop = payload.get("property")
-        if isinstance(prop, list) and prop:
-            return prop[0] if isinstance(prop[0], dict) else None
-        if isinstance(prop, dict):
-            return prop
-        return None
