@@ -98,12 +98,23 @@ def run() -> Dict[str, int]:
     dts_min, dts_max = get_dts_window("COMPS")
     max_items = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "25"))
 
-    # We compute comps/bands for leads in-window with an address.
+    # IMPORTANT:
+    # Only compute comps/bands for leads that actually have a value source:
+    # - Enrichment JSON present (ATTOM AVM stored), OR
+    # - Estimated Value Low/High populated.
+    # This prevents 100+ empty leads from dominating "missing_value" counts.
     filter_obj = {
         "and": [
             {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
             {"property": "Days to Sale", "number": {"less_than_or_equal_to": dts_max}},
             {"property": "Address", "rich_text": {"is_not_empty": True}},
+            {
+                "or": [
+                    {"property": "Enrichment JSON", "rich_text": {"is_not_empty": True}},
+                    {"property": "Estimated Value Low", "number": {"is_not_empty": True}},
+                    {"property": "Estimated Value High", "number": {"is_not_empty": True}},
+                ]
+            },
         ]
     }
 
@@ -163,32 +174,38 @@ def run() -> Dict[str, int]:
             skipped_missing_value += 1
             continue
 
-        liquidity = _compute_liquidity(fields.get("county") or "", 0, fields.get("days_to_sale"))
+        comps_payload = {
+            "source": "attom_avm_or_estimated_value",
+            "band_low": band_low,
+            "band_high": band_high,
+            "value": v,
+            "notes": "Derived from ATTOM AVM (preferred) else Estimated Value Low/High.",
+        }
 
-        comps_summary = f"Value band from ATTOM AVM: ${band_low:,.0f}–${band_high:,.0f} | Liquidity {liquidity:.1f}/5"
+        comps_count = 0  # Placeholder until real comps provider added
+        liquidity = _compute_liquidity(fields.get("county") or "", comps_count=comps_count, dts=fields.get("days_to_sale"))
 
-        data = {
-            "value_band_low": round(float(band_low), 0),
-            "value_band_high": round(float(band_high), 0),
-            "liquidity_score": liquidity,
-            "comps_json": _clip_json({"method": "attom_avm_band", "attom_avm": _parse_enrichment_json(enrichment_json).get("attom_avm")}),
-            "comps_summary": comps_summary[:900],
+        write_obj = {
+            "value_band_low": float(band_low),
+            "value_band_high": float(band_high),
+            "liquidity_score": float(liquidity),
+            "comps_json": _clip_json(comps_payload),
+            "comps_summary": f"Band ${int(band_low):,}–${int(band_high):,} | Liquidity {liquidity}/5 | Source: AVM/Estimated",
         }
 
         try:
-            update_lead(page_id, build_extra_properties(data))
+            update_lead(page_id, build_extra_properties(write_obj))
             computed += 1
             if DEBUG:
-                print(f"[CompsEngine] band page_id={page_id} addr={addr} band=({band_low},{band_high})")
+                print(f"[CompsEngine] computed band for {addr}: low={band_low} high={band_high} liq={liquidity}")
         except Exception as e:
             skipped_errors += 1
-            print(f"[CompsEngine] ERROR updating page_id={page_id}: {type(e).__name__}: {e}")
+            if DEBUG:
+                print(f"[CompsEngine][DEBUG] error updating {page_id}: {type(e).__name__}: {e}")
 
-    summary = {
+    return {
         "computed_comps_count": computed,
         "skipped_comps_already_done": skipped_already,
         "skipped_comps_missing_value": skipped_missing_value,
         "skipped_comps_errors": skipped_errors,
     }
-    print(f"[CompsEngine] summary {summary}")
-    return summary
