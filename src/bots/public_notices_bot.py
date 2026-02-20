@@ -6,16 +6,11 @@ Targets:
 - (light) foreclosurestn.com
 - (light) tnpublicnotice.com
 
-Required behaviors:
+Behavior:
 - Robust extraction: address, trustee/firm, sale date, county
 - Clip raw_snippet (never store full notice body)
 - Non-destructive Notion updates (handled centrally in notion_client.update_lead)
-- Run-level debug artifacts: skip reason counts + sample_kept + sample_county_missing
-
-Notes:
-- This bot uses the standard days-to-sale window by default unless overridden via:
-    FALCO_PUBLIC_DTS_MIN / FALCO_PUBLIC_DTS_MAX
-  The value printed comes from src.settings.get_dts_window("PUBLIC_NOTICES").
+- Run-level debug artifacts
 """
 
 from __future__ import annotations
@@ -67,22 +62,13 @@ def _norm_ws(s: str) -> str:
 
 
 def _clean_lines(s: str) -> List[str]:
-    """Preserve meaningful lines; remove empty / ultra-short lines."""
     if not s:
         return []
     lines = [re.sub(r"\s+", " ", ln).strip() for ln in s.splitlines()]
-    out: List[str] = []
-    for ln in lines:
-        if not ln:
-            continue
-        if len(ln) <= 2:
-            continue
-        out.append(ln)
-    return out
+    return [ln for ln in lines if ln and len(ln) > 2]
 
 
 def _text_from_main_content(soup: BeautifulSoup) -> str:
-    """Try to get the notice body without pulling the entire site chrome."""
     selectors = [
         "article .entry-content",
         "main .entry-content",
@@ -100,7 +86,7 @@ def _text_from_main_content(soup: BeautifulSoup) -> str:
 
 
 # ============================================================
-# Sale date extraction (robust candidate selection)
+# Sale date extraction (candidate selection)
 # ============================================================
 
 _MONTHS = (
@@ -117,7 +103,7 @@ _DATE_PATTERNS = [
 
 _DATE_CONTEXT_TOKENS = [
     "sale", "sold", "auction", "public auction", "foreclosure", "trustee",
-    "will be sold", "to be sold", "substitute trustee", "at the", "front door",
+    "will be sold", "to be sold", "substitute trustee", "front door",
     "p.m.", "a.m.", "courthouse", "chancery", "circuit"
 ]
 
@@ -142,13 +128,11 @@ def _parse_date_str(date_str: str, now_year: int) -> Optional[str]:
         except Exception:
             continue
 
-    # If missing year, assume current year, then next year if the assumed date already passed recently.
+    # Missing year -> assume current year (then next year)
     m = re.match(rf"^({_MONTHS})\s+(\d{{1,2}})$", s, flags=re.IGNORECASE)
     if m:
         month = m.group(1)
         day = m.group(2)
-
-        # Try current year first
         for year in (now_year, now_year + 1):
             for fmt in ("%B %d %Y", "%b %d %Y"):
                 try:
@@ -156,21 +140,18 @@ def _parse_date_str(date_str: str, now_year: int) -> Optional[str]:
                     return d.isoformat()
                 except Exception:
                     continue
-
     return None
 
 
 def _extract_date_candidates(text: str) -> List[Tuple[str, int]]:
-    """Return list of (iso_date, score) based on context proximity."""
     if not text:
         return []
-
     now_year = datetime.utcnow().year
     candidates: List[Tuple[str, int]] = []
+
     for pat in _DATE_PATTERNS:
         for m in pat.finditer(text):
-            raw = m.group(0)
-            iso = _parse_date_str(raw, now_year)
+            iso = _parse_date_str(m.group(0), now_year)
             if not iso:
                 continue
 
@@ -182,27 +163,18 @@ def _extract_date_candidates(text: str) -> List[Tuple[str, int]]:
             for tok in _DATE_CONTEXT_TOKENS:
                 if tok in ctx:
                     score += 1
-
             candidates.append((iso, score))
 
-    # de-dupe by iso keeping max score
     best: Dict[str, int] = {}
     for iso, sc in candidates:
         best[iso] = max(best.get(iso, 0), sc)
 
-    # sort by score desc, then date asc (stable)
     return sorted(best.items(), key=lambda x: (-x[1], x[0]))
 
 
 def _pick_sale_date_in_window(text: str, dts_min: int, dts_max: int) -> Tuple[str, Optional[int], List[Tuple[str, int]]]:
-    """Pick best sale date candidate within window.
-
-    Improvements vs prior:
-    - Evaluate ALL candidates and choose:
-        highest context score
-        then closest days-to-sale within window (smallest dts)
-    """
     cands = _extract_date_candidates(text)
+
     best_iso = ""
     best_dts: Optional[int] = None
     best_score = -1
@@ -224,7 +196,6 @@ def _pick_sale_date_in_window(text: str, dts_min: int, dts_max: int) -> Tuple[st
 
     if best_iso:
         return best_iso, best_dts, cands
-
     return "", None, cands
 
 
@@ -256,7 +227,7 @@ def _extract_county(text: str) -> str:
 
 
 # ============================================================
-# Address extraction (fixes "of the described property is 101..." leakage)
+# Address extraction (normalize TN. 37066. -> TN 37066)
 # ============================================================
 
 _ADDR_LABEL_RX = re.compile(
@@ -264,7 +235,7 @@ _ADDR_LABEL_RX = re.compile(
     re.IGNORECASE,
 )
 _ADDR_TN_ZIP_RX = re.compile(
-    r"\b\d{1,6}\s+[A-Za-z0-9#.,'\-\s]{2,80}\s+(Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Boulevard|Blvd\.?|Way|Place|Pl\.?|Circle|Cir\.?|Pike|Hwy|Highway)\b[^\n]{0,60}\bTN\b\s*\d{5}(?:-\d{4})?\b",
+    r"\b\d{1,6}\s+[A-Za-z0-9#.,'\-\s]{2,80}\s+(Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|Boulevard|Blvd\.?|Way|Place|Pl\.?|Circle|Cir\.?|Pike|Hwy|Highway)\b[^\n]{0,60}\bTN\b\.?\s*\d{5}(?:-\d{4})?\b",
     re.IGNORECASE,
 )
 _ADDR_GENERIC_RX = re.compile(
@@ -280,20 +251,25 @@ _ADDR_LEADING_JUNK = re.compile(
 
 def _cleanup_address(cand: str) -> str:
     c = _norm_ws(cand).strip(" ,;\t")
-    # remove common sentence-leads that sneak in
     c = _ADDR_LEADING_JUNK.sub("", c).strip(" ,;\t")
-    # remove trailing fragments
+
+    # normalize TN. ZIP -> TN ZIP
+    c = re.sub(r"\bTN\.\s*(\d{5}(?:-\d{4})?)\b", r"TN \1", c, flags=re.IGNORECASE)
+
+    # strip trailing fragments
     c = re.split(
         r"\b(Parcel|Tax\s+Map|Book\s+and\s+Page|Deed\s+of\s+Trust|Instrument\s+No\.|Being\s+the\s+same\s+property|Assignment)\b",
         c,
         maxsplit=1,
         flags=re.IGNORECASE,
     )[0].strip(" ,;\t")
+
+    # remove any trailing solitary period
+    c = c.rstrip(".").strip()
     return c
 
 
 def _extract_address(lines: List[str], full_text: str) -> str:
-    # 1) Label-based
     for ln in lines:
         m = _ADDR_LABEL_RX.search(ln)
         if m:
@@ -301,12 +277,10 @@ def _extract_address(lines: List[str], full_text: str) -> str:
             if 8 <= len(cand) <= 180:
                 return cand
 
-    # 2) Strong TN+ZIP pattern
     m = _ADDR_TN_ZIP_RX.search(full_text)
     if m:
         return _cleanup_address(m.group(0))
 
-    # 3) Generic street pattern
     m2 = _ADDR_GENERIC_RX.search(full_text)
     if m2:
         return _cleanup_address(m2.group(0))
@@ -315,41 +289,100 @@ def _extract_address(lines: List[str], full_text: str) -> str:
 
 
 # ============================================================
-# Trustee / firm extraction (adds more patterns + better fallback)
+# Trustee / firm extraction (NEW: signature-block + firm heuristics)
 # ============================================================
 
-_TRUSTEE_RXES = [
-    re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
-    re.compile(r"\bTrustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
-    re.compile(r"\bAttorney\s+for\s+the\s+Trustee\b\s*[:=\-]?\s*([^\n]{3,180})", re.IGNORECASE),
+# Very common firms / tokens in TN foreclosure notices.
+_KNOWN_FIRM_RX = re.compile(
+    r"\b("
+    r"Wilson\s*&\s*Associates|"
+    r"Shapiro\s+Ingrassia|"
+    r"McCalla\s+Raymer|"
+    r"Barrett\s+Frappier|"
+    r"Sirote\s*&\s*Permutt|"
+    r"Aldridge\s+Pite|"
+    r"Rubin\s+Lublin|"
+    r"Padgett\s+Law\s+Group|"
+    r"Brock\s*&\s*Scott|"
+    r"Default\s+Servicing|"
+    r"Mortgage\s+Foreclosure"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Labeled patterns: try to grab the actual name / firm.
+_TRUSTEE_LABELED_RXES = [
+    re.compile(r"\bSubstitute\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
+    re.compile(r"\bTrustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
+    re.compile(r"\bAttorney\s+for\s+the\s+Trustee\b\s*[:=\-]\s*([^\n]{3,180})", re.IGNORECASE),
     re.compile(r"\b(acting\s+as\s+)?Substitute\s+Trustee\s+is\s+([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
     re.compile(r"\bSubstitute\s+Trustee\s*,\s*([A-Za-z0-9&.,'\-\s]{3,180})", re.IGNORECASE),
-    # common TN foreclosure firms
-    re.compile(r"\b(Wilson\s*&\s*Associates|Shapiro\s+Ingrassia|McCalla\s+Raymer|Barrett\s+Frappier|Sirote\s*&\s*Permutt|Aldridge\s+Pite|Rubin\s+Lublin)\b[^\n]{0,140}", re.IGNORECASE),
 ]
+
+# “Firm-like” line heuristic for signature blocks near the end.
+_FIRMISH_LINE_RX = re.compile(
+    r"\b("
+    r"PLLC|P\.?L\.?L\.?C\.?|LLC|P\.?C\.?|LLP|L\.?L\.?P\.?|"
+    r"LAW\s+GROUP|ATTORNEYS|ATTORNEY\s+AT\s+LAW|LEGAL|"
+    r"ASSOCIATES|FIRM|COUNSEL"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_trustee(cand: str) -> str:
+    c = _norm_ws(cand).strip(" ,;\t")
+    # trim if it accidentally captured too much
+    c = re.split(r"\b(Phone|Tel|Facsimile|Fax|Email|Address|P\.?\s*O\.?\s*Box)\b", c, maxsplit=1, flags=re.IGNORECASE)[0]
+    c = c.strip(" ,;\t")
+    if len(c) > 160:
+        c = c[:160].rstrip()
+    return c
 
 
 def _extract_trustee(lines: List[str], full_text: str) -> str:
-    # 1) line-based (avoids huge captures)
+    # Tier A: labeled patterns line-by-line
     for ln in lines:
-        for rx in _TRUSTEE_RXES:
+        for rx in _TRUSTEE_LABELED_RXES:
             m = rx.search(ln)
             if m:
-                if m.lastindex and m.lastindex >= 1:
-                    # prefer last captured group if multiple
-                    cand = m.group(m.lastindex)
-                else:
-                    cand = m.group(0)
-                cand = _norm_ws(cand).strip(" ,;\t")
+                # prefer last captured group if multiple
+                cand = m.group(m.lastindex) if m.lastindex else m.group(0)
+                cand = _sanitize_trustee(cand)
                 if 3 <= len(cand) <= 160:
                     return cand
 
-    # 2) full-text search
-    for rx in _TRUSTEE_RXES:
+    # Tier B: labeled patterns in full text
+    for rx in _TRUSTEE_LABELED_RXES:
         m = rx.search(full_text)
         if m:
-            cand = m.group(m.lastindex) if (m.lastindex and m.lastindex >= 1) else m.group(0)
-            cand = _norm_ws(cand).strip(" ,;\t")
+            cand = m.group(m.lastindex) if m.lastindex else m.group(0)
+            cand = _sanitize_trustee(cand)
+            if 3 <= len(cand) <= 160:
+                return cand
+
+    # Tier C: known firm anywhere
+    mfirm = _KNOWN_FIRM_RX.search(full_text)
+    if mfirm:
+        return _sanitize_trustee(mfirm.group(0))
+
+    # Tier D: signature heuristic (scan last ~35 lines for a "firmish" line)
+    tail = lines[-35:] if len(lines) > 35 else lines
+    # Prefer tail lines that also mention trustee/sale
+    for ln in reversed(tail):
+        low = ln.lower()
+        if _FIRMISH_LINE_RX.search(ln) and ("trustee" in low or "sale" in low or "auction" in low):
+            cand = _sanitize_trustee(ln)
+            if 3 <= len(cand) <= 160:
+                return cand
+
+    # If that fails, accept any "firmish" tail line that isn't obviously boilerplate
+    for ln in reversed(tail):
+        if _FIRMISH_LINE_RX.search(ln):
+            # skip common boilerplate debt-collection lines
+            if "attempt to collect a debt" in ln.lower():
+                continue
+            cand = _sanitize_trustee(ln)
             if 3 <= len(cand) <= 160:
                 return cand
 
@@ -379,7 +412,6 @@ def _build_raw_snippet(
     if address:
         header_lines.append(f"Address: {address}")
 
-    # Choose a few high-signal lines (don’t dump full body)
     signal_lines: List[str] = []
     keywords = (
         "sale", "sold", "auction", "public auction", "property address",
@@ -434,7 +466,6 @@ def run():
     notice_links: List[str] = []
     seen_links = set()
 
-    # --- scrape listing pages
     for seed in SEEDS:
         for list_url in _list_pages_for_seed(seed):
             try:
@@ -457,7 +488,6 @@ def run():
         if len(notice_links) >= MAX_NOTICE_LINKS:
             break
 
-    # --- counters
     notice_pages_fetched_ok = 0
     parsed_ok = 0
     filtered_in = 0
@@ -483,7 +513,6 @@ def run():
 
     seen_in_run = set()
 
-    # --- scrape notice pages
     for idx, url in enumerate(notice_links):
         if MAX_ITEMS_PER_RUN and idx >= MAX_ITEMS_PER_RUN:
             break
@@ -507,7 +536,6 @@ def run():
         full_text = "\n".join(lines) if lines else body_text
         full_text_norm = _norm_ws(full_text)
 
-        # ---- sale date (windowed)
         sale_date_iso, dts, candidates = _pick_sale_date_in_window(full_text_norm, dts_min, dts_max)
         if not sale_date_iso:
             if candidates:
@@ -527,7 +555,6 @@ def run():
             _sample("expired", f"url={url} sale={sale_date_iso} dts={dts}")
             continue
 
-        # ---- county (normalize + allowlist)
         county_full = _extract_county(full_text)
         if not county_full:
             skipped_county_missing += 1
@@ -542,11 +569,9 @@ def run():
             _sample("out_of_geo", f"url={url} county={county_full}")
             continue
 
-        # ---- address + trustee
         address = _extract_address(lines, full_text)
         trustee = _extract_trustee(lines, full_text)
 
-        # ---- lead key (stable + consistent)
         lead_key = make_lead_key(
             "PublicNotices",
             "Foreclosure",
@@ -560,7 +585,6 @@ def run():
             continue
         seen_in_run.add(lead_key)
 
-        # ---- snippet
         raw_snippet = _build_raw_snippet(
             sale_date_iso=sale_date_iso,
             county_full=county_full,
@@ -570,7 +594,6 @@ def run():
             max_chars=min(MAX_SNIPPET_LEN, 1900),
         )
 
-        # ---- scoring + status
         flags = detect_risk_flags(full_text_norm)
         county_b = county_base(county_full) or ""
         has_contact = bool(trustee.strip())
@@ -598,7 +621,7 @@ def run():
 
         existing = find_existing_by_lead_key(lead_key)
         if existing:
-            update_lead(existing, props)  # non-destructive pruning happens inside notion_client.update_lead
+            update_lead(existing, props)
             updated += 1
         else:
             create_lead(props)
