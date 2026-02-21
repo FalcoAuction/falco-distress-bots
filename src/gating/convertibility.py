@@ -7,6 +7,10 @@ _INSTITUTIONAL_PREFIXES = (
 )
 
 
+def is_institutional(payload: dict) -> bool:
+    return payload.get("status_flag") == "INSTITUTIONAL"
+
+
 def apply_convertibility_gate(payload: dict) -> dict:
     fields = (
         payload.get("trustee_attorney", "") or "",

@@ -12,6 +12,7 @@ from ..notion_client import (
 )
 from ..settings import get_dts_window
 from ..scoring import COUNTY_LIQUIDITY
+from ..gating.convertibility import is_institutional
 
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
@@ -239,6 +240,7 @@ def run() -> Dict[str, int]:
     skipped_already = 0
     skipped_missing_value = 0
     skipped_errors = 0
+    skipped_institutional = 0
 
     for page in pages:
         if graded >= max_items:
@@ -247,6 +249,10 @@ def run() -> Dict[str, int]:
         fields = extract_page_fields(page)
         page_id = fields.get("page_id") or ""
         if not page_id:
+            continue
+
+        if is_institutional(fields):
+            skipped_institutional += 1
             continue
 
         # already graded?
@@ -280,6 +286,7 @@ def run() -> Dict[str, int]:
         "skipped_grading_already_done": skipped_already,
         "skipped_grading_missing_value": skipped_missing_value,
         "skipped_grading_errors": skipped_errors,
+        "skipped_grading_institutional": skipped_institutional,
     }
     print(f"[Grader] summary {summary}")
     return summary

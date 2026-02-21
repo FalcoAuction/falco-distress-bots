@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..notion_client import build_extra_properties, extract_page_fields, query_database, update_lead
 from ..settings import get_dts_window, is_allowed_county
 from .attom_client import AttomClient, AttomError
+from ..gating.convertibility import is_institutional
 
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
@@ -367,6 +368,10 @@ def run() -> Dict[str, int]:
         county = fields.get("county") or ""
 
         if not page_id:
+            continue
+
+        if is_institutional(fields):
+            skipped_institutional_count += 1
             continue
 
         if county and not is_allowed_county(county):

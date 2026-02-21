@@ -5,6 +5,7 @@ from ..notion_client import query_database, extract_page_fields, build_extra_pro
 from ..settings import get_dts_window
 from .pdf_builder import build_pdf_packet
 from .drive_uploader import upload_pdf, have_drive_creds
+from ..gating.convertibility import is_institutional
 
 
 def run() -> Dict[str, int]:
@@ -30,6 +31,7 @@ def run() -> Dict[str, int]:
     skipped_already = 0
     upload_failures = 0
     skipped_upload_missing_creds = 0
+    skipped_institutional = 0
 
     out_dir = os.path.join(os.getcwd(), "out_packets")
     drive_enabled = have_drive_creds()
@@ -41,6 +43,10 @@ def run() -> Dict[str, int]:
         fields = extract_page_fields(page)
         page_id = fields.get("page_id") or ""
         if not page_id:
+            continue
+
+        if is_institutional(fields):
+            skipped_institutional += 1
             continue
 
         # Already has URL
@@ -81,6 +87,7 @@ def run() -> Dict[str, int]:
         "skipped_packaging_missing_fields": skipped_missing,
         "skipped_packaging_already_done": skipped_already,
         "upload_failures": upload_failures,
+        "skipped_packaging_institutional": skipped_institutional,
     }
 
     if not drive_enabled:
