@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
-import os
 import json
+import os
 import re
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..notion_client import (
-    query_database,
-    extract_page_fields,
-    build_extra_properties,
-    update_lead,
-)
+from ..notion_client import build_extra_properties, extract_page_fields, query_database, update_lead
 from ..settings import get_dts_window, is_allowed_county
 from .attom_client import AttomClient, AttomError
 
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
 
+# =========================================================
+# SMALL UTILS
+# =========================================================
+
 def _clip_json(obj: Any, max_chars: int = 1800) -> str:
+    """Keep Notion rich_text payloads small-ish (and safe to store)."""
     try:
         s = json.dumps(obj, ensure_ascii=False)
     except Exception:
@@ -30,17 +30,27 @@ def _clip_json(obj: Any, max_chars: int = 1800) -> str:
     return s[: max_chars - 1] + "…"
 
 
+def _clean_spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _strip_zip(s: str) -> str:
+    return re.sub(r"\b\d{5}(?:-\d{4})?\b", "", s or "").strip(" ,")
+
+
+def _normalize_state(st: str) -> str:
+    st = (st or "").strip().upper()
+    if len(st) == 2 and st.isalpha():
+        return st
+    return "TN"
+
+
 def _safe_float(x: Any) -> Optional[float]:
     try:
         if x is None:
             return None
         if isinstance(x, (int, float)):
             return float(x)
-        if isinstance(x, dict):
-            for k in ("value", "amount", "val"):
-                if k in x:
-                    return _safe_float(x.get(k))
-            return None
         s = str(x).replace("$", "").replace(",", "").strip()
         if not s:
             return None
@@ -74,22 +84,35 @@ def _has_property(payload: Dict[str, Any]) -> bool:
     return isinstance(prop, list) and len(prop) > 0 and isinstance(prop[0], dict)
 
 
-def _clean_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip())
+def _get_p0(payload: Dict[str, Any]) -> Dict[str, Any]:
+    prop = payload.get("property")
+    if isinstance(prop, list) and prop and isinstance(prop[0], dict):
+        return prop[0]
+    return {}
 
 
-def _strip_zip(s: str) -> str:
-    return re.sub(r"\b\d{5}(?:-\d{4})?\b", "", s or "").strip(" ,")
-
-
-def _normalize_state(st: str) -> str:
-    st = (st or "").strip().upper()
-    if len(st) == 2 and st.isalpha():
-        return st
-    return "TN"
+def _extract_value_from_attom_avm(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Observed shape:
+      property[0].avm.amount = {"scr":95,"value":529582,"high":..., "low":..., "fsd":...}
+    Returns (value, low, high).
+    """
+    p0 = _get_p0(avm_payload)
+    avm = p0.get("avm") if isinstance(p0, dict) else None
+    if not isinstance(avm, dict):
+        return None, None, None
+    amt = avm.get("amount")
+    if not isinstance(amt, dict):
+        v = _safe_float(avm.get("amount"))
+        return v, None, None
+    v = _safe_float(amt.get("value"))
+    lo = _safe_float(amt.get("low"))
+    hi = _safe_float(amt.get("high"))
+    return v, lo, hi
 
 
 def _parse_address(addr: str) -> Tuple[str, str]:
+    """Best-effort split into ATTOM address1/address2."""
     raw = _clean_spaces(str(addr or ""))
     if not raw:
         return "", ""
@@ -138,7 +161,6 @@ def _parse_address(addr: str) -> Tuple[str, str]:
         return street, f"{city}, {st}"
 
     tokens = raw.split()
-
     st_idx = None
     for i, t in enumerate(tokens):
         tt = fix_state_token(t).upper()
@@ -160,43 +182,34 @@ def _parse_address(addr: str) -> Tuple[str, str]:
     return raw, "Nashville, TN"
 
 
-def _get_p0(payload: Dict[str, Any]) -> Dict[str, Any]:
-    prop = payload.get("property")
-    if isinstance(prop, list) and prop and isinstance(prop[0], dict):
-        return prop[0]
-    return {}
-
-
-def _extract_value_from_attom_avm(avm_payload: Dict[str, Any]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    """
-    Observed shape:
-      p0['avm'] = {"eventDate": "...", "amount": {"scr":95,"value":529582,"high":..., "low":..., ...}}
-    Returns (value, low, high) where low/high may exist.
-    """
-    p0 = _get_p0(avm_payload)
-    avm = p0.get("avm") if isinstance(p0, dict) else None
-    if not isinstance(avm, dict):
-        return None, None, None
-    amt = avm.get("amount")
-    if not isinstance(amt, dict):
-        v = _safe_float(avm.get("amount"))
-        return v, None, None
-    v = _safe_float(amt.get("value"))
-    lo = _safe_float(amt.get("low"))
-    hi = _safe_float(amt.get("high"))
-    return v, lo, hi
-
-
 def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
+    """
+    Prefer parsing full JSON. Fallback to regex fragment extraction if the stored
+    string is clipped / contains extra text.
+    """
     if not enrichment_json:
         return None
+
+    # 1) full JSON parse
+    try:
+        obj = json.loads(enrichment_json)
+        if isinstance(obj, dict):
+            falco = obj.get("falco") or {}
+            if isinstance(falco, dict):
+                attom = falco.get("attom")
+                if isinstance(attom, dict):
+                    return attom
+    except Exception:
+        pass
+
+    # 2) fragment parse fallback
     try:
         m = re.search(r'("falco"\s*:\s*\{.*?\})', enrichment_json)
         if not m:
             return None
         frag = "{" + m.group(1) + "}"
-        obj = json.loads(frag)
-        return obj.get("falco", {}).get("attom")
+        obj2 = json.loads(frag)
+        return (obj2.get("falco") or {}).get("attom")
     except Exception:
         return None
 
@@ -205,30 +218,28 @@ def _read_no_result_marker(enrichment_json: str) -> Optional[Dict[str, Any]]:
 # INSTITUTIONAL / LOW-PROBABILITY FILTER (TN-native)
 # =========================================================
 
-_DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS = [
-    # TN trustee mills / high-volume foreclosure firms observed in your Notion export
+_DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS: List[str] = [
     "mackie wolf zientz & mann",
     "mackie, wolf, zientz & mann",
     "western progressive",
     "winchester sellers foster & steele",
-    "henry, henry & underwood",
+    "kizer bonds hughes & bowen",
     "kizer, bonds, hughes & bowen",
     "crawford & von keller",
-    "burr & forman",
-    "polsinelli",
+    "henry, henry & underwood",
+    "wilson & associates",
+    "mccalla raymer",
+    "shapiro",
 ]
 
-_DEFAULT_INSTITUTIONAL_CONTEXT_KEYWORDS = [
-    # optional extra context flags (kept minimal; only add if you actually see them in your pipeline)
-    # (leave empty by default to avoid false positives)
-]
+_DEFAULT_INSTITUTIONAL_CONTEXT_KEYWORDS: List[str] = []
 
 
-def _load_keyword_list(env_var: str, default_list: list[str]) -> list[str]:
+def _load_keyword_list(env_var: str, default_list: List[str]) -> List[str]:
     raw = os.getenv(env_var, "").strip()
     if not raw:
         return default_list[:]
-    parts = []
+    parts: List[str] = []
     for p in raw.split(","):
         p = _clean_spaces(p).lower()
         if p:
@@ -237,10 +248,6 @@ def _load_keyword_list(env_var: str, default_list: list[str]) -> list[str]:
 
 
 def _detect_institutional(fields: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """
-    Returns {"matched_in": <field>, "keyword": <kw>} if institutional/low-probability.
-    Otherwise returns None.
-    """
     trustee = _clean_spaces(str(fields.get("trustee_attorney") or "")).lower()
     contact = _clean_spaces(str(fields.get("contact_info") or "")).lower()
     raw_snip = _clean_spaces(str(fields.get("raw_snippet") or "")).lower()
@@ -249,7 +256,7 @@ def _detect_institutional(fields: Dict[str, Any]) -> Optional[Dict[str, str]]:
     trustee_kws = _load_keyword_list("FALCO_INSTITUTIONAL_TRUSTEE_KEYWORDS", _DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS)
     ctx_kws = _load_keyword_list("FALCO_INSTITUTIONAL_CONTEXT_KEYWORDS", _DEFAULT_INSTITUTIONAL_CONTEXT_KEYWORDS)
 
-    def has_any(text: str, kws: list[str]) -> Optional[str]:
+    def has_any(text: str, kws: List[str]) -> Optional[str]:
         for kw in kws:
             if kw and kw in text:
                 return kw
@@ -271,7 +278,6 @@ def _detect_institutional(fields: Dict[str, Any]) -> Optional[Dict[str, str]]:
     if m:
         return {"matched_in": "URL", "keyword": m}
 
-    # optional: broader context keywords (kept empty by default)
     if ctx_kws:
         m = has_any(raw_snip, ctx_kws)
         if m:
@@ -281,10 +287,6 @@ def _detect_institutional(fields: Dict[str, Any]) -> Optional[Dict[str, str]]:
 
 
 def _mark_institutional_skip(page_id: str, *, reason: Dict[str, str], now: datetime) -> None:
-    """
-    Writes a no-call marker to Notion so we don't keep reconsidering the same page.
-    This does NOT hit ATTOM.
-    """
     try:
         write_obj = {
             "status_flag": "INSTITUTIONAL_SKIP",
@@ -308,6 +310,10 @@ def _mark_institutional_skip(page_id: str, *, reason: Dict[str, str], now: datet
             print(f"[ATTOM][DEBUG] failed to mark institutional skip page_id={page_id}: {type(e).__name__}: {e}")
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 def run() -> Dict[str, int]:
     api_key = os.getenv("FALCO_ATTOM_API_KEY", "").strip()
     if not api_key:
@@ -318,13 +324,12 @@ def run() -> Dict[str, int]:
     max_enrich = int(os.getenv("FALCO_MAX_ENRICH_PER_RUN", "10"))
     cooldown_hours = int(os.getenv("FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS", "72"))
 
-    # Hard cost controls
+    # cost controls
     skip_institutional = os.getenv("FALCO_SKIP_INSTITUTIONAL_ENRICH", "1").strip() not in ("", "0", "false", "False")
     mark_institutional = os.getenv("FALCO_MARK_INSTITUTIONAL_SKIP", "1").strip() not in ("", "0", "false", "False")
 
     client = AttomClient(api_key=api_key)
 
-    # IMPORTANT: Notion filter object goes under "filter" in query_database()
     filter_obj = {
         "and": [
             {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
@@ -342,13 +347,15 @@ def run() -> Dict[str, int]:
     skipped_no_match = 0
     skipped_cooldown = 0
     skipped_out_of_geo = 0
-    skipped_institutional = 0
+    skipped_institutional_count = 0
+    skipped_dup_in_run = 0
     errors = 0
 
     now = datetime.now(timezone.utc)
     cooldown = timedelta(hours=cooldown_hours)
 
     logged_sample = False
+    seen_addr_keys: set[str] = set()
 
     for page in pages:
         if enriched >= max_enrich:
@@ -362,7 +369,6 @@ def run() -> Dict[str, int]:
         if not page_id:
             continue
 
-        # Keep Stage 2 aligned with Stage 1 geo constraints
         if county and not is_allowed_county(county):
             skipped_out_of_geo += 1
             continue
@@ -371,23 +377,20 @@ def run() -> Dict[str, int]:
             skipped_missing_address += 1
             continue
 
-        # Skip institutional / already-controlled trustee leads to protect ATTOM budget
         if skip_institutional:
             reason = _detect_institutional(fields)
             if reason:
-                skipped_institutional += 1
+                skipped_institutional_count += 1
                 if mark_institutional:
                     _mark_institutional_skip(page_id, reason=reason, now=now)
                 if DEBUG:
                     print(f"[ATTOM][DEBUG] institutional skip page_id={page_id} matched_in={reason.get('matched_in')} kw={reason.get('keyword')}")
                 continue
 
-        # already enriched with value fields (if DB has them)
-        if fields.get("estimated_value_low") or fields.get("estimated_value_high"):
+        if fields.get("estimated_value_low") is not None or fields.get("estimated_value_high") is not None:
             skipped_already_enriched += 1
             continue
 
-        # cooldown skip if prior no-result marker exists
         ej = str(fields.get("enrichment_json") or "").strip()
         marker = _read_no_result_marker(ej)
         if marker and (marker.get("no_result") is True) and marker.get("ts"):
@@ -403,6 +406,12 @@ def run() -> Dict[str, int]:
         if not address1 or not address2:
             skipped_missing_address += 1
             continue
+
+        addr_key = _clean_spaces(f"{address1}|{address2}").lower()
+        if addr_key in seen_addr_keys:
+            skipped_dup_in_run += 1
+            continue
+        seen_addr_keys.add(addr_key)
 
         try:
             detail = client.property_detail(address1=address1, address2=address2)
@@ -451,7 +460,6 @@ def run() -> Dict[str, int]:
 
             v, lo, hi = _extract_value_from_attom_avm(avm)
 
-            # store the AVM blob inside Enrichment JSON so Stage2/3 can read it even if DB lacks number fields
             p0a = _get_p0(avm)
             avm_blob = p0a.get("avm") if isinstance(p0a, dict) else None
 
@@ -462,7 +470,7 @@ def run() -> Dict[str, int]:
             enrichment_payload = {
                 "falco": {"attom": {"no_result": False, "ts": now.isoformat().replace("+00:00", "Z")}},
                 "meta": {"address1": address1, "address2": address2, "value_source": "avm.amount"},
-                "attom_avm": avm_blob,  # <-- critical for downstream fallback
+                "attom_avm": avm_blob,
             }
 
             write_obj: Dict[str, Any] = {
@@ -470,7 +478,6 @@ def run() -> Dict[str, int]:
                 "enrichment_confidence": None,
             }
 
-            # If DB has numeric fields, write them too (if not, schema filter will drop safely)
             if v is not None:
                 write_obj["estimated_value_low"] = float(lo if lo is not None else v)
                 write_obj["estimated_value_high"] = float(hi if hi is not None else v)
@@ -498,7 +505,8 @@ def run() -> Dict[str, int]:
         "skipped_enrich_no_match": skipped_no_match,
         "skipped_enrich_cooldown": skipped_cooldown,
         "skipped_enrich_out_of_geo": skipped_out_of_geo,
-        "skipped_enrich_institutional": skipped_institutional,
+        "skipped_enrich_institutional": skipped_institutional_count,
+        "skipped_enrich_dup_in_run": skipped_dup_in_run,
         "errors": errors,
         "attom_call_count": client.call_count,
         "attom_call_count_by_path": client.call_count_by_path,
