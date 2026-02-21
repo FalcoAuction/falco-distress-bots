@@ -2,6 +2,7 @@ import os
 import json as _json
 import time
 import re
+import datetime as _dt
 import requests
 from typing import Any, Dict, Optional, Tuple, List
 
@@ -20,6 +21,39 @@ _WARNED_MISSING_CREDS = False
 # Stage 2-3 schema cache
 _DB_SCHEMA_CACHE: Optional[Dict[str, Any]] = None
 _DB_SCHEMA_FETCHED_AT: float = 0.0
+
+# =========================================================
+# DRY-RUN MODE  (FALCO_DRY_RUN=1)
+# No Notion API calls are made. Every lead is written to
+# out/leads_<timestamp>.jsonl instead.
+# =========================================================
+_DRY_RUN: bool = os.getenv("FALCO_DRY_RUN", "0").strip().lower() not in ("", "0", "false", "no")
+_DRY_RUN_FILE: Optional[str] = None
+_DRY_RUN_COUNT: int = 0
+
+
+def _get_dry_run_file() -> str:
+    global _DRY_RUN_FILE
+    if _DRY_RUN_FILE is None:
+        os.makedirs("out", exist_ok=True)
+        ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        _DRY_RUN_FILE = f"out/leads_{ts}.jsonl"
+        print(f"[DRY_RUN] Output file: {_DRY_RUN_FILE}")
+    return _DRY_RUN_FILE
+
+
+def _dry_run_append(action: str, properties: Dict[str, Any]) -> None:
+    global _DRY_RUN_COUNT
+    try:
+        lk = properties["Lead Key"]["rich_text"][0]["text"]["content"]
+    except Exception:
+        lk = ""
+    record = {"_action": action, "_lead_key": lk, "properties": properties}
+    path = _get_dry_run_file()
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write(_json.dumps(record) + "\n")
+    _DRY_RUN_COUNT += 1
+    print(f"[DRY_RUN] {action} lead_key={lk or '[missing]'} total={_DRY_RUN_COUNT}")
 
 
 # =========================================================
@@ -415,6 +449,8 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
     """
     MUST return page_id string (Stage 1 expects this).
     """
+    if _DRY_RUN:
+        return None
     if not _have_creds():
         _warn_missing_creds_once()
         return None
@@ -422,7 +458,7 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
         return None
 
     try:
-        body = {"filter": {"property": "Lead Key", "rich_text": {"contains": lead_key}}}
+        body = {"filter": {"property": "Lead Key", "rich_text": {"equals": lead_key}}}
         res = _request("POST", f"/databases/{NOTION_DATABASE_ID}/query", json=body)
         results = res.get("results", [])
         if not results:
@@ -434,6 +470,9 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
 
 
 def create_lead(properties: Dict[str, Any]) -> str:
+    if _DRY_RUN:
+        _dry_run_append("create", properties)
+        return "[dry-run]"
     if not _have_creds():
         _warn_missing_creds_once()
         return ""
@@ -453,6 +492,9 @@ def update_lead(page_id: str, properties: Dict[str, Any]) -> str:
     Stage 1 MUST NOT crash if Notion rejects an update.
     We log and continue.
     """
+    if _DRY_RUN:
+        _dry_run_append("update", properties)
+        return page_id
     if not _have_creds():
         _warn_missing_creds_once()
         return page_id
