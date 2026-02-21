@@ -11,7 +11,12 @@ from .bots import tn_foreclosure_notices_bot
 def run_bot(name: str, fn):
     print(f"\n=== RUNNING: {name} ===")
     try:
-        fn()
+        result = fn()
+
+        # Always print returned summaries (Stage2/3 return dicts)
+        if isinstance(result, dict):
+            print(f"[{name}] summary {result}")
+
         print(f"=== DONE: {name} ===")
     except Exception as e:
         print(f"=== ERROR: {name} === {type(e).__name__}: {e}")
@@ -30,11 +35,11 @@ def main():
     # ---------------- Stage 2: Enrichment + Comps ----------------
     def _run_attom_enrichment():
         from .enrichment.attom_enricher import run as _run
-        _run()
+        return _run()
 
     def _run_comps():
         from .enrichment.comps import run as _run
-        _run()
+        return _run()
 
     run_bot("Stage2_ATTOMEnrichment", _run_attom_enrichment)
     run_bot("Stage2_CompsEngine", _run_comps)
@@ -42,11 +47,11 @@ def main():
     # ---------------- Stage 3: Grading + Packaging ----------------
     def _run_grading():
         from .grading.grade import run as _run
-        _run()
+        return _run()
 
     def _run_packaging():
         from .packaging.packager import run as _run
-        _run()
+        return _run()
 
     run_bot("Stage3_AuctionFitGrading", _run_grading)
     run_bot("Stage3_PDFPackaging", _run_packaging)
