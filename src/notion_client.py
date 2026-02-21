@@ -463,6 +463,8 @@ def find_existing_by_lead_key(lead_key: str) -> Optional[str]:
         results = res.get("results", [])
         if not results:
             return None
+        if len(results) > 1:
+            raise ValueError(f"[NOTION] Duplicate lead_key detected: '{lead_key}' matched {len(results)} pages")
         return results[0].get("id")
     except Exception as e:
         print(f"[NOTION] find_existing error (non-fatal): {type(e).__name__}: {e}")
