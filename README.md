@@ -81,6 +81,7 @@ Get-Content .env | ForEach-Object {
 
 | Variable | Default | Description |
 |---|---|---|
+| `FALCO_NOTION_WRITE` | `0` | Set to `1` to enable Notion create/update (default: writes disabled) |
 | `FALCO_ATTOM_API_KEY` | _(none)_ | ATTOM API key — enrichment skipped if not set |
 | `FALCO_ALLOWED_COUNTIES` | `Davidson,Williamson,Rutherford,Wilson,Sumner` | Comma-separated counties to target |
 | `FALCO_DTS_MIN` | `21` | Minimum days to sale |
@@ -93,7 +94,21 @@ Get-Content .env | ForEach-Object {
 
 ## Running the Engine
 
+### Safe mode (default — no Notion writes)
+
+Scrapes and processes leads but does **not** write anything to Notion.
+Use this for testing, dry runs, or any time you want to verify output before committing.
+
 ```powershell
+py -3 -m src.run_all
+```
+
+### Live mode (writes enabled)
+
+Set `FALCO_NOTION_WRITE=1` to allow create/update calls to reach Notion.
+
+```powershell
+$env:FALCO_NOTION_WRITE = "1"
 py -3 -m src.run_all
 ```
 

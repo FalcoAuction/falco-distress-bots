@@ -23,6 +23,15 @@ _DB_SCHEMA_CACHE: Optional[Dict[str, Any]] = None
 _DB_SCHEMA_FETCHED_AT: float = 0.0
 
 # =========================================================
+# WRITE KILL SWITCH  (FALCO_NOTION_WRITE=1)
+# Default is SAFE (disabled). Set FALCO_NOTION_WRITE=1 to
+# allow create/update calls to reach Notion.
+# =========================================================
+_NOTION_WRITE: bool = os.getenv("FALCO_NOTION_WRITE", "0").strip() == "1"
+if not _NOTION_WRITE:
+    print("[NOTION] Write kill switch active — FALCO_NOTION_WRITE != '1'. create/update are no-ops.")
+
+# =========================================================
 # DRY-RUN MODE  (FALCO_DRY_RUN=1)
 # No Notion API calls are made. Every lead is written to
 # out/leads_<timestamp>.jsonl instead.
@@ -475,6 +484,8 @@ def create_lead(properties: Dict[str, Any]) -> str:
     if _DRY_RUN:
         _dry_run_append("create", properties)
         return "[dry-run]"
+    if not _NOTION_WRITE:
+        return ""
     if not _have_creds():
         _warn_missing_creds_once()
         return ""
@@ -496,6 +507,8 @@ def update_lead(page_id: str, properties: Dict[str, Any]) -> str:
     """
     if _DRY_RUN:
         _dry_run_append("update", properties)
+        return page_id
+    if not _NOTION_WRITE:
         return page_id
     if not _have_creds():
         _warn_missing_creds_once()
