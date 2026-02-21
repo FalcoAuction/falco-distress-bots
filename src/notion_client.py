@@ -28,6 +28,7 @@ _DB_SCHEMA_FETCHED_AT: float = 0.0
 # allow create/update calls to reach Notion.
 # =========================================================
 _NOTION_WRITE: bool = os.getenv("FALCO_NOTION_WRITE", "0").strip() == "1"
+NOTION_WRITE_ENABLED: bool = _NOTION_WRITE  # public alias for bots to gate counters
 if not _NOTION_WRITE:
     print("[NOTION] Write kill switch active — FALCO_NOTION_WRITE != '1'. create/update are no-ops.")
 

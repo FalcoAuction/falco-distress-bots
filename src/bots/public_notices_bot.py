@@ -11,6 +11,7 @@ from ..notion_client import (
     create_lead,
     update_lead,
     find_existing_by_lead_key,
+    NOTION_WRITE_ENABLED,
 )
 from ..scoring import days_to_sale
 from ..settings import (
@@ -344,6 +345,8 @@ def run():
     filtered_in = 0
     created = 0
     updated = 0
+    would_create = 0
+    would_update = 0
 
     skipped_no_sale = 0
     skipped_expired = 0
@@ -458,10 +461,16 @@ def run():
         existing = find_existing_by_lead_key(lead_key)
         if existing:
             update_lead(existing, props)
-            updated += 1
+            if NOTION_WRITE_ENABLED:
+                updated += 1
+            else:
+                would_update += 1
         else:
             create_lead(props)
-            created += 1
+            if NOTION_WRITE_ENABLED:
+                created += 1
+            else:
+                would_create += 1
 
         parsed_ok += 1
         filtered_in += 1
@@ -477,7 +486,7 @@ def run():
         f"notice_links_found={len(notice_links)} "
         f"notice_pages_fetched_ok={notice_pages_fetched_ok} "
         f"parsed_ok={parsed_ok} filtered_in={filtered_in} "
-        f"created={created} updated={updated} "
+        f"created={created} updated={updated} would_create={would_create} would_update={would_update} "
         f"skipped_no_sale={skipped_no_sale} skipped_expired={skipped_expired} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
         f"skipped_county_missing={skipped_county_missing} skipped_dup_in_run={skipped_dup_in_run} "

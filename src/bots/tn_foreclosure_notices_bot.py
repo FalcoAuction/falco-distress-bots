@@ -11,6 +11,7 @@ from ..notion_client import (
     create_lead,
     update_lead,
     find_existing_by_lead_key,
+    NOTION_WRITE_ENABLED,
 )
 from ..scoring import days_to_sale
 from ..settings import (
@@ -239,6 +240,8 @@ def run():
     filtered_in = 0
     created = 0
     updated = 0
+    would_create = 0
+    would_update = 0
 
     skipped_out_of_geo = 0
     skipped_expired = 0
@@ -346,10 +349,16 @@ def run():
             existing_id = find_existing_by_lead_key(lead_key)
             if existing_id:
                 update_lead(existing_id, props)
-                updated += 1
+                if NOTION_WRITE_ENABLED:
+                    updated += 1
+                else:
+                    would_update += 1
             else:
                 create_lead(props)
-                created += 1
+                if NOTION_WRITE_ENABLED:
+                    created += 1
+                else:
+                    would_create += 1
 
             filtered_in += 1
 
@@ -361,7 +370,7 @@ def run():
     print(
         "TNForeclosureNoticeBot summary: "
         f"fetched_notices={fetched_notices} parsed_ok={parsed_ok} filtered_in={filtered_in} "
-        f"created={created} updated={updated} "
+        f"created={created} updated={updated} would_create={would_create} would_update={would_update} "
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} "
         f"skipped_outside_window={skipped_outside_window} skipped_dup_in_run={skipped_dup_in_run} "
         f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other} "
