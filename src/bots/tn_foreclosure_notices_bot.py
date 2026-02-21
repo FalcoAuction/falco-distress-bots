@@ -13,6 +13,7 @@ from ..notion_client import (
     find_existing_by_lead_key,
     NOTION_WRITE_ENABLED,
 )
+from ..gating.convertibility import apply_convertibility_gate
 from ..scoring import days_to_sale
 from ..settings import (
     get_dts_window,
@@ -344,6 +345,7 @@ def run():
                 "score": score,
             }
 
+            payload = apply_convertibility_gate(payload)
             props = build_properties(payload)
 
             existing_id = find_existing_by_lead_key(lead_key)

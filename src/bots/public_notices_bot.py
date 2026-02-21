@@ -13,6 +13,7 @@ from ..notion_client import (
     find_existing_by_lead_key,
     NOTION_WRITE_ENABLED,
 )
+from ..gating.convertibility import apply_convertibility_gate
 from ..scoring import days_to_sale
 from ..settings import (
     get_dts_window,
@@ -443,7 +444,7 @@ def run():
 
         snippet = _build_snippet(sale_date_iso, county, trustee, address, body_text)
 
-        props = build_properties({
+        payload = {
             "title": address or "Foreclosure Notice",
             "source": "PublicNotices",
             "county": county,
@@ -456,7 +457,9 @@ def run():
             "url": url,
             "lead_key": lead_key,
             "days_to_sale": dts,
-        })
+        }
+        payload = apply_convertibility_gate(payload)
+        props = build_properties(payload)
 
         existing = find_existing_by_lead_key(lead_key)
         if existing:

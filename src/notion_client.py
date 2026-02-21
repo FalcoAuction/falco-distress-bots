@@ -386,6 +386,7 @@ def build_properties(*args, **kwargs) -> Dict[str, Any]:
         "URL": _url_prop(data.get("url")),
         "Lead Key": _rich_text_prop(data.get("lead_key")),
         "Days to Sale": _number_prop(data.get("days_to_sale")),
+        "Status Flag": _select_prop(data.get("status_flag")),
     }
 
     return props
