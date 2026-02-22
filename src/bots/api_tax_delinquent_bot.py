@@ -2,6 +2,7 @@ import json
 import os
 
 from src.gating.convertibility import apply_convertibility_gate
+from ..utils import make_lead_key
 
 
 def _normalize_gate_decision(decision, payload):
@@ -43,6 +44,9 @@ def run():
     gated_kept = 0
     gated_skipped_institutional = 0
     gated_skipped_other = 0
+    dedupe_kept = 0
+    dedupe_skipped_in_run = 0
+    seen_in_run = set()
 
     for line in raw_lines:
         row = json.loads(line)
@@ -68,8 +72,20 @@ def run():
             gated_kept += 1
         elif reason == "INSTITUTIONAL":
             gated_skipped_institutional += 1
+            continue
         else:
             gated_skipped_other += 1
+            continue
+
+        lead_key = make_lead_key("API_TAX", payload["address"], payload["county"])
+        payload["lead_key"] = lead_key
+
+        if lead_key in seen_in_run:
+            dedupe_skipped_in_run += 1
+            continue
+
+        seen_in_run.add(lead_key)
+        dedupe_kept += 1
 
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
     print(
@@ -77,6 +93,7 @@ def run():
         f"Institutional skipped: {gated_skipped_institutional} | "
         f"Other skipped: {gated_skipped_other}"
     )
+    print(f"[API_TaxDelinquentBot] Dedupe kept: {dedupe_kept} | Skipped in-run: {dedupe_skipped_in_run}")
 
     return {
         "seed_rows": seed_rows,
@@ -85,4 +102,6 @@ def run():
         "gated_kept": gated_kept,
         "gated_skipped_institutional": gated_skipped_institutional,
         "gated_skipped_other": gated_skipped_other,
+        "dedupe_kept": dedupe_kept,
+        "dedupe_skipped_in_run": dedupe_skipped_in_run,
     }
