@@ -1,6 +1,25 @@
 import json
 import os
 
+from src.gating.convertibility import apply_convertibility_gate
+
+
+def _normalize_gate_decision(decision, payload):
+    """Normalize gate return to (keep: bool, reason: str | None)."""
+    if isinstance(decision, bool):
+        return decision, None
+    if isinstance(decision, tuple):
+        keep = decision[0]
+        reason = decision[1] if len(decision) > 1 else None
+        return keep, reason
+    if isinstance(decision, dict):
+        if "keep" in decision:
+            return decision["keep"], decision.get("reason")
+        # Gate returned the mutated payload — infer from status_flag
+        flag = decision.get("status_flag")
+        return flag != "INSTITUTIONAL", flag
+    return True, None
+
 
 def run():
     seed_file = os.environ.get("FALCO_TAX_API_SEED_FILE")
@@ -19,15 +38,20 @@ def run():
     seed_rows = len(raw_lines)
     print(f"[API_TaxDelinquentBot] Loaded {seed_rows} seed rows.")
 
-    valid = []
     invalid_rows = 0
+    valid_rows = 0
+    gated_kept = 0
+    gated_skipped_institutional = 0
+    gated_skipped_other = 0
 
     for line in raw_lines:
         row = json.loads(line)
         if not row.get("address") or not row.get("county"):
             invalid_rows += 1
             continue
-        valid.append({
+
+        valid_rows += 1
+        payload = {
             "address": row["address"],
             "county": row["county"],
             "state": row.get("state"),
@@ -35,13 +59,30 @@ def run():
             "source": "API_TAX",
             "external_id": row.get("external_id"),
             "raw": row,
-        })
+        }
 
-    valid_rows = len(valid)
+        decision = apply_convertibility_gate(payload)
+        keep, reason = _normalize_gate_decision(decision, payload)
+
+        if keep:
+            gated_kept += 1
+        elif reason == "INSTITUTIONAL":
+            gated_skipped_institutional += 1
+        else:
+            gated_skipped_other += 1
+
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
+    print(
+        f"[API_TaxDelinquentBot] Gate kept: {gated_kept} | "
+        f"Institutional skipped: {gated_skipped_institutional} | "
+        f"Other skipped: {gated_skipped_other}"
+    )
 
     return {
         "seed_rows": seed_rows,
         "valid_rows": valid_rows,
         "invalid_rows": invalid_rows,
+        "gated_kept": gated_kept,
+        "gated_skipped_institutional": gated_skipped_institutional,
+        "gated_skipped_other": gated_skipped_other,
     }
