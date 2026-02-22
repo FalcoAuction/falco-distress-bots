@@ -3,6 +3,13 @@ import os
 
 from src.gating.convertibility import apply_convertibility_gate
 from ..utils import make_lead_key
+from ..notion_client import (
+    build_properties,
+    create_lead,
+    update_lead,
+    find_existing_by_lead_key,
+    NOTION_WRITE_ENABLED,
+)
 
 
 def _normalize_gate_decision(decision, payload):
@@ -47,6 +54,10 @@ def run():
     dedupe_kept = 0
     dedupe_skipped_in_run = 0
     seen_in_run = set()
+    created = 0
+    updated = 0
+    would_create = 0
+    would_update = 0
 
     for line in raw_lines:
         row = json.loads(line)
@@ -87,6 +98,21 @@ def run():
         seen_in_run.add(lead_key)
         dedupe_kept += 1
 
+        props = build_properties(payload)
+        existing = find_existing_by_lead_key(payload["lead_key"])
+        if existing:
+            update_lead(existing, props)
+            if NOTION_WRITE_ENABLED:
+                updated += 1
+            else:
+                would_update += 1
+        else:
+            create_lead(props)
+            if NOTION_WRITE_ENABLED:
+                created += 1
+            else:
+                would_create += 1
+
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
     print(
         f"[API_TaxDelinquentBot] Gate kept: {gated_kept} | "
@@ -94,6 +120,10 @@ def run():
         f"Other skipped: {gated_skipped_other}"
     )
     print(f"[API_TaxDelinquentBot] Dedupe kept: {dedupe_kept} | Skipped in-run: {dedupe_skipped_in_run}")
+    print(
+        f"[API_TaxDelinquentBot] created={created} updated={updated} "
+        f"would_create={would_create} would_update={would_update}"
+    )
 
     return {
         "seed_rows": seed_rows,
@@ -104,4 +134,8 @@ def run():
         "gated_skipped_other": gated_skipped_other,
         "dedupe_kept": dedupe_kept,
         "dedupe_skipped_in_run": dedupe_skipped_in_run,
+        "created": created,
+        "updated": updated,
+        "would_create": would_create,
+        "would_update": would_update,
     }
