@@ -7,6 +7,7 @@ from .bots import public_notices_bot
 from .bots import tax_pages_bot
 from .bots import tn_foreclosure_notices_bot
 from .bots import propstream_bot
+from .bots import api_tax_delinquent_bot
 
 
 def run_bot(name: str, fn):
@@ -33,6 +34,7 @@ def main():
     run_bot("PublicNoticesBot", public_notices_bot.run)
     run_bot("TaxPagesBot", tax_pages_bot.run)
     run_bot("PropStreamBot", propstream_bot.run)
+    run_bot("API_TaxDelinquentBot", api_tax_delinquent_bot.run)
 
     # ---------------- Stage 2: Enrichment + Comps ----------------
     def _run_attom_enrichment():
