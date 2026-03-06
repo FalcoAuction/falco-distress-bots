@@ -3,6 +3,8 @@ import os
 
 from src.gating.convertibility import apply_convertibility_gate
 from ..utils import make_lead_key
+from ..storage import sqlite_store as _store
+from ..settings import normalize_county_full, is_allowed_county, within_target_counties
 from ..notion_client import (
     build_properties,
     create_lead,
@@ -50,6 +52,7 @@ def run():
     valid_rows = 0
     gated_kept = 0
     gated_skipped_institutional = 0
+    gated_skipped_out_of_geo = 0
     gated_skipped_other = 0
     dedupe_kept = 0
     dedupe_skipped_in_run = 0
@@ -58,6 +61,8 @@ def run():
     updated = 0
     would_create = 0
     would_update = 0
+    stored_leads = 0
+    stored_ingests = 0
 
     for line in raw_lines:
         row = json.loads(line)
@@ -66,9 +71,18 @@ def run():
             continue
 
         valid_rows += 1
+
+        county_full = normalize_county_full(row["county"])
+        if not is_allowed_county(county_full):
+            gated_skipped_out_of_geo += 1
+            continue
+        if not within_target_counties(county_full):
+            gated_skipped_out_of_geo += 1
+            continue
+
         payload = {
             "address": row["address"],
-            "county": row["county"],
+            "county": county_full,
             "state": row.get("state"),
             "distress_type": "TAX_DELINQUENT",
             "source": "API_TAX",
@@ -98,6 +112,11 @@ def run():
         seen_in_run.add(lead_key)
         dedupe_kept += 1
 
+        if _store.upsert_lead(lead_key, payload, payload["county"]):
+            stored_leads += 1
+        if _store.insert_ingest_event(lead_key, "API_TAX", None, None, json.dumps(row)):
+            stored_ingests += 1
+
         props = build_properties(payload)
         existing = find_existing_by_lead_key(payload["lead_key"])
         if existing:
@@ -116,13 +135,15 @@ def run():
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
     print(
         f"[API_TaxDelinquentBot] Gate kept: {gated_kept} | "
+        f"Out-of-geo skipped: {gated_skipped_out_of_geo} | "
         f"Institutional skipped: {gated_skipped_institutional} | "
         f"Other skipped: {gated_skipped_other}"
     )
     print(f"[API_TaxDelinquentBot] Dedupe kept: {dedupe_kept} | Skipped in-run: {dedupe_skipped_in_run}")
     print(
         f"[API_TaxDelinquentBot] created={created} updated={updated} "
-        f"would_create={would_create} would_update={would_update}"
+        f"would_create={would_create} would_update={would_update} "
+        f"stored_leads={stored_leads} stored_ingests={stored_ingests}"
     )
 
     return {
@@ -131,6 +152,7 @@ def run():
         "invalid_rows": invalid_rows,
         "gated_kept": gated_kept,
         "gated_skipped_institutional": gated_skipped_institutional,
+        "gated_skipped_out_of_geo": gated_skipped_out_of_geo,
         "gated_skipped_other": gated_skipped_other,
         "dedupe_kept": dedupe_kept,
         "dedupe_skipped_in_run": dedupe_skipped_in_run,
@@ -138,4 +160,6 @@ def run():
         "updated": updated,
         "would_create": would_create,
         "would_update": would_update,
+        "stored_leads": stored_leads,
+        "stored_ingests": stored_ingests,
     }

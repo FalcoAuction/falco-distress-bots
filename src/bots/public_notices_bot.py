@@ -14,10 +14,12 @@ from ..notion_client import (
     NOTION_WRITE_ENABLED,
 )
 from ..gating.convertibility import apply_convertibility_gate
-from ..scoring import days_to_sale
+from ..storage import sqlite_store as _store
+from ..scoring.days_to_sale import days_to_sale
 from ..settings import (
     get_dts_window,
     is_allowed_county,
+    within_target_counties,
     normalize_county_full,
     clip_raw_snippet,
     get_allowed_counties_base,
@@ -34,6 +36,9 @@ SEEDS = [
     "https://www.foreclosurestn.com/",
     "https://www.tnpublicnotice.com/Search.aspx",
 ]
+_extra = os.getenv("FALCO_PUBLIC_EXTRA_SEEDS", "").strip()
+if _extra:
+    SEEDS.extend([s.strip() for s in _extra.split(",") if s.strip()])
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
 
@@ -289,6 +294,15 @@ def _build_snippet(sale_date_iso: str, county: str, trustee: str | None, address
     return clip_raw_snippet(snippet, max_chars=int(MAX_SNIPPET_LEN))
 
 
+def _detect_upstream_lane(text: str) -> str | None:
+    low = (text or "").lower()
+    if "lis pendens" in low:
+        return "LIS_PENDENS"
+    if "substitution of trustee" in low or "substitute trustee's" in low or "substitute trustee" in low:
+        return "SUBSTITUTION_OF_TRUSTEE"
+    return None
+
+
 def _is_tnlegalpub(url: str) -> bool:
     return "tnlegalpub.com" in (url or "")
 
@@ -356,6 +370,10 @@ def run():
     skipped_county_missing = 0
     skipped_dup_in_run = 0
     skipped_http = 0
+    stored_leads = 0
+    stored_ingests = 0
+    upstream_lp_count = 0
+    upstream_sot_count = 0
 
     sample_kept: list[str] = []
     sample_county_missing: list[str] = []
@@ -435,19 +453,38 @@ def run():
             else:
                 print(f"[PublicNoticesBot][DEBUG] trustee_missing url={url} ctx=[no trustee tokens found]")
 
-        lead_key = make_lead_key("PUBLIC_NOTICES", url, county, sale_date_iso, address or "")
+        county_full = normalize_county_full(county)
+        if not county_full:
+            skipped_out_of_geo += 1
+            continue
+        if (not is_allowed_county(county_full)) or (not within_target_counties(county_full)):
+            skipped_out_of_geo += 1
+            continue
+
+        lead_key = make_lead_key("PUBLIC_NOTICES", url, county_full, sale_date_iso, address or "")
 
         if lead_key in seen_in_run:
             skipped_dup_in_run += 1
             continue
         seen_in_run.add(lead_key)
 
-        snippet = _build_snippet(sale_date_iso, county, trustee, address, body_text)
+        lane = _detect_upstream_lane(combined)
+        if lane == "LIS_PENDENS":
+            upstream_lp_count += 1
+        elif lane == "SUBSTITUTION_OF_TRUSTEE":
+            upstream_sot_count += 1
+
+        if _store.upsert_lead(lead_key, {"address": address or "", "state": "TN"}, county_full, distress_type="FORECLOSURE"):
+            stored_leads += 1
+        if _store.insert_ingest_event(lead_key, lane or "PublicNotices", url, sale_date_iso, None):
+            stored_ingests += 1
+
+        snippet = _build_snippet(sale_date_iso, county_full, trustee, address, body_text)
 
         payload = {
             "title": address or "Foreclosure Notice",
             "source": "PublicNotices",
-            "county": county,
+            "county": county_full,
             "distress_type": "Foreclosure",
             "address": address or "",
             "sale_date_iso": sale_date_iso,
@@ -494,6 +531,8 @@ def run():
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_outside_window={skipped_outside_window} "
         f"skipped_county_missing={skipped_county_missing} skipped_dup_in_run={skipped_dup_in_run} "
         f"skipped_http={skipped_http} "
+        f"stored_leads={stored_leads} stored_ingests={stored_ingests} "
+        f"upstream_lp_count={upstream_lp_count} upstream_sot_count={upstream_sot_count} "
         f"sample_kept={sample_kept} sample_county_missing={sample_county_missing} "
         f"sample_skipped_reason={sample_skipped_reason}"
     )

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import requests
 
@@ -153,6 +153,24 @@ class AttomClient:
 
     def valuation_home_equity(self, *, address1: str, address2: str) -> Dict[str, Any]:
         return self._request("/valuation/homeequity", self._params(address1=address1, address2=address2))
+
+    def try_avm_detail(self, *, address1: str, address2: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Safe wrapper: returns (payload, None) on success or (None, error_message) on exception."""
+        try:
+            return self.avm_detail(address1=address1, address2=address2), None
+        except AttomError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    def try_property_detail(self, *, address1: str, address2: str) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+        """Safe wrapper: returns (payload, None) on success or (None, error_message) on exception."""
+        try:
+            return self.property_detail(address1=address1, address2=address2), None
+        except AttomError as e:
+            return None, str(e)
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
 
     def sales_comparables(
         self,

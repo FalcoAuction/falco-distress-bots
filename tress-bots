@@ -1,0 +1,428 @@
+[1mdiff --git a/src/enrichment/streetview.py b/src/enrichment/streetview.py[m
+[1mindex 178e30a..f237f3e 100644[m
+[1m--- a/src/enrichment/streetview.py[m
+[1m+++ b/src/enrichment/streetview.py[m
+[36m@@ -141,6 +141,7 @@[m [mdef get_streetview_image_path(fields: dict, run_budget: dict) -> Optional[str]:[m
+         print(f"[SV] meta status={status} date={img_date} pano={pano_id}")[m
+ [m
+         if status != "OK":[m
+[32m+[m[32m            print(f"[SV] meta_json={json.dumps(meta_json, ensure_ascii=False)}")[m
+             return None[m
+ [m
+         # ── 8. Budget re-check before image fetch (race safety) ───────────────[m
+[1mdiff --git a/src/packaging/packager.py b/src/packaging/packager.py[m
+[1mindex 02245f0..8e77116 100644[m
+[1m--- a/src/packaging/packager.py[m
+[1m+++ b/src/packaging/packager.py[m
+[36m@@ -30,34 +30,7 @@[m [mdef _canonical_pdf_path(out_dir: str, lead_key: str) -> str:[m
+     return os.path.join(out_dir, f"{lead_key}.pdf")[m
+ [m
+ [m
+[31m-def run() -> Dict[str, int]:[m
+[31m-    # Windowing stays deterministic + shared with the rest of the system[m
+[31m-    dts_min, dts_max = get_dts_window("PACKAGER")[m
+[31m-    max_packets = int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))[m
+[31m-[m
+[31m-    run_id = get_current_run_id()[m
+[31m-    db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")[m
+[31m-[m
+[31m-    packaged = 0[m
+[31m-    skipped_missing = 0[m
+[31m-    skipped_already = 0[m
+[31m-    upload_failures = 0[m
+[31m-    skipped_upload_missing_creds = 0[m
+[31m-    skipped_institutional = 0[m
+[31m-[m
+[31m-    drive_enabled = have_drive_creds()[m
+[31m-[m
+[31m-    # Deterministic output layout[m
+[31m-    out_dir = os.path.join(os.getcwd(), "out", "packets", run_id)[m
+[31m-    os.makedirs(out_dir, exist_ok=True)[m
+[31m-[m
+[31m-    con = sqlite3.connect(db_path)[m
+[31m-    con.row_factory = sqlite3.Row[m
+[31m-    cur = con.cursor()[m
+[31m-[m
+[31m-    # Pull latest enrichment per lead_key (by enriched_at desc)[m
+[31m-    rows = cur.execute([m
+[31m-        """[m
+[32m+[m[32m_LEAD_COLS = """[m
+         WITH latest AS ([m
+           SELECT[m
+             lead_key,[m
+[36m@@ -88,16 +61,66 @@[m [mdef run() -> Dict[str, int]:[m
+           le.enriched_at,[m
+           le.attom_raw_json AS attom_raw_json[m
+         FROM leads l[m
+[31m-        JOIN latest le[m
+[32m+[m[32m        LEFT JOIN latest le[m
+           ON le.lead_key = l.lead_key AND le.rn = 1[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef run() -> Dict[str, int]:[m
+[32m+[m[32m    # ── Repack mode: if set, process exactly one lead_key end-to-end ──────────[m
+[32m+[m[32m    repack_key = os.getenv("FALCO_REPACK_LEAD_KEY", "").strip()[m
+[32m+[m[32m    is_repack  = bool(repack_key)[m
+[32m+[m
+[32m+[m[32m    # Windowing stays deterministic + shared with the rest of the system[m
+[32m+[m[32m    dts_min, dts_max = get_dts_window("PACKAGER")[m
+[32m+[m[32m    max_packets = 1 if is_repack else int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))[m
+[32m+[m
+[32m+[m[32m    run_id  = get_current_run_id()[m
+[32m+[m[32m    db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")[m
+[32m+[m
+[32m+[m[32m    packaged = 0[m
+[32m+[m[32m    skipped_missing = 0[m
+[32m+[m[32m    skipped_already = 0[m
+[32m+[m[32m    upload_failures = 0[m
+[32m+[m[32m    skipped_upload_missing_creds = 0[m
+[32m+[m[32m    skipped_institutional = 0[m
+[32m+[m
+[32m+[m[32m    drive_enabled = have_drive_creds()[m
+[32m+[m
+[32m+[m[32m    # Deterministic output layout[m
+[32m+[m[32m    out_dir = os.path.join(os.getcwd(), "out", "packets", run_id)[m
+[32m+[m[32m    os.makedirs(out_dir, exist_ok=True)[m
+[32m+[m
+[32m+[m[32m    con = sqlite3.connect(db_path)[m
+[32m+[m[32m    con.row_factory = sqlite3.Row[m
+[32m+[m[32m    cur = con.cursor()[m
+[32m+[m
+[32m+[m[32m    if is_repack:[m
+[32m+[m[32m        print(f"[REPACK] Mode active — targeting lead_key={repack_key!r} (run_id={run_id})")[m
+[32m+[m[32m        rows = cur.execute([m
+[32m+[m[32m            _LEAD_COLS + "WHERE l.lead_key = ?",[m
+[32m+[m[32m            (repack_key,),[m
+[32m+[m[32m        ).fetchall()[m
+[32m+[m[32m        if not rows:[m
+[32m+[m[32m            print(f"[REPACK] lead_key={repack_key!r} not found in database — aborting")[m
+[32m+[m[32m            con.close()[m
+[32m+[m[32m            return {[m
+[32m+[m[32m                "packaged_count": 0,[m
+[32m+[m[32m                "repack_lead_key": repack_key,[m
+[32m+[m[32m                "repack_status": "not_found",[m
+[32m+[m[32m            }[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        # Pull latest enrichment per lead_key (by enriched_at desc)[m
+[32m+[m[32m        rows = cur.execute([m
+[32m+[m[32m            _LEAD_COLS + """[m
+         WHERE l.dts_days IS NOT NULL[m
+           AND l.dts_days >= ?[m
+           AND l.dts_days <= ?[m
+         ORDER BY l.dts_days ASC, le.avm_value DESC, l.lead_key ASC[m
+         LIMIT ?[m
+[31m-        """,[m
+[31m-        (dts_min, dts_max, max_packets * 5),  # overfetch to allow skips[m
+[31m-    ).fetchall()[m
+[32m+[m[32m            """,[m
+[32m+[m[32m            (dts_min, dts_max, max_packets * 5),  # overfetch to allow skips[m
+[32m+[m[32m        ).fetchall()[m
+ [m
+     for r in rows:[m
+         if packaged >= max_packets:[m
+[36m@@ -186,17 +209,21 @@[m [mdef run() -> Dict[str, int]:[m
+             skipped_institutional += 1[m
+             continue[m
+ [m
+[31m-        # already packaged for THIS run_id — skip only if path is already canonical[m
+[31m-        existing = cur.execute([m
+[31m-            "SELECT pdf_path FROM packets WHERE run_id=? AND lead_key=? LIMIT 1",[m
+[31m-            (run_id, lead_key),[m
+[31m-        ).fetchone()[m
+[31m-        if existing:[m
+[31m-            existing_path = existing["pdf_path"] or ""[m
+[31m-            if "falco_packet_" not in existing_path:[m
+[31m-                skipped_already += 1[m
+[31m-                continue[m
+[31m-            # legacy path — fall through to rebuild and update[m
+[32m+[m[32m        if is_repack:[m
+[32m+[m[32m            # Force-rebuild: bypass the "already packaged this run" guard[m
+[32m+[m[32m            print(f"[REPACK] Building packet for lead_key={lead_key!r}")[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            # already packaged for THIS run_id — skip only if path is already canonical[m
+[32m+[m[32m            existing = cur.execute([m
+[32m+[m[32m                "SELECT pdf_path FROM packets WHERE run_id=? AND lead_key=? LIMIT 1",[m
+[32m+[m[32m                (run_id, lead_key),[m
+[32m+[m[32m            ).fetchone()[m
+[32m+[m[32m            if existing:[m
+[32m+[m[32m                existing_path = existing["pdf_path"] or ""[m
+[32m+[m[32m                if "falco_packet_" not in existing_path:[m
+[32m+[m[32m                    skipped_already += 1[m
+[32m+[m[32m                    continue[m
+[32m+[m[32m                # legacy path — fall through to rebuild and update[m
+ [m
+         # required inputs[m
+         if not fields.get("address") or fields.get("avm_low") is None or fields.get("avm_high") is None:[m
+[36m@@ -235,11 +262,13 @@[m [mdef run() -> Dict[str, int]:[m
+         else:[m
+             skipped_upload_missing_creds += 1[m
+ [m
+[32m+[m[32m        if is_repack:[m
+[32m+[m[32m            print(f"[REPACK] Packet written: {local_path}")[m
+         packaged += 1[m
+ [m
+     con.close()[m
+ [m
+[31m-    summary = {[m
+[32m+[m[32m    summary: Dict[str, Any] = {[m
+         "packaged_count": packaged,[m
+         "skipped_packaging_missing_fields": skipped_missing,[m
+         "skipped_packaging_already_done": skipped_already,[m
+[36m@@ -248,5 +277,8 @@[m [mdef run() -> Dict[str, int]:[m
+     }[m
+     if not drive_enabled:[m
+         summary["skipped_upload_missing_creds"] = skipped_upload_missing_creds[m
+[32m+[m[32m    if is_repack:[m
+[32m+[m[32m        summary["repack_lead_key"] = repack_key[m
+[32m+[m[32m        summary["repack_status"]   = "ok" if packaged else "failed"[m
+ [m
+     return summary[m
+[1mdiff --git a/src/packaging/pdf_builder.py b/src/packaging/pdf_builder.py[m
+[1mindex 92ca66d..256c598 100644[m
+[1m--- a/src/packaging/pdf_builder.py[m
+[1m+++ b/src/packaging/pdf_builder.py[m
+[36m@@ -360,13 +360,12 @@[m [mdef _draw_hero([m
+             c.setFont("Helvetica", 9)[m
+             c.setFillColor(_GRAY)[m
+             c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")[m
+[31m-        # Two-line caption: source label + imagery date[m
+[31m-        date_str = imagery_date if imagery_date else "Unavailable"[m
+[32m+[m[32m        # Two-line caption: source label + imagery date (institutional; no claims)[m
+[32m+[m[32m        date_str = (imagery_date or "").strip() or "Unavailable"[m
+         c.setFont("Helvetica", 7)[m
+         c.setFillColor(_GRAY)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 10, "Exterior image — Google Street View")[m
+[31m-        c.setFont("Helvetica", 7)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 20, f"Imagery date: {date_str}")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 9, "Exterior image — Google Street View")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 18, f"Imagery date: {date_str}")[m
+     else:[m
+         c.setFillColor(_LGRAY)[m
+         c.setStrokeColor(_LINE)[m
+[36m@@ -376,9 +375,9 @@[m [mdef _draw_hero([m
+         c.setFillColor(_GRAY)[m
+         c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")[m
+         c.setFont("Helvetica", 7)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 10, "No street-level image available")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 9, "No street-level image available")[m
+ [m
+[31m-    doc.y = by - 32[m
+[32m+[m[32m    doc.y = by - 28[m
+ [m
+ [m
+ # ─── Narrative intelligence (rule-based, page 1) ──────────────────────────────[m
+[1mdiff --git a/src/enrichment/streetview.py b/src/enrichment/streetview.py[m
+[1mindex 178e30a..f237f3e 100644[m
+[1m--- a/src/enrichment/streetview.py[m
+[1m+++ b/src/enrichment/streetview.py[m
+[36m@@ -141,6 +141,7 @@[m [mdef get_streetview_image_path(fields: dict, run_budget: dict) -> Optional[str]:[m
+         print(f"[SV] meta status={status} date={img_date} pano={pano_id}")[m
+ [m
+         if status != "OK":[m
+[32m+[m[32m            print(f"[SV] meta_json={json.dumps(meta_json, ensure_ascii=False)}")[m
+             return None[m
+ [m
+         # ── 8. Budget re-check before image fetch (race safety) ───────────────[m
+[1mdiff --git a/src/packaging/packager.py b/src/packaging/packager.py[m
+[1mindex 02245f0..8e77116 100644[m
+[1m--- a/src/packaging/packager.py[m
+[1m+++ b/src/packaging/packager.py[m
+[36m@@ -30,34 +30,7 @@[m [mdef _canonical_pdf_path(out_dir: str, lead_key: str) -> str:[m
+     return os.path.join(out_dir, f"{lead_key}.pdf")[m
+ [m
+ [m
+[31m-def run() -> Dict[str, int]:[m
+[31m-    # Windowing stays deterministic + shared with the rest of the system[m
+[31m-    dts_min, dts_max = get_dts_window("PACKAGER")[m
+[31m-    max_packets = int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))[m
+[31m-[m
+[31m-    run_id = get_current_run_id()[m
+[31m-    db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")[m
+[31m-[m
+[31m-    packaged = 0[m
+[31m-    skipped_missing = 0[m
+[31m-    skipped_already = 0[m
+[31m-    upload_failures = 0[m
+[31m-    skipped_upload_missing_creds = 0[m
+[31m-    skipped_institutional = 0[m
+[31m-[m
+[31m-    drive_enabled = have_drive_creds()[m
+[31m-[m
+[31m-    # Deterministic output layout[m
+[31m-    out_dir = os.path.join(os.getcwd(), "out", "packets", run_id)[m
+[31m-    os.makedirs(out_dir, exist_ok=True)[m
+[31m-[m
+[31m-    con = sqlite3.connect(db_path)[m
+[31m-    con.row_factory = sqlite3.Row[m
+[31m-    cur = con.cursor()[m
+[31m-[m
+[31m-    # Pull latest enrichment per lead_key (by enriched_at desc)[m
+[31m-    rows = cur.execute([m
+[31m-        """[m
+[32m+[m[32m_LEAD_COLS = """[m
+         WITH latest AS ([m
+           SELECT[m
+             lead_key,[m
+[36m@@ -88,16 +61,66 @@[m [mdef run() -> Dict[str, int]:[m
+           le.enriched_at,[m
+           le.attom_raw_json AS attom_raw_json[m
+         FROM leads l[m
+[31m-        JOIN latest le[m
+[32m+[m[32m        LEFT JOIN latest le[m
+           ON le.lead_key = l.lead_key AND le.rn = 1[m
+[32m+[m[32m"""[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef run() -> Dict[str, int]:[m
+[32m+[m[32m    # ── Repack mode: if set, process exactly one lead_key end-to-end ──────────[m
+[32m+[m[32m    repack_key = os.getenv("FALCO_REPACK_LEAD_KEY", "").strip()[m
+[32m+[m[32m    is_repack  = bool(repack_key)[m
+[32m+[m
+[32m+[m[32m    # Windowing stays deterministic + shared with the rest of the system[m
+[32m+[m[32m    dts_min, dts_max = get_dts_window("PACKAGER")[m
+[32m+[m[32m    max_packets = 1 if is_repack else int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))[m
+[32m+[m
+[32m+[m[32m    run_id  = get_current_run_id()[m
+[32m+[m[32m    db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")[m
+[32m+[m
+[32m+[m[32m    packaged = 0[m
+[32m+[m[32m    skipped_missing = 0[m
+[32m+[m[32m    skipped_already = 0[m
+[32m+[m[32m    upload_failures = 0[m
+[32m+[m[32m    skipped_upload_missing_creds = 0[m
+[32m+[m[32m    skipped_institutional = 0[m
+[32m+[m
+[32m+[m[32m    drive_enabled = have_drive_creds()[m
+[32m+[m
+[32m+[m[32m    # Deterministic output layout[m
+[32m+[m[32m    out_dir = os.path.join(os.getcwd(), "out", "packets", run_id)[m
+[32m+[m[32m    os.makedirs(out_dir, exist_ok=True)[m
+[32m+[m
+[32m+[m[32m    con = sqlite3.connect(db_path)[m
+[32m+[m[32m    con.row_factory = sqlite3.Row[m
+[32m+[m[32m    cur = con.cursor()[m
+[32m+[m
+[32m+[m[32m    if is_repack:[m
+[32m+[m[32m        print(f"[REPACK] Mode active — targeting lead_key={repack_key!r} (run_id={run_id})")[m
+[32m+[m[32m        rows = cur.execute([m
+[32m+[m[32m            _LEAD_COLS + "WHERE l.lead_key = ?",[m
+[32m+[m[32m            (repack_key,),[m
+[32m+[m[32m        ).fetchall()[m
+[32m+[m[32m        if not rows:[m
+[32m+[m[32m            print(f"[REPACK] lead_key={repack_key!r} not found in database — aborting")[m
+[32m+[m[32m            con.close()[m
+[32m+[m[32m            return {[m
+[32m+[m[32m                "packaged_count": 0,[m
+[32m+[m[32m                "repack_lead_key": repack_key,[m
+[32m+[m[32m                "repack_status": "not_found",[m
+[32m+[m[32m            }[m
+[32m+[m[32m    else:[m
+[32m+[m[32m        # Pull latest enrichment per lead_key (by enriched_at desc)[m
+[32m+[m[32m        rows = cur.execute([m
+[32m+[m[32m            _LEAD_COLS + """[m
+         WHERE l.dts_days IS NOT NULL[m
+           AND l.dts_days >= ?[m
+           AND l.dts_days <= ?[m
+         ORDER BY l.dts_days ASC, le.avm_value DESC, l.lead_key ASC[m
+         LIMIT ?[m
+[31m-        """,[m
+[31m-        (dts_min, dts_max, max_packets * 5),  # overfetch to allow skips[m
+[31m-    ).fetchall()[m
+[32m+[m[32m            """,[m
+[32m+[m[32m            (dts_min, dts_max, max_packets * 5),  # overfetch to allow skips[m
+[32m+[m[32m        ).fetchall()[m
+ [m
+     for r in rows:[m
+         if packaged >= max_packets:[m
+[36m@@ -186,17 +209,21 @@[m [mdef run() -> Dict[str, int]:[m
+             skipped_institutional += 1[m
+             continue[m
+ [m
+[31m-        # already packaged for THIS run_id — skip only if path is already canonical[m
+[31m-        existing = cur.execute([m
+[31m-            "SELECT pdf_path FROM packets WHERE run_id=? AND lead_key=? LIMIT 1",[m
+[31m-            (run_id, lead_key),[m
+[31m-        ).fetchone()[m
+[31m-        if existing:[m
+[31m-            existing_path = existing["pdf_path"] or ""[m
+[31m-            if "falco_packet_" not in existing_path:[m
+[31m-                skipped_already += 1[m
+[31m-                continue[m
+[31m-            # legacy path — fall through to rebuild and update[m
+[32m+[m[32m        if is_repack:[m
+[32m+[m[32m            # Force-rebuild: bypass the "already packaged this run" guard[m
+[32m+[m[32m            print(f"[REPACK] Building packet for lead_key={lead_key!r}")[m
+[32m+[m[32m        else:[m
+[32m+[m[32m            # already packaged for THIS run_id — skip only if path is already canonical[m
+[32m+[m[32m            existing = cur.execute([m
+[32m+[m[32m                "SELECT pdf_path FROM packets WHERE run_id=? AND lead_key=? LIMIT 1",[m
+[32m+[m[32m                (run_id, lead_key),[m
+[32m+[m[32m            ).fetchone()[m
+[32m+[m[32m            if existing:[m
+[32m+[m[32m                existing_path = existing["pdf_path"] or ""[m
+[32m+[m[32m                if "falco_packet_" not in existing_path:[m
+[32m+[m[32m                    skipped_already += 1[m
+[32m+[m[32m                    continue[m
+[32m+[m[32m                # legacy path — fall through to rebuild and update[m
+ [m
+         # required inputs[m
+         if not fields.get("address") or fields.get("avm_low") is None or fields.get("avm_high") is None:[m
+[36m@@ -235,11 +262,13 @@[m [mdef run() -> Dict[str, int]:[m
+         else:[m
+             skipped_upload_missing_creds += 1[m
+ [m
+[32m+[m[32m        if is_repack:[m
+[32m+[m[32m            print(f"[REPACK] Packet written: {local_path}")[m
+         packaged += 1[m
+ [m
+     con.close()[m
+ [m
+[31m-    summary = {[m
+[32m+[m[32m    summary: Dict[str, Any] = {[m
+         "packaged_count": packaged,[m
+         "skipped_packaging_missing_fields": skipped_missing,[m
+         "skipped_packaging_already_done": skipped_already,[m
+[36m@@ -248,5 +277,8 @@[m [mdef run() -> Dict[str, int]:[m
+     }[m
+     if not drive_enabled:[m
+         summary["skipped_upload_missing_creds"] = skipped_upload_missing_creds[m
+[32m+[m[32m    if is_repack:[m
+[32m+[m[32m        summary["repack_lead_key"] = repack_key[m
+[32m+[m[32m        summary["repack_status"]   = "ok" if packaged else "failed"[m
+ [m
+     return summary[m
+[1mdiff --git a/src/packaging/pdf_builder.py b/src/packaging/pdf_builder.py[m
+[1mindex 92ca66d..256c598 100644[m
+[1m--- a/src/packaging/pdf_builder.py[m
+[1m+++ b/src/packaging/pdf_builder.py[m
+[36m@@ -360,13 +360,12 @@[m [mdef _draw_hero([m
+             c.setFont("Helvetica", 9)[m
+             c.setFillColor(_GRAY)[m
+             c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")[m
+[31m-        # Two-line caption: source label + imagery date[m
+[31m-        date_str = imagery_date if imagery_date else "Unavailable"[m
+[32m+[m[32m        # Two-line caption: source label + imagery date (institutional; no claims)[m
+[32m+[m[32m        date_str = (imagery_date or "").strip() or "Unavailable"[m
+         c.setFont("Helvetica", 7)[m
+         c.setFillColor(_GRAY)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 10, "Exterior image — Google Street View")[m
+[31m-        c.setFont("Helvetica", 7)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 20, f"Imagery date: {date_str}")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 9, "Exterior image — Google Street View")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 18, f"Imagery date: {date_str}")[m
+     else:[m
+         c.setFillColor(_LGRAY)[m
+         c.setStrokeColor(_LINE)[m
+[36m@@ -376,9 +375,9 @@[m [mdef _draw_hero([m
+         c.setFillColor(_GRAY)[m
+         c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")[m
+         c.setFont("Helvetica", 7)[m
+[31m-        c.drawCentredString(ML + CW / 2, by - 10, "No street-level image available")[m
+[32m+[m[32m        c.drawCentredString(ML + CW / 2, by - 9, "No street-level image available")[m
+ [m
+[31m-    doc.y = by - 32[m
+[32m+[m[32m    doc.y = by - 28[m
+ [m
+ [m
+ # ─── Narrative intelligence (rule-based, page 1) ──────────────────────────────[m

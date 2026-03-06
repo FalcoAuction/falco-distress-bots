@@ -7,7 +7,12 @@ from ..utils import (
     make_lead_key
 )
 from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
-from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
+from ..storage import sqlite_store as _store
+from ..scoring.days_to_sale import days_to_sale
+from ..scoring.detect_risk_flags import detect_risk_flags
+from ..scoring.triage import triage
+from ..scoring.score_v2 import score_v2
+from ..scoring.label import label
 
 
 def run():
@@ -45,6 +50,9 @@ def run():
 
         title = f"{distress_type} ({status}) ({county or 'TN'})"
         lead_key = make_lead_key(distress_type, county, sale_date, address, trustee, url)
+
+        _store.upsert_lead(lead_key, {"address": address or "", "state": "TN"}, county or "")
+        _store.insert_ingest_event(lead_key, "TaxPages", url, sale_date, None)
 
         props = build_properties(
             title=title,

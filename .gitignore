@@ -23,3 +23,35 @@ Thumbs.db
 # Claude Code cache
 .claude/
 
+falco-site/
+
+# --- local artifacts / scratch ---
+_debug_archive/
+*.bundle
+*.zip
+
+# local DB + run traces
+data/falco.db
+data/*.txt
+
+# local scratch exports
+REPO_TREE.txt
+SRC_PY_FILES.txt
+SRC_TREE.txt
+SYSTEM_TREE.txt
+TRANSFER_*.py
+TRANSFER_*.txt
+TRANSFER_PACKAGE.txt
+
+# temp scripts
+temp_*.py
+tmp_*.py
+
+# UW local artifacts
+_uw_*.txt
+_uw_sample.json
+
+# misc scratch
+patch_*.diff
+migrations/
+scripts/db_diagnostic.py

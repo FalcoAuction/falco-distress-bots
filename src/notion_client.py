@@ -3,7 +3,6 @@ import json as _json
 import time
 import re
 import datetime as _dt
-import requests
 from typing import Any, Dict, Optional, Tuple, List
 
 NOTION_API_KEY = os.getenv("NOTION_API_KEY", "")
@@ -99,6 +98,7 @@ def _request(method: str, path: str, json: Optional[dict] = None, *, timeout: in
     if not _have_creds():
         _warn_missing_creds_once()
         return {}
+    import requests  # lazy — only imported when an actual Notion API call is made
     url = NOTION_API_BASE + path
     r = requests.request(method, url, headers=_headers(), json=json, timeout=timeout)
     if r.status_code >= 300:

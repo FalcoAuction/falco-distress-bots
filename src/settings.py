@@ -32,7 +32,8 @@ def get_allowed_counties_base() -> set[str]:
       FALCO_ALLOWED_COUNTIES="Davidson,Williamson,..."
     Returns a set of base county names (no 'County' suffix).
     """
-    raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford,Wilson,Sumner")
+    # WAR-PLAN DEFAULTS (hard): only these counties unless explicitly overridden by env
+    raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford")
     vals: list[str] = []
     for part in raw.split(","):
         p = part.strip()
@@ -80,13 +81,14 @@ def within_target_counties(county_name: str | None, target_counties: list[str] |
     - New call style: within_target_counties(county, TARGET_COUNTIES)
 
     If target_counties is None, we fallback to src.config.TARGET_COUNTIES if present.
-    If still empty/None => allow.
+    If still empty/None => we default to the allowed counties (WAR-PLAN hard).
     """
     if target_counties is None:
         target_counties = _get_config_target_counties_fallback()
 
     if not target_counties:
-        return True
+        # Hard default: restrict to allowed counties even if bots didn't pass TARGET_COUNTIES
+        target_counties = get_allowed_counties_list()
 
     b = county_base(county_name)
     if not b:

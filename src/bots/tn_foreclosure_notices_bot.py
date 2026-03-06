@@ -14,7 +14,8 @@ from ..notion_client import (
     NOTION_WRITE_ENABLED,
 )
 from ..gating.convertibility import apply_convertibility_gate
-from ..scoring import days_to_sale
+from ..storage import sqlite_store as _store
+from ..scoring.days_to_sale import days_to_sale
 from ..settings import (
     get_dts_window,
     is_allowed_county,
@@ -248,6 +249,8 @@ def run():
     skipped_expired = 0
     skipped_outside_window = 0
     skipped_dup_in_run = 0
+    stored_leads = 0
+    stored_ingests = 0
 
     counties_hit = 0
     http_ok_pages = 0
@@ -328,6 +331,11 @@ def run():
                 continue
             seen_in_run.add(lead_key)
 
+            if _store.upsert_lead(lead_key, {"address": address, "state": "TN"}, county_full, distress_type="FORECLOSURE"):
+                stored_leads += 1
+            if _store.insert_ingest_event(lead_key, "TNForeclosureNotices", notice_url, lead["sale_date_iso"], None):
+                stored_ingests += 1
+
             payload = {
                 "title": address or f"Foreclosure ({county_full})",
                 "source": "TNForeclosureNotices",
@@ -376,6 +384,7 @@ def run():
         f"skipped_out_of_geo={skipped_out_of_geo} skipped_expired={skipped_expired} "
         f"skipped_outside_window={skipped_outside_window} skipped_dup_in_run={skipped_dup_in_run} "
         f"counties_hit={counties_hit} http_ok_pages={http_ok_pages} http_403={http_403} http_other={http_other} "
+        f"stored_leads={stored_leads} stored_ingests={stored_ingests} "
         f"sample_kept={sample_kept}"
     )
     print("=== DONE: TNForeclosureNoticesBot ===")

@@ -1,10 +1,10 @@
 # src/utils.py
 import hashlib
+import os
 import re
 from datetime import datetime
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
-import requests
 from bs4 import BeautifulSoup
 
 
@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 # ============================================================
 
 def fetch(url: str) -> str:
+    import requests  # lazy — only imported when an actual HTTP fetch is made
     headers = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
     r = requests.get(url, headers=headers, timeout=30)
     r.raise_for_status()
@@ -178,3 +179,10 @@ def make_lead_key(*parts: str) -> str:
     """
     base = "|".join(_norm_key_part(p) for p in parts if p is not None and str(p).strip() != "")
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+
+def get_current_run_id() -> str:
+    """
+    Returns current run_id from environment.
+    """
+    return os.getenv("FALCO_RUN_ID", "unknown_run")

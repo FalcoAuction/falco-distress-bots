@@ -1,96 +1,486 @@
+import json
 import os
-from typing import Dict, Any
+import sqlite3
+import hashlib
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional, Tuple
 
-from ..notion_client import query_database, extract_page_fields, build_extra_properties, update_lead
-from ..settings import get_dts_window
+from ..settings import get_dts_window, is_allowed_county, within_target_counties
 from .pdf_builder import build_pdf_packet
 from .drive_uploader import upload_pdf, have_drive_creds
-from ..gating.convertibility import is_institutional
+from ..gating.convertibility import is_institutional, apply_convertibility_gate
+from ..utils import get_current_run_id
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _sha256_file(path: str) -> Tuple[str, int]:
+    h = hashlib.sha256()
+    size = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            size += len(chunk)
+            h.update(chunk)
+    return h.hexdigest(), size
+
+
+def _canonical_pdf_path(out_dir: str, lead_key: str) -> str:
+    return os.path.join(out_dir, f"{lead_key}.pdf")
+
+
+def _hydrate_trustee_from_provenance(cur, lead_key: str) -> dict:
+    want = ("ft_trustee_firm", "ft_trustee_name_raw", "notice_trustee_firm", "notice_trustee_name_raw")
+    out = {}
+    for k in want:
+        row = cur.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (lead_key, k),
+        ).fetchone()
+        if row and row[0]:
+            out[k] = row[0]
+    return out
+
+
+def _fetch_internal_comps(
+    cur: sqlite3.Cursor,
+    subject_lead_key: str,
+    county: str,
+    subject_avm: float,
+    subject_zip: Optional[str] = None,
+    subject_city: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Return up to 6 leads ordered by AVM proximity to subject_avm.
+    Geo priority: same ZIP > same city > same county.
+    AVM band: ±25% first pass; widens to ±40% if first pass returns nothing.
+    Never raises; returns [] on any error or missing data.
+    """
+    _COMPS_SQL = """
+        WITH latest_ae AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            COALESCE(avm_value, avm_low) AS avm_anchor,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC) AS rn
+          FROM attom_enrichments
+          WHERE COALESCE(avm_value, avm_low) IS NOT NULL
+        ),
+        latest_ie AS (
+          SELECT
+            lead_key,
+            sale_date,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY id DESC) AS rn
+          FROM ingest_events
+        )
+        SELECT
+          l.lead_key,
+          l.address,
+          l.dts_days,
+          latest_ie.sale_date,
+          ae.avm_value,
+          ae.avm_low,
+          ae.avm_high
+        FROM leads l
+        JOIN latest_ae ae ON ae.lead_key = l.lead_key AND ae.rn = 1
+        LEFT JOIN latest_ie ON latest_ie.lead_key = l.lead_key AND latest_ie.rn = 1
+        WHERE l.lead_key != ?
+          AND ABS(ae.avm_anchor - ?) <= ? * {band}
+          AND {geo_filter}
+        ORDER BY ABS(ae.avm_anchor - ?) ASC
+        LIMIT 6
+    """
+
+    def _run(geo_filter: str, params: tuple, band: float) -> List:
+        try:
+            return cur.execute(
+                _COMPS_SQL.format(geo_filter=geo_filter, band=band),
+                params,
+            ).fetchall()
+        except Exception:
+            return []
+
+    def _geo_pass(band: float) -> List:
+        avm_band = (subject_lead_key, subject_avm, subject_avm, subject_avm)
+        rows: List = []
+        if subject_zip and subject_zip.strip():
+            rows = _run(
+                "json_extract(ae.attom_raw_json, '$.detail.address.postal1') = ?",
+                avm_band + (subject_zip.strip(),),
+                band,
+            )
+        if not rows and subject_city and subject_city.strip():
+            rows = _run(
+                "json_extract(ae.attom_raw_json, '$.detail.address.locality') = ?",
+                avm_band + (subject_city.strip(),),
+                band,
+            )
+        if not rows and county:
+            rows = _run(
+                "l.county = ?",
+                avm_band + (county,),
+                band,
+            )
+        return rows
+
+    rows = _geo_pass(0.25)
+    if not rows:
+        rows = _geo_pass(0.40)
+
+    comps: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            comps.append({
+                "address":   row["address"],
+                "sale_date": row["sale_date"],
+                "dts":       row["dts_days"],
+                "avm_value": row["avm_value"],
+                "avm_low":   row["avm_low"],
+                "avm_high":  row["avm_high"],
+            })
+        except Exception:
+            continue
+    return comps
+
+
+_LEAD_COLS = """
+        WITH latest AS (
+          SELECT
+            lead_key,
+            avm_value,
+            avm_low,
+            avm_high,
+            confidence,
+            status,
+            enriched_at,
+            attom_raw_json,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT
+          l.lead_key,
+          l.address,
+          l.county,
+          l.state,
+          l.distress_type,
+          l.falco_score_internal,
+          l.auction_readiness,
+          l.equity_band,
+          l.dts_days,
+          l.uw_ready,
+          l.uw_json,
+          le.avm_value,
+          le.avm_low,
+          le.avm_high,
+          le.confidence,
+          le.status AS attom_status,
+          le.enriched_at,
+          le.attom_raw_json AS attom_raw_json
+        FROM leads l
+        LEFT JOIN latest le
+          ON le.lead_key = l.lead_key AND le.rn = 1
+"""
 
 
 def run() -> Dict[str, int]:
+    # ── Repack mode: if set, process exactly one lead_key end-to-end ──────────
+    repack_key = os.getenv("FALCO_REPACK_LEAD_KEY", "").strip()
+    is_repack  = bool(repack_key)
+
+    # Windowing stays deterministic + shared with the rest of the system
     dts_min, dts_max = get_dts_window("PACKAGER")
-    max_packets = int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))
+    max_packets = 1 if is_repack else int(os.getenv("FALCO_MAX_PACKETS_PER_RUN", "10"))
 
-    filter_obj = {
-        "and": [
-            {"property": "Days to Sale", "number": {"greater_than_or_equal_to": dts_min}},
-            {"property": "Days to Sale", "number": {"less_than_or_equal_to": dts_max}},
-        ]
-    }
+    force_repackage = os.getenv("FALCO_FORCE_REPACKAGE", "").strip() == "1"
 
-    pages = query_database(
-        filter_obj,
-        page_size=50,
-        sorts=[{"property": "Sale Date", "direction": "ascending"}],
-        max_pages=10,
-    )
+    run_id  = get_current_run_id()
+    db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")
+
+    require_uw = os.getenv("FALCO_REQUIRE_UW", "1").strip() != "0"
 
     packaged = 0
     skipped_missing = 0
     skipped_already = 0
+    skipped_due_to_uw = 0
     upload_failures = 0
     skipped_upload_missing_creds = 0
     skipped_institutional = 0
 
-    out_dir = os.path.join(os.getcwd(), "out_packets")
     drive_enabled = have_drive_creds()
 
-    for page in pages:
+    # Deterministic output layout
+    out_dir = os.path.join(os.getcwd(), "out", "packets", run_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    con = sqlite3.connect(db_path)
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    if is_repack:
+        print(f"[REPACK] Mode active — targeting lead_key={repack_key!r} (run_id={run_id})")
+        rows = cur.execute(
+            _LEAD_COLS + "WHERE l.lead_key = ?",
+            (repack_key,),
+        ).fetchall()
+        if not rows:
+            print(f"[REPACK] lead_key={repack_key!r} not found in database — aborting")
+            con.close()
+            return {
+                "packaged_count": 0,
+                "repack_lead_key": repack_key,
+                "repack_status": "not_found",
+            }
+    else:
+        where_clause = """
+        WHERE l.dts_days IS NOT NULL
+          AND l.dts_days >= ?
+          AND l.dts_days <= ?
+        """
+
+        rows = cur.execute(
+            _LEAD_COLS + where_clause + """
+        ORDER BY l.dts_days ASC, le.avm_value DESC, l.lead_key ASC
+        LIMIT ?
+            """,
+            (dts_min, dts_max, max_packets * 5),
+        ).fetchall()
+
+    for r in rows:
         if packaged >= max_packets:
             break
 
-        fields = extract_page_fields(page)
-        page_id = fields.get("page_id") or ""
-        if not page_id:
+        lead_key = (r["lead_key"] or "").strip()
+        if not lead_key:
+            skipped_missing += 1
             continue
+
+        # UW gate — repack is a manual override, so it bypasses
+        if not is_repack and require_uw and int(r["uw_ready"] or 0) != 1:
+            skipped_due_to_uw += 1
+            continue
+
+        fields: Dict[str, Any] = dict(r)
+
+        # ── Compute derived enrichment fields ──────────────────────────────────
+        # Parse attom_raw_json into avm / detail objects
+        _raw = fields.get("attom_raw_json") or ""
+        _attom_detail: Optional[Dict[str, Any]] = None
+        _attom_avm_obj: Optional[Dict[str, Any]] = None
+        if _raw:
+            try:
+                _parsed = json.loads(_raw) if isinstance(_raw, str) else _raw
+                if isinstance(_parsed, dict):
+                    if "avm" in _parsed and "detail" in _parsed:
+                        _attom_avm_obj = _parsed.get("avm") or None
+                        _attom_detail  = _parsed.get("detail") or None
+                    elif "eventDate" in _parsed or "amount" in _parsed:
+                        # Legacy AVM-only blob
+                        _attom_avm_obj = _parsed
+            except Exception:
+                pass
+        fields["attom_detail"]  = _attom_detail
+        fields["attom_avm_obj"] = _attom_avm_obj
+
+        # Value anchors
+        _avm_low  = fields.get("avm_low")
+        _avm_mid  = fields.get("avm_value")
+        _avm_high = fields.get("avm_high")
+        fields["value_anchor_low"]  = float(_avm_low)  if _avm_low  is not None else None
+        fields["value_anchor_mid"]  = float(_avm_mid)  if _avm_mid  is not None else None
+        fields["value_anchor_high"] = float(_avm_high) if _avm_high is not None else None
+
+        # Spread
+        _spread_pct  = None
+        _spread_band = "UNKNOWN"
+        if _avm_low is not None and float(_avm_low) > 0 and _avm_high is not None:
+            _spread_pct  = (float(_avm_high) - float(_avm_low)) / float(_avm_low)
+            _spread_band = "TIGHT" if _spread_pct <= 0.12 else "NORMAL" if _spread_pct <= 0.18 else "WIDE"
+        fields["spread_pct"]  = _spread_pct
+        fields["spread_band"] = _spread_band
+
+        # Diamond proxy
+        _dts_val    = fields.get("dts_days")
+        _readiness  = (fields.get("auction_readiness") or "").upper()
+        fields["diamond_proxy"] = bool(
+            fields.get("attom_status") == "enriched"
+            and _readiness == "GREEN"
+            and _dts_val is not None and 21 <= int(_dts_val) <= 60
+            and _avm_low is not None and float(_avm_low) >= 300_000
+            and _spread_pct is not None and _spread_pct <= 0.18
+        )
+
+        # Extract detail summary fields (safe key access throughout)
+        if _attom_detail and isinstance(_attom_detail, dict):
+            _ident  = _attom_detail.get("identifier") or {}
+            _summ   = _attom_detail.get("summary")    or {}
+            _bldg   = _attom_detail.get("building")   or {}
+            _vint   = _attom_detail.get("vintage")     or {}
+            _lot    = _attom_detail.get("lot")         or {}
+            _addrd  = _attom_detail.get("address")     or {}
+            _rooms  = (_bldg.get("rooms")        if isinstance(_bldg, dict) else None) or {}
+            _sized  = (_bldg.get("size")         if isinstance(_bldg, dict) else None) or {}
+            _constr = (_bldg.get("construction") if isinstance(_bldg, dict) else None) or {}
+            fields["property_identifier"] = (_ident.get("attomId") or _ident.get("fips")) if isinstance(_ident, dict) else None
+            fields["property_type"]       = (_summ.get("proptype") or _summ.get("propClass"))    if isinstance(_summ, dict) else None
+            fields["land_use"]            = _summ.get("propLandUse")                             if isinstance(_summ, dict) else None
+            fields["year_built"]          = _vint.get("yearBuilt")                               if isinstance(_vint, dict) else None
+            fields["building_area_sqft"]  = (_sized.get("livingSize") or _sized.get("bldgSize")) if isinstance(_sized, dict) else None
+            fields["lot_size"]            = (_lot.get("lotSize1") or _lot.get("lotSizeAcres"))   if isinstance(_lot, dict) else None
+            fields["beds"]                = (_rooms.get("beds") or _rooms.get("bedsCount"))       if isinstance(_rooms, dict) else None
+            fields["baths"]               = (_rooms.get("bathsTotal") or _rooms.get("bathsFull")) if isinstance(_rooms, dict) else None
+            fields["construction_type"]   = (_constr.get("frameType") or _constr.get("constructionType")) if isinstance(_constr, dict) else None
+            fields["city"]                = (_addrd.get("locality") or _addrd.get("city"))        if isinstance(_addrd, dict) else None
+            fields["zip"]                 = (_addrd.get("postal1") or _addrd.get("zip"))          if isinstance(_addrd, dict) else None
+        # ── End computed fields ────────────────────────────────────────────────
+
+        fields.update(_hydrate_trustee_from_provenance(cur, lead_key))
+
+        try:
+            fields = apply_convertibility_gate(fields)
+        except Exception:
+            pass
 
         if is_institutional(fields):
             skipped_institutional += 1
             continue
 
-        # Already has URL
-        if (fields.get("packet_pdf_url") or "").strip():
-            skipped_already += 1
-            continue
+        if is_repack or force_repackage:
+            # Force-rebuild: bypass the "already packaged this run" guard
+            if is_repack:
+                print(f"[REPACK] Building packet for lead_key={lead_key!r}")
+        else:
+            # already packaged for THIS run_id — skip only if path is already canonical
+            existing = cur.execute(
+                "SELECT pdf_path FROM packets WHERE run_id=? AND lead_key=? LIMIT 1",
+                (run_id, lead_key),
+            ).fetchone()
+            if existing:
+                existing_path = existing["pdf_path"] or ""
+                if "falco_packet_" not in existing_path:
+                    skipped_already += 1
+                    continue
+                # legacy path — fall through to rebuild and update
 
-        # Required inputs for a packet
-        if not fields.get("address") or fields.get("value_band_low") is None or fields.get("value_band_high") is None or not fields.get("grade"):
+        # required inputs
+        _is_lp   = (fields.get("distress_type") or "").upper() == "LIS_PENDENS"
+        _has_avm = fields.get("avm_low") is not None and fields.get("avm_high") is not None
+        if not fields.get("address") or (not _is_lp and not _has_avm):
+            skipped_missing += 1
+            continue
+        # LP leads without AVM proceed but default to YELLOW readiness pending enrichment
+        if _is_lp and not _has_avm:
+            fields.setdefault("auction_readiness", "YELLOW")
+
+        # HARD GEO GATE (WAR-PLAN)
+        _county_gate = (fields.get("county") or "").strip()
+        if _county_gate and (not is_allowed_county(_county_gate) or not within_target_counties(_county_gate)):
             skipped_missing += 1
             continue
 
+        # Internal comps proxy (no new APIs)
+        _subject_avm  = fields.get("avm_value") or fields.get("avm_low")
+        _county       = fields.get("county") or ""
+        _subject_zip  = (fields.get("zip") or "").strip() or None
+        _subject_city = (fields.get("city") or "").strip() or None
+
+        # Fallback: parse zip/city from address string if still missing
+        if not _subject_zip or not _subject_city:
+            _addr_str = fields.get("address") or ""
+            if isinstance(_addr_str, str) and _addr_str.strip():
+                import re as _re
+                if not _subject_zip:
+                    _zip_m = _re.search(r"\b(\d{5})\b", _addr_str)
+                    if _zip_m:
+                        _subject_zip = _zip_m.group(1)
+                if not _subject_city:
+                    _city_m = _re.search(
+                        r",\s*([^,]+?)\s*,\s*[A-Z]{2}\b", _addr_str
+                    )
+                    if _city_m:
+                        _subject_city = _city_m.group(1).strip() or None
+        if _subject_avm is not None and (_subject_zip or _subject_city or _county):
+            try:
+                fields["internal_comps"] = _fetch_internal_comps(
+                    cur, lead_key, _county, float(_subject_avm),
+                    subject_zip=_subject_zip,
+                    subject_city=_subject_city,
+                )
+            except Exception:
+                fields["internal_comps"] = []
+        else:
+            fields["internal_comps"] = []
+
+        # Build deterministic pdf path (pdf_builder should accept out_dir)
         try:
             local_path = build_pdf_packet(fields, out_dir=out_dir)
-        except Exception:
+        except Exception as _pdf_exc:
+            import traceback as _tb
+            print(f"[PACKAGER][ERROR] build_pdf_packet failed lead_key={lead_key}: {type(_pdf_exc).__name__}: {_pdf_exc}")
+            _tb.print_exc()
             skipped_missing += 1
             continue
 
-        # Upload optional
+        # Registry: sha + bytes + path
+        sha, nbytes = _sha256_file(local_path)
+        cur.execute(
+            """
+            INSERT INTO packets (run_id, lead_key, pdf_path, sha256, bytes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, lead_key) DO UPDATE SET
+                pdf_path   = excluded.pdf_path,
+                sha256     = excluded.sha256,
+                bytes      = excluded.bytes,
+                created_at = excluded.created_at
+            """,
+            (run_id, lead_key, local_path, sha, nbytes, _utc_now_iso()),
+        )
+        con.commit()
+
+        # Upload optional (kept)
         pdf_url = None
         if drive_enabled:
             pdf_url = upload_pdf(local_pdf_path=local_path, filename=os.path.basename(local_path))
             if not pdf_url:
                 upload_failures += 1
-                # Still count as packaged locally
         else:
             skipped_upload_missing_creds += 1
 
-        # Write back only if URL exists (non-destructive)
-        if pdf_url:
-            update_lead(page_id, build_extra_properties({"packet_pdf_url": pdf_url}))
-
+        if is_repack:
+            print(f"[REPACK] Packet written: {local_path}")
         packaged += 1
 
-    # Keep original summary keys + add one more (safe)
-    summary = {
+    con.close()
+
+    print(
+        f"[PACKAGER] packaged={packaged}"
+        f" skipped_uw={skipped_due_to_uw}"
+        f" skipped_missing={skipped_missing}"
+        f" skipped_already={skipped_already}"
+        f" skipped_institutional={skipped_institutional}"
+    )
+
+    summary: Dict[str, Any] = {
         "packaged_count": packaged,
+        "skipped_due_to_uw": skipped_due_to_uw,
         "skipped_packaging_missing_fields": skipped_missing,
         "skipped_packaging_already_done": skipped_already,
         "upload_failures": upload_failures,
         "skipped_packaging_institutional": skipped_institutional,
     }
-
     if not drive_enabled:
         summary["skipped_upload_missing_creds"] = skipped_upload_missing_creds
+    if is_repack:
+        summary["repack_lead_key"] = repack_key
+        summary["repack_status"]   = "ok" if packaged else "failed"
 
     return summary
