@@ -105,6 +105,15 @@ def _val(v: Any, fallback: str = "Unavailable") -> str:
     return fallback if s in ("", "None", "null") else s
 
 
+def _trim_line(text: str, font: str, size: float, max_w: float) -> str:
+    s = str(text or "").strip()
+    if stringWidth(s, font, size) <= max_w:
+        return s
+    while s and stringWidth(s + "…", font, size) > max_w:
+        s = s[:-1].rstrip()
+    return (s + "…") if s else "…"
+
+
 # ─── PDF document wrapper ─────────────────────────────────────────────────────
 
 class _Doc:
@@ -127,7 +136,7 @@ class _Doc:
         self._draw_footer()
         self.c.save()
 
-    def gap(self, pts: float = 8) -> None:
+    def gap(self, pts: float = 6) -> None:
         self.y -= pts
 
     def space_left(self) -> float:
@@ -178,21 +187,21 @@ class _Doc:
 	
     def page_header(self, title: str, subtitle: str = "") -> None:
         c = self.c
-        bh = 44
+        bh = 40
         c.setFillColor(_NAVY)
         c.rect(0, PAGE_H - bh - 2, PAGE_W, bh + 2, fill=1, stroke=0)
-        self._draw_logo_chip(ML, PAGE_H - bh + 8, 18)
+        self._draw_logo_chip(ML, PAGE_H - bh + 7, 18)
         c.setFont("Helvetica", 7.5)
         c.setFillColor(colors.HexColor("#CFCFCF"))
-        c.drawString(ML + 26, PAGE_H - bh + 26, "FALCO AUCTION BRIEF")
+        c.drawString(ML + 26, PAGE_H - bh + 24, "FALCO AUCTION BRIEF")
         c.setFont("Helvetica-Bold", 14)
         c.setFillColor(_WHITE)
-        c.drawString(ML + 26, PAGE_H - bh + 10, title)
+        c.drawString(ML + 26, PAGE_H - bh + 9, title)
         if subtitle:
             c.setFont("Helvetica", 8)
             c.setFillColor(colors.HexColor("#CFCFCF"))
-            c.drawRightString(PAGE_W - MR, PAGE_H - bh + 12, subtitle[:48])
-        self.y = PAGE_H - bh - 18
+            c.drawRightString(PAGE_W - MR, PAGE_H - bh + 10, subtitle[:48])
+        self.y = PAGE_H - bh - 14
 
     def cover_header(self, address: str, location: str) -> None:
         """Page-1 header band: address + county/state + 'Auction Opportunity Brief' badge."""
@@ -221,16 +230,19 @@ class _Doc:
     # ── section heading ───────────────────────────────────────────────────────
 
     def section(self, label: str) -> None:
-        self.gap(10)
+        self.gap(8)
         c = self.c
-        c.setFont("Helvetica-Bold", 8.5)
+        pill_h = 13
+        pill_w = min(CW, stringWidth(label.upper(), "Helvetica-Bold", 7.8) + 18)
+        c.setFillColor(_LGRAY)
+        c.roundRect(ML, self.y - 9, pill_w, pill_h, 4, fill=1, stroke=0)
+        c.setFont("Helvetica-Bold", 7.8)
         c.setFillColor(_NAVY)
-        c.drawString(ML, self.y, label.upper())
-        self.y -= 3
-        c.setStrokeColor(_NAVY)
-        c.setLineWidth(0.8)
-        c.line(ML, self.y, PAGE_W - MR, self.y)
-        self.y -= 9
+        c.drawString(ML + 8, self.y - 5, label.upper())
+        c.setStrokeColor(_LINE)
+        c.setLineWidth(0.6)
+        c.line(ML + pill_w + 8, self.y - 3, PAGE_W - MR, self.y - 3)
+        self.y -= 16
 
     # ── typography ────────────────────────────────────────────────────────────
 
@@ -240,7 +252,7 @@ class _Doc:
         size: float = 9,
         color=None,
         indent: float = 0,
-        leading: float = 13,
+        leading: float = 12,
     ) -> None:
         c = self.c
         c.setFont("Helvetica", size)
@@ -249,13 +261,13 @@ class _Doc:
         for line in _wrap(text, "Helvetica", size, CW - indent):
             c.drawString(x, self.y, line)
             self.y -= leading
-        self.gap(2)
+        self.gap(1.5)
 
     def kv(
         self,
         label: str,
         value: str,
-        lw: float = 145,
+        lw: float = 132,
         vc=None,
         bold_v: bool = False,
     ) -> None:
@@ -265,20 +277,29 @@ class _Doc:
         c = self.c
         c.setFont("Helvetica-Bold", 8.5)
         c.setFillColor(_GRAY)
-        c.drawString(ML, self.y, label)
-        c.setFont("Helvetica-Bold" if bold_v else "Helvetica", 8.5)
+        label_y = self.y
+        c.drawString(ML, label_y, label)
+        value_font = "Helvetica-Bold" if bold_v else "Helvetica"
+        c.setFont(value_font, 8.5)
         c.setFillColor(vc or _SLATE)
-        c.drawString(ML + lw, self.y, v[:90])
-        self.y -= 13
+        value_x = ML + lw
+        max_w = PAGE_W - MR - value_x
+        lines = _wrap(v, value_font, 8.5, max_w)
+        if len(lines) > 2:
+            lines = lines[:2]
+            lines[-1] = _trim_line(" ".join(lines[-1:]), value_font, 8.5, max_w)
+        for idx, line in enumerate(lines):
+            c.drawString(value_x, label_y - (idx * 10), line)
+        self.y -= max(13, 10 * len(lines) + 2)
 
     def bullet(self, text: str, color=None) -> None:
         c = self.c
         c.setFillColor(color or _SLATE)
         c.setFont("Helvetica", 8.5)
-        c.drawString(ML + 6, self.y, "-")
-        for i, line in enumerate(_wrap(text, "Helvetica", 8.5, CW - 16)):
-            c.drawString(ML + 16, self.y, line)
-            self.y -= 12
+        c.drawString(ML + 6, self.y, "•")
+        for line in _wrap(text, "Helvetica", 8.5, CW - 18):
+            c.drawString(ML + 18, self.y, line)
+            self.y -= 11
         self.gap(1)
 
     def hline(self, color=None) -> None:
@@ -288,7 +309,7 @@ class _Doc:
         c.line(ML, self.y, PAGE_W - MR, self.y)
         self.gap(6)
 
-    def two_col(self, pairs: List[Tuple[str, str]], lw: float = 110) -> None:
+    def two_col(self, pairs: List[Tuple[str, str]], lw: float = 98) -> None:
         """Two-column key-value grid."""
         c    = self.c
         cw   = CW / 2
@@ -297,27 +318,40 @@ class _Doc:
         right = pairs[half:]
         for i in range(half):
             base = self.y
+            row_drop = 12
             if i < len(left):
                 lb, vb = left[i]
                 vb = str(vb).strip()
                 if vb and vb not in ("None", "null", "Unavailable"):
-                    c.setFont("Helvetica-Bold", 8)
+                    c.setFont("Helvetica-Bold", 7.6)
                     c.setFillColor(_GRAY)
                     c.drawString(ML, base, lb)
-                    c.setFont("Helvetica", 8)
+                    c.setFont("Helvetica", 7.6)
                     c.setFillColor(_SLATE)
-                    c.drawString(ML + lw, base, vb[:38])
+                    left_lines = _wrap(vb, "Helvetica", 7.6, cw - lw - 8)
+                    if len(left_lines) > 2:
+                        left_lines = left_lines[:2]
+                        left_lines[-1] = _trim_line(left_lines[-1], "Helvetica", 7.6, cw - lw - 8)
+                    for idx, line in enumerate(left_lines):
+                        c.drawString(ML + lw, base - (idx * 9), line)
+                    row_drop = max(row_drop, 9 * len(left_lines) + 2)
             if i < len(right):
                 lb, vb = right[i]
                 vb = str(vb).strip()
                 if vb and vb not in ("None", "null", "Unavailable"):
-                    c.setFont("Helvetica-Bold", 8)
+                    c.setFont("Helvetica-Bold", 7.6)
                     c.setFillColor(_GRAY)
                     c.drawString(ML + cw, base, lb)
-                    c.setFont("Helvetica", 8)
+                    c.setFont("Helvetica", 7.6)
                     c.setFillColor(_SLATE)
-                    c.drawString(ML + cw + lw, base, vb[:38])
-            self.y -= 13
+                    right_lines = _wrap(vb, "Helvetica", 7.6, cw - lw - 8)
+                    if len(right_lines) > 2:
+                        right_lines = right_lines[:2]
+                        right_lines[-1] = _trim_line(right_lines[-1], "Helvetica", 7.6, cw - lw - 8)
+                    for idx, line in enumerate(right_lines):
+                        c.drawString(ML + cw + lw, base - (idx * 9), line)
+                    row_drop = max(row_drop, 9 * len(right_lines) + 2)
+            self.y -= row_drop
 
 
 # ─── Valuation bar ────────────────────────────────────────────────────────────
