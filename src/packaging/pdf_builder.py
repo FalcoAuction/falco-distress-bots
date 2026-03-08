@@ -1883,9 +1883,6 @@ def _page1_executive(
             doc.body(f"System Notes: {_uw_notes[:200]}", size=8.5, color=_SLATE, leading=12)
         doc.gap(6)
 
-    _draw_due_diligence_checklist(doc, fields, low)
-
-
 def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: Any) -> None:
     """
     Fixed partner-facing checklist micro-box (Page 1).
@@ -2060,6 +2057,47 @@ def _page2_valuation(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -
             doc.body(
                 "Property context:  " + "  \u2022  ".join(_ctx_parts),
                 size=8, color=_SLATE, leading=12,
+            )
+
+
+def _render_compact_value_framework(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -> None:
+    low  = fields.get("value_anchor_low")
+    mid  = fields.get("value_anchor_mid")
+    high = fields.get("value_anchor_high")
+
+    doc.section("Value & Bid Framework")
+    if low is not None and mid is not None and high is not None:
+        _draw_val_bar(doc, float(low), float(mid), float(high))
+    else:
+        _uw2: Dict[str, Any] = _normalize_uw_json(fields.get("uw_json"))
+        _uw2_nums = _uw2.get("numbers") if isinstance(_uw2.get("numbers"), dict) else {}
+        _uw2_conf = str(_uw2_nums.get("avm_confidence") or "").strip()
+        _uw2_bid_r = _uw2_nums.get("max_bid")
+        try:
+            _uw2_bid = f"${float(_uw2_bid_r):,.0f}" if _uw2_bid_r is not None else ""
+        except (TypeError, ValueError):
+            _uw2_bid = ""
+        if _uw2_conf:
+            doc.kv("Appraiser Estimate", _uw2_conf, bold_v=True)
+        if _uw2_bid:
+            doc.kv("Recommended Max Bid", _uw2_bid, bold_v=True)
+        if not _uw2_conf and not _uw2_bid:
+            doc.body("Valuation range data unavailable.", size=8.5, color=_AMBER, leading=12)
+
+    doc.body(brief.get("auction_positioning", "Pricing guidance unavailable."), size=8.5, leading=12)
+    doc.body(brief.get("liquidity_analysis", "Liquidity analysis unavailable."), size=8.5, color=_AMBER, leading=12)
+
+    comps = fields.get("internal_comps") or []
+    if comps:
+        for comp in comps[:4]:
+            avm = comp.get("avm_value") or comp.get("avm_low")
+            avm_str  = f"${float(avm):,.0f}" if avm is not None else "N/A"
+            dts_str  = str(comp["dts"]) if comp.get("dts") is not None else "â€”"
+            date_str = str(comp["sale_date"]) if comp.get("sale_date") else "â€”"
+            addr_str = (str(comp.get("address") or "")).strip() or "â€”"
+            doc.body(
+                f"Comp: {avm_str}  |  DTS {dts_str}  |  {date_str}  |  {addr_str}",
+                size=7.6, color=_SLATE, leading=10.5,
             )
 
 
@@ -2430,7 +2468,7 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
 
 
 def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -> None:
-    doc.page_header("Timing, Risk & Underwriting")
+    doc.page_header("Timing, Value & Underwriting")
 
     doc.section("Sale Timeline")
     doc.kv("Sale Date",         _val(fields.get("sale_date_iso") or fields.get("sale_date")), bold_v=True)
@@ -2462,6 +2500,8 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
 
     doc.gap(6)
     _draw_manual_uw_section(doc, fields)
+    doc.gap(6)
+    _render_compact_value_framework(doc, fields, brief)
     doc.gap(6)
     doc.section("Before You Bid")
 
@@ -2921,8 +2961,9 @@ def _page5_scoring_appendix(
             bold_v=True,
         )
     doc.gap(10)
+    _draw_due_diligence_checklist(doc, fields, low)
+    doc.gap(10)
 
-    
     doc.section("Data Sources")
     doc.bullet("Automated valuation model (AVM)")
     if fields.get("attom_detail"):
@@ -3304,8 +3345,6 @@ def build_pdf_packet(fields: Dict[str, Any], out_dir: str) -> str:
     _page_property_snapshot(doc, fields, img_path=img_path)
     doc.new_page()
     _page4_timeline_risk(doc, fields, brief)
-    doc.new_page()
-    _page2_valuation(doc, fields, brief)
     doc.new_page()
     _page3_property_facts(doc, fields)
     if (fields.get("distress_type") or "").upper() == "LIS_PENDENS":
