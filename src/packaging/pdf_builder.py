@@ -22,24 +22,24 @@ from reportlab.pdfgen import canvas as rl_canvas
 _TEMPLATE_VERSION = "v1.0"
 
 # ─── Colour palette ───────────────────────────────────────────────────────────
-_NAVY      = colors.HexColor("#1C2B4B")
-_SLATE     = colors.HexColor("#2C3E50")
-_GRAY      = colors.HexColor("#6B7280")
-_LGRAY     = colors.HexColor("#F3F4F6")
-_MGRAY     = colors.HexColor("#E5E7EB")
-_GREEN     = colors.HexColor("#166534")
-_AMBER     = colors.HexColor("#92400E")
-_RED       = colors.HexColor("#991B1B")
-_BLUE_BAR  = colors.HexColor("#BFDBFE")
-_NAVY_BAR  = colors.HexColor("#1E40AF")
-_LINE      = colors.HexColor("#D1D5DB")
+_NAVY      = colors.HexColor("#050505")
+_SLATE     = colors.HexColor("#181818")
+_GRAY      = colors.HexColor("#666666")
+_LGRAY     = colors.HexColor("#F5F5F5")
+_MGRAY     = colors.HexColor("#E6E6E6")
+_GREEN     = colors.HexColor("#050505")
+_AMBER     = colors.HexColor("#404040")
+_RED       = colors.HexColor("#7A7A7A")
+_BLUE_BAR  = colors.HexColor("#DCDCDC")
+_NAVY_BAR  = colors.HexColor("#050505")
+_LINE      = colors.HexColor("#D0D0D0")
 _WHITE     = colors.white
-_TILE_BG   = colors.HexColor("#F8F9FA")
-_TILE_BRD  = colors.HexColor("#E2E4E8")
-_PILL_GRN  = colors.HexColor("#D1FAE5")
-_PILL_AMB  = colors.HexColor("#FEF3C7")
-_PILL_RED  = colors.HexColor("#FEE2E2")
-_TXT_GRN   = colors.HexColor("#065F46")
+_TILE_BG   = colors.HexColor("#FAFAFA")
+_TILE_BRD  = colors.HexColor("#DDDDDD")
+_PILL_GRN  = colors.HexColor("#EBEBEB")
+_PILL_AMB  = colors.HexColor("#DCDCDC")
+_PILL_RED  = colors.HexColor("#CFCFCF")
+_TXT_GRN   = colors.HexColor("#050505")
 
 # ─── Layout constants ─────────────────────────────────────────────────────────
 PAGE_W, PAGE_H = LETTER          # 612 × 792 pt
@@ -51,6 +51,23 @@ CW = PAGE_W - ML - MR            # content width ≈ 504 pt
 
 
 # ─── Text utilities ───────────────────────────────────────────────────────────
+
+_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+_LOGO_CANDIDATES = [
+    os.path.join(_PROJECT_ROOT, "falco-site", "public", "falco-logo.jpg"),
+    os.path.join(os.getcwd(), "falco-site", "public", "falco-logo.jpg"),
+]
+
+
+def _get_logo_path() -> Optional[str]:
+    for candidate in _LOGO_CANDIDATES:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+_LOGO_PATH = _get_logo_path()
+
 
 def _wrap(text: str, font: str, size: float, max_w: float) -> List[str]:
     words = str(text or "").split()
@@ -129,11 +146,25 @@ class _Doc:
         run_id   = os.getenv("FALCO_RUN_ID", "unknown_run")
         gen_date = datetime.utcnow().date().isoformat()
         footer_left = (
-            f"FALCO Diamond Acquisition Dossier | Confidential — For Professional Auction Partners | "
+            f"FALCO Auction Opportunity Brief | Confidential — For Auction Partners | "
             f"Template {_TEMPLATE_VERSION} | Run {run_id} | Generated {gen_date}"
         )
         c.drawString(ML, fy - 11, footer_left)
         c.drawRightString(PAGE_W - MR, fy - 11, f"Page {self._pn}")
+
+    def _draw_logo_chip(self, x: float, y: float, size: float = 20) -> None:
+        c = self.c
+        c.setFillColor(_WHITE)
+        c.roundRect(x, y, size, size, 4, fill=1, stroke=0)
+        if _LOGO_PATH:
+            try:
+                c.drawImage(_LOGO_PATH, x + 2, y + 2, size - 4, size - 4, preserveAspectRatio=True, anchor="c")
+                return
+            except Exception:
+                pass
+        c.setFillColor(_NAVY)
+        c.setFont("Helvetica-Bold", 7)
+        c.drawCentredString(x + size / 2, y + size / 2 - 2, "F")
 
     # ── page header band ──────────────────────────────────────────────────────
 
@@ -147,37 +178,44 @@ class _Doc:
 	
     def page_header(self, title: str, subtitle: str = "") -> None:
         c = self.c
-        bh = 38
+        bh = 44
         c.setFillColor(_NAVY)
         c.rect(0, PAGE_H - bh - 2, PAGE_W, bh + 2, fill=1, stroke=0)
+        self._draw_logo_chip(ML, PAGE_H - bh + 8, 18)
+        c.setFont("Helvetica", 7.5)
+        c.setFillColor(colors.HexColor("#CFCFCF"))
+        c.drawString(ML + 26, PAGE_H - bh + 26, "FALCO AUCTION BRIEF")
         c.setFont("Helvetica-Bold", 14)
         c.setFillColor(_WHITE)
-        c.drawString(ML, PAGE_H - bh + 9, title)
+        c.drawString(ML + 26, PAGE_H - bh + 10, title)
         if subtitle:
             c.setFont("Helvetica", 8)
-            c.setFillColor(colors.HexColor("#A5B4C8"))
-            c.drawRightString(PAGE_W - MR, PAGE_H - bh + 9, subtitle)
+            c.setFillColor(colors.HexColor("#CFCFCF"))
+            c.drawRightString(PAGE_W - MR, PAGE_H - bh + 12, subtitle[:48])
         self.y = PAGE_H - bh - 18
 
     def cover_header(self, address: str, location: str) -> None:
-        """Page-1 header band: address + county/state + 'Diamond Acquisition Dossier' badge."""
+        """Page-1 header band: address + county/state + 'Auction Opportunity Brief' badge."""
         c  = self.c
-        bh = 58
+        bh = 64
         c.setFillColor(_NAVY)
         c.rect(0, PAGE_H - bh, PAGE_W, bh, fill=1, stroke=0)
         # Badge — top-right
+        self._draw_logo_chip(ML, PAGE_H - 44, 24)
+        c.setFont("Helvetica", 8)
+        c.setFillColor(colors.HexColor("#CFCFCF"))
+        c.drawString(ML + 32, PAGE_H - 19, "FALCO")
         c.setFont("Helvetica-Bold", 8)
-        c.setFillColor(colors.HexColor("#A5B4C8"))
-        c.drawRightString(PAGE_W - MR, PAGE_H - 16, "Diamond Acquisition Dossier")
+        c.drawRightString(PAGE_W - MR, PAGE_H - 18, "Confidential Auction Opportunity Brief")
         # Address — main title
         addr_display = address[:72]
-        c.setFont("Helvetica-Bold", 15)
+        c.setFont("Helvetica-Bold", 16)
         c.setFillColor(_WHITE)
-        c.drawString(ML, PAGE_H - 28, addr_display)
+        c.drawString(ML, PAGE_H - 33, addr_display)
         # County / State — subtitle line
         c.setFont("Helvetica", 9)
-        c.setFillColor(colors.HexColor("#A5B4C8"))
-        c.drawString(ML, PAGE_H - 44, location)
+        c.setFillColor(colors.HexColor("#CFCFCF"))
+        c.drawString(ML, PAGE_H - 49, location)
         self.y = PAGE_H - bh - 12
 
     # ── section heading ───────────────────────────────────────────────────────
@@ -499,6 +537,112 @@ def _draw_p1_risk_flags(doc: _Doc, fields: Dict[str, Any]) -> None:
 
 # ─── Risk flags ───────────────────────────────────────────────────────────────
 
+def _auction_liquidity(fields: Dict[str, Any]) -> str:
+    """
+    Deterministic auction salability signal.  Returns "STRONG", "MODERATE", or "WEAK".
+    Inputs used: property_type, value_anchor_low, spread_pct, dts_days.
+    """
+    _RES_TOKENS = {
+        "sfr", "single family", "single-family", "residential",
+        "townhouse", "townhome", "condo", "condominium",
+        "duplex", "triplex", "quadplex", "multi-family", "multifamily",
+    }
+    pt = (fields.get("property_type") or "").lower().strip()
+    _is_res = any(tok in pt for tok in _RES_TOKENS) if pt else False
+
+    try:
+        _low = float(fields["value_anchor_low"])
+    except (TypeError, ValueError, KeyError):
+        _low = None
+    try:
+        _sp = float(fields["spread_pct"])
+    except (TypeError, ValueError, KeyError):
+        _sp = None
+    try:
+        _dts = int(fields["dts_days"])
+    except (TypeError, ValueError, KeyError):
+        _dts = None
+
+    if (
+        _is_res
+        and _low is not None and _low >= 300_000
+        and _sp  is not None and _sp  <= 0.15
+        and _dts is not None and 21 <= _dts <= 60
+    ):
+        return "STRONG"
+    if (
+        _is_res
+        and _low is not None and _low >= 200_000
+        and _sp  is not None and _sp  <= 0.20
+    ):
+        return "MODERATE"
+    return "WEAK"
+
+
+def _partner_verdict(fields: Dict[str, Any]) -> str:
+    """
+    Partner-facing routing decision: ROUTE, WATCH, or PASS.
+      ROUTE — uw_ready=1, AVM low>=300k, spread<=0.18, dts 21-60, liquidity STRONG/MODERATE
+      WATCH — uw_ready=1, residential, AVM low>=200k (not fully ROUTE-qualified)
+      PASS  — everything else
+    """
+    _uw_ready = int(fields.get("uw_ready") or 0) == 1
+    _liq = _auction_liquidity(fields)
+    try:
+        _low = float(fields["value_anchor_low"])
+    except (TypeError, ValueError, KeyError):
+        _low = None
+    try:
+        _sp = float(fields["spread_pct"])
+    except (TypeError, ValueError, KeyError):
+        _sp = None
+    try:
+        _dts = int(fields["dts_days"])
+    except (TypeError, ValueError, KeyError):
+        _dts = None
+    _RES_TOKENS = {
+        "sfr", "single family", "single-family", "residential",
+        "townhouse", "townhome", "condo", "condominium",
+        "duplex", "triplex", "quadplex", "multi-family", "multifamily",
+    }
+    pt = (fields.get("property_type") or "").lower().strip()
+    _is_res = any(tok in pt for tok in _RES_TOKENS) if pt else False
+    if (
+        _uw_ready
+        and _low is not None and _low >= 300_000
+        and _sp  is not None and _sp  <= 0.18
+        and _dts is not None and 21 <= _dts <= 60
+        and _liq in ("STRONG", "MODERATE")
+    ):
+        return "ROUTE"
+    if _uw_ready and _is_res and _low is not None and _low >= 200_000:
+        return "WATCH"
+    return "PASS"
+
+
+def _sv_exterior_note(img_path: Optional[str], fields: Dict[str, Any]) -> str:
+    """
+    Returns a short, conservative exterior observation note for the Property Snapshot page.
+    Derives text only from structured facts (imagery availability, imagery date).
+    Never claims roof condition, landscaping, or visual damage.
+    """
+    if img_path:
+        date_str = (fields.get("streetview_imagery_date") or "").strip()
+        if date_str:
+            return (
+                f"Exterior review pending — Street View captured {date_str}. "
+                "On-site inspection required to confirm physical condition."
+            )
+        return (
+            "Street-level imagery available; exterior distress cannot be confirmed "
+            "without field inspection."
+        )
+    return (
+        "Exterior review pending — no Street View imagery retrieved. "
+        "Physical condition unverified; on-site or assessor inspection recommended."
+    )
+
+
 def _risk_flags(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     flags: List[Tuple[str, str]] = []
     if not fields.get("attom_detail"):
@@ -620,7 +764,7 @@ def _ai_narratives(fields: Dict[str, Any], api_key: str, model: str) -> Dict[str
     prompt = (
         "You are an institutional real estate underwriter. Write three short paragraphs "
         "in conservative professional tone — no hype, reference only provided data:\n"
-        "1. exec_summary: executive summary for investor (mention timeline, value anchor, spread, readiness, score).\n"
+        "1. exec_summary: property summary for auction partner (mention timeline, value anchor, spread, readiness, score).\n"
         "2. valuation: how to price at auction, expected bidder appetite, risks.\n"
         "3. risk: what is missing, what to verify, key risks.\n"
         "Always note equity is unknown unless lien data is present.\n"
@@ -669,7 +813,7 @@ def generate_narratives(fields: Dict[str, Any]) -> Dict[str, str]:
 
 def _fetch_notice_contact(lead_key: str) -> Dict[str, str]:
     """
-    Query lead_field_provenance for the latest notice contact fields for this lead.
+    Query lead_field_provenance for the latest foreclosure contact fields for this lead.
     Returns a dict with whatever keys were found (notice_phone, notice_email,
     notice_trustee_firm, notice_trustee_name_raw, notice_trustee_address).
     Never raises; returns {} on any error (missing DB, missing table, etc.).
@@ -741,11 +885,34 @@ def _fetch_prov_fields(lead_key: str, field_names: List[str]) -> Dict[str, str]:
     return result
 
 
+# Notice-title strings that look like trustees but are actually document headers.
+# Matched case-insensitively after normalising apostrophe variants and whitespace.
+_TRUSTEE_JUNK_TITLES = frozenset({
+    "substitute trustee's sale",
+    "substitute trustees sale",
+    "substitute trustee sale",
+    "notice of substitute trustee's sale",
+    "notice of substitute trustee sale",
+    "notice of trustee's sale",
+    "notice of trustee sale",
+    "notice of sale",
+    "trustee's sale",
+    "trustees sale",
+    "foreclosure sale",
+    "notice of foreclosure sale",
+    "notice of foreclosure",
+    "foreclosure notice",
+    "substitute trustee",
+})
+
+
 def _sanitize_trustee(s: Optional[str]) -> Optional[str]:
     """
-    Return s if it looks like clean text, else None.
-    Rejects strings containing the Unicode replacement character (garbled decode)
-    or more than 20 % non-printable / C1-control bytes.
+    Return s if it looks like a real trustee / firm name, else None.
+    Rejects:
+      - strings containing the Unicode replacement character (garbled decode)
+      - more than 20 % non-printable / C1-control bytes
+      - known document-title noise strings (SUBSTITUTE TRUSTEE'S SALE, etc.)
     """
     if not s:
         return None
@@ -754,7 +921,67 @@ def _sanitize_trustee(s: Optional[str]) -> Optional[str]:
     non_print = sum(1 for c in s if ord(c) < 32 or 0x7F <= ord(c) <= 0x9F)
     if non_print > len(s) * 0.20:
         return None
+    # Normalise apostrophe/quote variants then compare to junk-title set
+    _junk_norm = s.replace("\u2019", "'").replace("\u2018", "'").strip().lower()
+    _junk_norm = " ".join(_junk_norm.split())
+    if _junk_norm in _TRUSTEE_JUNK_TITLES:
+        return None
     return s.strip() or None
+
+
+def _sanitize_phone(s: Optional[str]) -> Optional[str]:
+    """
+    Return s if it looks like a real US phone number, else None.
+    Input is expected to already be in NXX-NXX-XXXX form from _normalize_us_phone.
+    Rejects:
+      - area code == exchange (e.g. 722-722-xxxx — repeated-pattern garbage)
+      - all-same-digit runs
+      - invalid area/exchange starting with 0 or 1
+      - strings that don't resolve to exactly 10 digits
+    Never raises.
+    """
+    if not s:
+        return None
+    import re as _re
+    digits = _re.sub(r"\D", "", s)
+    if len(digits) != 10:
+        return None
+    area = digits[:3]
+    exch = digits[3:6]
+    if area == exch:            # 722-722-xxxx, 555-555-xxxx — clear garbage
+        return None
+    if len(set(digits)) == 1:  # all same digit
+        return None
+    if area[0] in ("0", "1") or exch[0] in ("0", "1"):
+        return None
+    return s.strip()
+
+
+# Plain-English display labels for known distress-type codes.
+_DISTRESS_LABEL_MAP: Dict[str, str] = {
+    "LIS_PENDENS":             "Pre-Foreclosure",
+    "FORECLOSURE":             "Foreclosure",
+    "FORECLOSURE_TN":          "Foreclosure",
+    "SOT":                     "Trustee Sale",
+    "SUBSTITUTION_OF_TRUSTEE": "Trustee Sale",
+}
+
+
+def _distress_label(fields: Dict[str, Any]) -> str:
+    """
+    Return a plain-English distress label for the packet.
+    Checks distress_lane (explicit override) first, then maps distress_type.
+    Defaults to "Foreclosure" for foreclosure-family types with no label.
+    """
+    lane = str(fields.get("distress_lane") or "").strip()
+    if lane and lane.lower() not in ("", "unknown", "none", "null"):
+        return lane
+    dtype = str(fields.get("distress_type") or "").upper().strip()
+    if dtype in _DISTRESS_LABEL_MAP:
+        return _DISTRESS_LABEL_MAP[dtype]
+    if dtype:
+        return dtype.replace("_", " ").title()
+    return "Unknown"
 
 
 # ─── Foreclosure notice fetch & clean ─────────────────────────────────────────
@@ -848,23 +1075,113 @@ def _fetch_lp_notice(lead_key: str):
 
 def _extract_lp_contact(lead_key: str) -> Dict[str, Optional[str]]:
     """
-    Derive trustee name, phone, and email for Page-1 Notice Contact from the
-    LIS_PENDENS_HTML artifact + ingest_event raw_json.  Supplements
-    _fetch_notice_contact (provenance table) which is often empty until notice
-    fields are explicitly written.  Never raises.
+    Derive trustee, law firm, phone, email, mailing address, sale time, and
+    sale location for Page-1 Foreclosure Contact from LIS_PENDENS_HTML artifact + raw_json.
+    Supplements _fetch_notice_contact when the provenance table is empty.
+    Never raises.
     """
     import re as _re
-    out: Dict[str, Optional[str]] = {"trustee": None, "phone": None, "email": None}
+    out: Dict[str, Optional[str]] = {
+        "trustee":       None,
+        "law_firm":      None,
+        "phone":         None,
+        "email":         None,
+        "address":       None,
+        "sale_time":     None,
+        "sale_location": None,
+    }
     try:
         _, _, rj, text = _fetch_lp_notice(lead_key)
+        # Trustee from bot-parsed raw_json first
         out["trustee"] = (rj.get("trustee") or "").strip() or None
-        if text:
-            _m = _re.search(r'\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4}', text)
-            if _m:
-                out["phone"] = _m.group(0).strip()
-            _m = _re.search(r'[\w.+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', text)
-            if _m:
-                out["email"] = _m.group(0).strip()
+
+        if not text:
+            return out
+
+        # Phone — prefer labeled prefix, fall back to bare pattern
+        _ph = _re.search(
+            r'(?:Phone|Tel(?:ephone)?|Ph)\s*[:\.\-]\s*(\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4})',
+            text, _re.IGNORECASE,
+        )
+        if _ph:
+            out["phone"] = _ph.group(1).strip()
+        else:
+            _ph = _re.search(r'\(?\d{3}\)?[ .\-]\d{3}[ .\-]\d{4}', text)
+            if _ph:
+                out["phone"] = _ph.group(0).strip()
+
+        # Email
+        _m = _re.search(r'[\w.+\-]+@[\w.\-]+\.[a-zA-Z]{2,}', text)
+        if _m:
+            out["email"] = _m.group(0).strip()
+
+        # Trustee from notice text when raw_json didn't supply one
+        if not out["trustee"]:
+            _trustee_patterns = [
+                r'Attorneys?\s+for\s+Substitute\s+Trustee[,:\s]+([A-Z][A-Za-z&.,\s]{3,80})',
+                r'Attorneys?\s+for\s+(?:the\s+)?Trustee[,:\s]+([A-Z][A-Za-z&.,\s]{3,80})',
+                r'(?:Substitute|Successor|Current)\s+Trustee[,:\s]+([A-Z][A-Za-z&.,\s]{3,80})',
+                r'Attorney\s+for\s+(?:the\s+)?Trustee[,:\s]+([A-Z][A-Za-z&.,\s]{3,80})',
+                r'\b(?:Attorney|Trustee)[,:\s]+([A-Z][A-Za-z&.,\s]{3,60})',
+            ]
+            for _tp_pat in _trustee_patterns:
+                _tp = _re.search(_tp_pat, text)
+                if _tp:
+                    out["trustee"] = _tp.group(1).strip().rstrip(",.")
+                    break
+
+        # Law firm — line ending in a recognized entity-type suffix (handles SHAPIRO & INGLE, LLP etc.)
+        _fm = _re.search(
+            r'^([^\n]{5,90}'
+            r'(?:PLLC|P\.L\.L\.C\.|LLC|L\.L\.C\.|LLP|L\.L\.P\.'
+            r'|P\.C\.|P\.A\.|& Associates?|Law\s+(?:Office|Group|Firm))'
+            r'\.?)\s*$',
+            text,
+            _re.MULTILINE | _re.IGNORECASE,
+        )
+        if _fm:
+            out["law_firm"] = _fm.group(1).strip()
+
+        # Mailing address — "City, TN NNNNN" terminal line + up to 2 preceding lines
+        _lines = text.splitlines()
+        for _i, _ln in enumerate(_lines):
+            if _re.search(r'[A-Za-z][A-Za-z\s]{2,28},\s*TN\s+\d{5}', _ln):
+                _pre = [
+                    _lines[j].strip()
+                    for j in range(max(0, _i - 2), _i)
+                    if _lines[j].strip()
+                ]
+                out["address"] = "\n".join(_pre + [_ln.strip()])
+                break
+
+        # Sale time — "at H:MM AM/PM" anywhere in notice
+        _tm = _re.search(
+            r'\bat\s+(\d{1,2}:\d{2}\s*(?:A\.?M\.?|P\.?M\.?))',
+            text, _re.IGNORECASE,
+        )
+        if _tm:
+            out["sale_time"] = _tm.group(1).strip()
+
+        # Sale location — courthouse reference or online auction URL
+        _loc = _re.search(
+            r'(?:'
+            # online auction
+            r'(?:online\s+at\s+)([\w\./:]{8,80})'
+            r'|'
+            # courthouse door / steps / front door / entrance — grab up to "Courthouse[,.]"
+            r'(?:at\s+(?:the\s+)?)'
+            r'((?:courthouse\s+(?:door|steps?)'
+            r'|front\s+door\s+of\s+(?:the\s+)?[A-Za-z\s]{3,50}?Courthouse'
+            r'|front\s+entrance\s+of\s+(?:the\s+)?[A-Za-z\s]{3,50}?Courthouse'
+            r'|(?:north|south|east|west|main)\s+(?:door|entrance)\s+of\s+(?:the\s+)?[A-Za-z\s]{3,50}?Courthouse'
+            r'|[A-Za-z\s,\.]{3,60}?Courthouse'
+            r')(?=[,\.\s]|$))'
+            r')',
+            text, _re.IGNORECASE,
+        )
+        if _loc:
+            out["sale_location"] = (_loc.group(1) or _loc.group(2) or "").strip().rstrip(",.")
+
     except Exception:
         pass
     return out
@@ -899,6 +1216,107 @@ def _extract_lp_property_fields(lead_key: str) -> Dict[str, Optional[str]]:
     return out
 
 
+def _normalize_uw_json(raw: Any) -> Dict[str, Any]:
+    """
+    Parse and normalize a uw_json value into the canonical wrapped schema.
+
+    Handles three input shapes:
+
+      A. Canonical — already has a ``"numbers"`` dict (produced by
+         _fetch_manual_uw or to_uw_json_payload).  Returned with
+         occupancy/condition coerced to dicts.
+
+      B. Raw auto-UW — flat fields produced directly by auto_underwrite()
+         before to_uw_json_payload() wrapping.  Detected by the presence of
+         ``"manual_bid_cap"`` or ``"uw_blocker"``.  Mapped to canonical
+         structure.
+
+      C. Legacy / ad-hoc — older payloads that may contain ``"priority"``,
+         ``"title_check"``, or a flat ``"max_bid"`` outside ``numbers``.
+         Best-effort mapped; legacy keys preserved so existing renderers
+         still display them.
+
+    Returns {} on parse failure or empty input.  Never raises.
+    """
+    # ── Parse ────────────────────────────────────────────────────────────────
+    if isinstance(raw, str):
+        if not raw.strip():
+            return {}
+        try:
+            data: Dict[str, Any] = json.loads(raw)
+        except Exception:
+            return {}
+    elif isinstance(raw, dict):
+        data = dict(raw)          # shallow copy — do not mutate the caller's dict
+    else:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+
+    def _to_status_dict(v: Any) -> Dict[str, Any]:
+        if isinstance(v, dict):
+            return v
+        if v is not None and str(v).strip():
+            return {"status": str(v).strip()}
+        return {}
+
+    # ── Shape A: canonical (has a "numbers" dict) ─────────────────────────
+    if isinstance(data.get("numbers"), dict):
+        # Coerce occupancy/condition to dicts in case they slipped in as strings
+        data["occupancy"] = _to_status_dict(data.get("occupancy"))
+        data["condition"] = _to_status_dict(data.get("condition"))
+        return data
+
+    # ── Shape B: raw auto_underwrite() output (flat canonical fields) ──────
+    if "manual_bid_cap" in data or "uw_blocker" in data:
+        nums: Dict[str, Any] = {}
+        for _src, _dst in (("manual_bid_cap", "max_bid"), ("repair_estimate", "repair_estimate")):
+            _v = data.get(_src)
+            if _v is not None:
+                try:
+                    nums[_dst] = float(_v)
+                except (TypeError, ValueError):
+                    pass
+        return {
+            "numbers":      nums,
+            "occupancy":    _to_status_dict(data.get("occupancy")),
+            "condition":    _to_status_dict(data.get("condition")),
+            "exit_strategy": data.get("exit_strategy"),
+            "notes":        data.get("title_notes") or data.get("notes"),
+            "access_notes": data.get("partner_action") or data.get("access_notes"),
+            "_meta": {
+                "source":        "auto_underwrite",
+                "version":       data.get("_auto_uw_version", "v1"),
+                "uw_confidence": data.get("uw_confidence"),
+                "uw_blocker":    data.get("uw_blocker"),
+            },
+        }
+
+    # ── Shape C: legacy / ad-hoc ──────────────────────────────────────────
+    nums = {}
+    for _k in ("max_bid", "repair_estimate"):
+        _v = data.get(_k)
+        if _v is not None:
+            try:
+                nums[_k] = float(_v)
+            except (TypeError, ValueError):
+                nums[_k] = _v
+    if "avm_confidence" in data:
+        nums["avm_confidence"] = data["avm_confidence"]
+    return {
+        "numbers":       nums or (data.get("numbers") or {}),
+        "occupancy":     _to_status_dict(data.get("occupancy")),
+        "condition":     _to_status_dict(data.get("condition")),
+        "exit_strategy": data.get("exit_strategy"),
+        "notes":         data.get("notes") or data.get("title_notes"),
+        "access_notes":  data.get("access_notes"),
+        "_meta":         data.get("_meta") or {"source": "legacy"},
+        # Preserve legacy-only keys so existing renderers still display them
+        "priority":      data.get("priority"),
+        "title_check":   data.get("title_check"),
+    }
+
+
 def _fetch_manual_uw(lead_key: str) -> Optional[Dict[str, Any]]:
     """
     Query manual_underwriting for the latest row for this lead.
@@ -913,7 +1331,7 @@ def _fetch_manual_uw(lead_key: str) -> Optional[Dict[str, Any]]:
         _con.row_factory = _sq3.Row
         try:
             _row = _con.execute(
-                "SELECT value_low, value_high, max_bid, occupancy, condition, strategy, notes"
+                "SELECT value_low, value_high, max_bid, occupancy, condition, strategy, notes, analyst"
                 " FROM manual_underwriting WHERE lead_key = ? ORDER BY id DESC LIMIT 1",
                 (lead_key,),
             ).fetchone()
@@ -938,7 +1356,13 @@ def _fetch_manual_uw(lead_key: str) -> Optional[Dict[str, Any]]:
                 "condition":     {"status": _row["condition"]} if _row["condition"] else {},
                 "exit_strategy": _row["strategy"],
                 "notes":         _row["notes"],
-                "_meta":         {"source": "manual_underwriting"},
+                "_meta": {
+                    "source": (
+                        "auto_underwrite"
+                        if (_row["analyst"] or "") == "auto_underwrite_v1"
+                        else "manual_underwriting"
+                    ),
+                },
             }
         except Exception:
             return None
@@ -949,6 +1373,164 @@ def _fetch_manual_uw(lead_key: str) -> Optional[Dict[str, Any]]:
 
 
 # ─── Page renderers ───────────────────────────────────────────────────────────
+
+def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
+    """
+    Compact Auction Snapshot box — top of Page 1.
+    Lets an auctioneer read the deal in ~5 seconds.
+    All values pulled from fields already present; nothing fabricated.
+    """
+    c = doc.c
+
+    # ── Gather display values ────────────────────────────────────────────────
+    _addr    = _val(fields.get("address"), "Address Unavailable")
+    _county  = _val(fields.get("county"), "—")
+    _dist    = _distress_label(fields)
+    _dts     = fields.get("dts_days")
+    _dts_str = f"{_dts} days" if _dts is not None else "Unknown"
+
+    _low  = fields.get("value_anchor_low")
+    _high = fields.get("value_anchor_high")
+    _mid  = fields.get("value_anchor_mid")
+    if _low is not None and _high is not None:
+        try:
+            _val_str = f"{_fmt_cur(float(_low))} \u2013 {_fmt_cur(float(_high))}"
+        except (TypeError, ValueError):
+            _val_str = "Pending Review"
+    elif _mid is not None:
+        _val_str = _fmt_cur(_mid)
+    elif _low is not None:
+        _val_str = _fmt_cur(_low)
+    else:
+        _val_str = "Pending Review"
+
+    # Target Bid: UW max bid → AVM Low × 85% → "Not Set"
+    _uw_s      = _normalize_uw_json(fields.get("uw_json"))
+    _uw_s_nums = _uw_s.get("numbers") if isinstance(_uw_s.get("numbers"), dict) else {}
+    _mb_s      = _uw_s_nums.get("max_bid")
+    try:
+        _bid_str = f"${float(_mb_s):,.0f}" if _mb_s is not None else ""
+    except (TypeError, ValueError):
+        _bid_str = ""
+    if not _bid_str and _low is not None:
+        try:
+            _bid_str = f"${float(_low) * 0.85:,.0f}"
+        except (TypeError, ValueError):
+            pass
+    if not _bid_str:
+        _bid_str = "Not Set"
+
+    _uw_s_occ  = _uw_s.get("occupancy")  if isinstance(_uw_s.get("occupancy"),  dict) else {}
+    _uw_s_cond = _uw_s.get("condition")  if isinstance(_uw_s.get("condition"),  dict) else {}
+    _occ_str   = str(_uw_s_occ.get("status")  or "Not Observed")
+    _cond_str  = str(_uw_s_cond.get("status") or "Not Observed")
+
+    # Key Risk: first HIGH or MED flag; fall back to first flag
+    _flags    = _risk_flags(fields)
+    _risk_str = "None Triggered"
+    for _ft, _sv in _flags:
+        if _sv in ("HIGH", "MED"):
+            _risk_str = _ft[:50]
+            break
+    if _risk_str == "None Triggered" and _flags:
+        _risk_str = _flags[0][0][:50]
+
+    # ── Box geometry ─────────────────────────────────────────────────────────
+    _HDR_H  = 17
+    _ROW_H  = 14
+    _PAD_X  = 9
+    _PAD_Y  = 7
+    _N_ROWS = 5            # address + 4 data rows
+    _BOX_H  = _HDR_H + _PAD_Y + (_ROW_H * _N_ROWS) + _PAD_Y + 12   # +12 for Key Risk wrap
+
+    if doc.space_left() < (_BOX_H + 16):
+        doc.new_page()
+
+    _btop = doc.y
+    _by   = _btop - _BOX_H
+
+    # Outer box — subtle gray fill
+    c.setStrokeColor(_LINE)
+    c.setLineWidth(0.7)
+    c.setFillColor(_TILE_BG)
+    c.roundRect(ML, _by, CW, _BOX_H, 6, fill=1, stroke=1)
+
+    # Header band — navy
+    c.setFillColor(_NAVY)
+    c.roundRect(ML, _btop - _HDR_H, CW, _HDR_H, 6, fill=1, stroke=0)
+    c.setFont("Helvetica-Bold", 8.5)
+    c.setFillColor(_WHITE)
+    c.drawString(ML + _PAD_X, _btop - _HDR_H + 5.5, "OPPORTUNITY SNAPSHOT")
+
+    # Two-column grid
+    _LBL_W = 88               # label column width
+    _COL_W = CW / 2           # 252 pt each column
+    _lx1   = ML + _PAD_X
+    _lx2   = ML + _COL_W + _PAD_X
+    _cy    = _btop - _HDR_H - _PAD_Y - 2
+
+    def _snap_kv(
+        y: float,
+        lbl1: str, val1: str,
+        lbl2: str = "", val2: str = "",
+        bold1: bool = False,
+        vc1=None,
+    ) -> None:
+        c.setFont("Helvetica-Bold", 7.5)
+        c.setFillColor(_GRAY)
+        c.drawString(_lx1, y, lbl1)
+        c.setFont("Helvetica-Bold" if bold1 else "Helvetica", 7.5)
+        c.setFillColor(vc1 or _SLATE)
+        c.drawString(_lx1 + _LBL_W, y, str(val1)[:44])
+        if lbl2:
+            c.setFont("Helvetica-Bold", 7.5)
+            c.setFillColor(_GRAY)
+            c.drawString(_lx2, y, lbl2)
+            c.setFont("Helvetica", 7.5)
+            c.setFillColor(_SLATE)
+            c.drawString(_lx2 + _LBL_W, y, str(val2)[:44])
+
+    # Row 1: Address — full-width, bold navy
+    c.setFont("Helvetica-Bold", 7.5)
+    c.setFillColor(_GRAY)
+    c.drawString(_lx1, _cy, "Address")
+    c.setFont("Helvetica-Bold", 7.5)
+    c.setFillColor(_NAVY)
+    c.drawString(_lx1 + _LBL_W, _cy, _addr[:72])
+    _cy -= _ROW_H
+
+    # Row 2: County | Distress Type
+    _snap_kv(_cy, "County", _county, "Distress Type", _dist)
+    _cy -= _ROW_H
+
+    # Row 3: Auction in | Market Value
+    _snap_kv(_cy, "Auction in", _dts_str, "Market Value", _val_str, bold1=True)
+    _cy -= _ROW_H
+
+    # Row 4: Target Bid | Occupancy
+    _bid_color = _GREEN if _bid_str != "Not Set" else _AMBER
+    _snap_kv(_cy, "Target Bid", _bid_str, "Occupancy", _occ_str, bold1=True, vc1=_bid_color)
+    _cy -= _ROW_H
+
+    # Row 5: Condition (left) | Key Risk (right, wraps up to 2 lines)
+    c.setFont("Helvetica-Bold", 7.5)
+    c.setFillColor(_GRAY)
+    c.drawString(_lx1, _cy, "Condition")
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(_SLATE)
+    c.drawString(_lx1 + _LBL_W, _cy, str(_cond_str)[:44])
+    c.setFont("Helvetica-Bold", 7.5)
+    c.setFillColor(_GRAY)
+    c.drawString(_lx2, _cy, "Key Risk")
+    c.setFont("Helvetica", 7.5)
+    c.setFillColor(_SLATE)
+    _rk_w = _COL_W - _PAD_X - _LBL_W - 4
+    for _ri, _rl in enumerate(_wrap(_risk_str, "Helvetica", 7.5, _rk_w)[:2]):
+        c.drawString(_lx2 + _LBL_W, _cy - (_ri * 10), _rl)
+
+    doc.y -= _BOX_H
+    doc.gap(10)
+
 
 def _page1_executive(
     doc: _Doc,
@@ -970,16 +1552,17 @@ def _page1_executive(
     else:
         loc = state
     doc.cover_header(addr, loc)
-    doc.page_header("Executive Summary — Acquisition Snapshot", subtitle=loc)
+    # Seal the gap between cover_header's bottom (y≈734) and page_header's band (y≈752)
+    # so the location line drawn by cover_header does not bleed through.
+    doc.c.setFillColor(_NAVY)
+    doc.c.rect(0, PAGE_H - 64, PAGE_W, 26, fill=1, stroke=0)
+    doc.page_header("Executive Summary")
+
+    # Auction Snapshot — compact 5-second read box for auctioneer
+    _draw_auction_snapshot(doc, fields)
 
     # Parse UW data once — used across multiple page-1 sections
-    _uw: Dict[str, Any] = {}
-    try:
-        _uw_raw = fields.get("uw_json") or ""
-        if _uw_raw:
-            _uw = json.loads(_uw_raw) if isinstance(_uw_raw, str) else (dict(_uw_raw) if isinstance(_uw_raw, dict) else {})
-    except Exception:
-        pass
+    _uw: Dict[str, Any] = _normalize_uw_json(fields.get("uw_json"))
     def _uw_obj(k: str) -> Dict[str, Any]:
         v = _uw.get(k)
         return v if isinstance(v, dict) else {}
@@ -989,8 +1572,12 @@ def _page1_executive(
     _uw_notes = str(_uw.get("access_notes") or _uw.get("notes") or "").strip()
 
     # 1) Property Overview
-    doc.section("Property Overview")
+    doc.section("Opportunity Snapshot")
     doc.kv("Address",      addr)
+    _addr_raw = (fields.get("address") or "").strip()
+    if _addr_raw:
+        from urllib.parse import quote_plus as _qp
+        doc.kv("Google Maps", f"https://maps.google.com/?q={_qp(_addr_raw)}", vc=_GRAY)
     doc.kv("County",       _val(fields.get("county")))
     doc.kv("Property Type", _val(fields.get("property_type")))
     doc.kv("Year Built",   _val(fields.get("year_built")))
@@ -1002,20 +1589,22 @@ def _page1_executive(
             pass
     doc.gap(6)
 
-    # 2) Distress & Timeline
-    doc.section("Distress & Timeline")
-    doc.kv("Distress Lane",     _val(fields.get("distress_lane")))
+    # 2) Why This Property Is in Distress
+    doc.section("Auction Trigger")
+    doc.kv("Distress Type",     _distress_label(fields))
     doc.kv("Sale Date",         _val(fields.get("sale_date_iso") or fields.get("sale_date")))
-    doc.kv("Days to Sale",      _val(fields.get("dts_days")), bold_v=True)
+    doc.kv("Sale Time",         _val(fields.get("sale_time")))
+    _dts_raw = fields.get("dts_days")
+    doc.kv("Auction in",        f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
     doc.kv("Enrichment Status", _val(fields.get("attom_status")))
     doc.gap(6)
 
-    # 3) Valuation Snapshot
+    # 3) Estimated Market Value
     low        = fields.get("value_anchor_low")
     mid        = fields.get("value_anchor_mid")
     high       = fields.get("value_anchor_high")
     spread_pct = fields.get("spread_pct")
-    doc.section("Valuation Snapshot")
+    doc.section("Value Range")
     # Always show manual UW value when present — not gated on AVM being absent
     _uw_avm_conf = str(_uw_nums.get("avm_confidence") or "").strip()
     _mb_raw = _uw_nums.get("max_bid")
@@ -1024,14 +1613,14 @@ def _page1_executive(
     except (TypeError, ValueError):
         _uw_bid_fmt = str(_mb_raw).strip() if _mb_raw is not None else ""
     if _uw_avm_conf:
-        doc.kv("Manual UW Value", _uw_avm_conf, bold_v=True)
+        doc.kv("Appraiser Estimate", _uw_avm_conf, bold_v=True)
         doc.kv("Valuation Source", "Manual Underwriting")
     elif low is None and mid is None and high is None:
-        doc.body("Value: NEEDS UW (no ATTOM yet)", size=8.5, color=_AMBER)
-    doc.kv("AVM Low",     _fmt_cur(low))
-    doc.kv("AVM Mid",     _fmt_cur(mid))
-    doc.kv("AVM High",    _fmt_cur(high))
-    doc.kv("AVM Spread",  _fmt_pct(spread_pct) if spread_pct is not None else "N/A")
+        doc.body("Value: Pending Review (no property data yet)", size=8.5, color=_AMBER)
+    doc.kv("Value Low",    _fmt_cur(low))
+    doc.kv("Value Mid",    _fmt_cur(mid))
+    doc.kv("Value High",   _fmt_cur(high))
+    doc.kv("Value Spread", _fmt_pct(spread_pct) if spread_pct is not None else "N/A")
     if spread_pct is not None:
         if spread_pct <= 0.10:
             _val_conf = "HIGH"
@@ -1041,27 +1630,35 @@ def _page1_executive(
             _val_conf = "LOW"
     else:
         _val_conf = "UNKNOWN"
-    doc.kv("Valuation Confidence", _val_conf)
+    doc.kv("Value Confidence", _val_conf)
+    doc.kv("Auction Demand",      _auction_liquidity(fields))
     doc.gap(6)
 
     # 4) Equity Position
-    doc.section("Equity Position")
+    doc.section("Equity / Debt Context")
     _lien = _extract_lien_skeleton(fields)
     if _lien["equity_proxy_low"] is not None:
         doc.kv("Equity Proxy (AVM Low - Total Orig)", f"${_lien['equity_proxy_low']:,.0f}", lw=200)
+        try:
+            _avm_low_p1 = fields.get("value_anchor_low")
+            if _avm_low_p1 is not None and float(_avm_low_p1) > 0:
+                _eq_pct_p1 = _lien["equity_proxy_low"] / float(_avm_low_p1) * 100
+                doc.kv("Equity Proxy %", f"{_eq_pct_p1:.1f}%")
+        except (TypeError, ValueError):
+            pass
     elif _lien["total_amount"] is not None:
         doc.kv("Total Orig Mortgages", f"${_lien['total_amount']:,.0f}")
         doc.body("Equity proxy unavailable — verify AVM low + title.", size=8.5, color=_AMBER)
     else:
         doc.body(
-            "Mortgage position unavailable via automated sources. Independent title verification required prior to bid execution.",
+            "Mortgage data not available. Verify title independently before bidding.",
             size=8.5,
             color=_AMBER,
         )
     doc.gap(6)
 
-    # 5) Top Risk Flags
-    doc.section("Top Risk Flags")
+    # 5) Risk Flags
+    doc.section("Risk Flags")
     flags = _risk_flags(fields)
     if not flags:
         doc.bullet("No automated red flags triggered.", color=_GREEN)
@@ -1070,9 +1667,9 @@ def _page1_executive(
         for flag_text, sev in flags[:3]:
             doc.bullet(f"[{sev}] {flag_text}", color=sev_color.get(sev, _SLATE))
     if _uw_occ.get("status"):
-        doc.kv("Occupancy (UW)", str(_uw_occ["status"]), bold_v=True)
+        doc.kv("Occupancy (Observed)", str(_uw_occ["status"]), bold_v=True)
     if _uw_cond.get("status"):
-        doc.kv("Condition (UW)", str(_uw_cond["status"]), bold_v=True)
+        doc.kv("Property Condition", str(_uw_cond["status"]), bold_v=True)
     doc.gap(6)
 
     # 6) Bid Guidance
@@ -1081,22 +1678,78 @@ def _page1_executive(
         try:
             cap = float(low) * 0.85
             doc.kv(
-                "Indicative Conservative Bid Cap",
+                "Conservative Bid Cap",
                 f"${cap:,.0f}  (subject to title + inspection)",
                 lw=200,
             )
         except (TypeError, ValueError):
-            doc.body("Bid cap unavailable — AVM low not numeric.", size=8.5, color=_AMBER)
+            doc.body("Bid cap unavailable — value data not numeric.", size=8.5, color=_AMBER)
         if _uw_bid_fmt:
-            doc.kv("UW Max Bid", _uw_bid_fmt, bold_v=True)
+            doc.kv("Recommended Max Bid", _uw_bid_fmt, bold_v=True)
     elif _uw_bid_fmt:
-        doc.kv("Recommended Max Bid (Manual UW)", _uw_bid_fmt, lw=210, bold_v=True)
+        doc.kv("Recommended Max Bid", _uw_bid_fmt, lw=200, bold_v=True)
     else:
-        doc.body("AVM low unavailable — bid cap cannot be computed.", size=8.5, color=_AMBER)
+        doc.body("Value data unavailable — bid cap cannot be computed.", size=8.5, color=_AMBER)
     doc.gap(8)
 
-    # 7) Notice Contact (Foreclosure Notice)
-    doc.section("Notice Contact (Foreclosure Notice)")
+    # 7) Bid Range
+    try:
+        _bs_target: Optional[float] = None
+        # Prefer UW max bid (numeric); fall back to AVM low * 0.85
+        if _mb_raw is not None:
+            try:
+                _bs_target = float(_mb_raw)
+            except (TypeError, ValueError):
+                pass
+        if _bs_target is None and low is not None:
+            try:
+                _bs_target = float(low) * 0.85
+            except (TypeError, ValueError):
+                pass
+
+        if _bs_target is not None:
+            _bs_target_r = round(_bs_target)
+            _bs_walk     = round(_bs_target * 0.90)
+
+            # Aggressive bid: tighter cap when market is liquid + near-term sale
+            try:
+                _dts_int: Optional[int] = (
+                    int(fields["dts_days"]) if fields.get("dts_days") is not None else None
+                )
+            except (TypeError, ValueError):
+                _dts_int = None
+            try:
+                _sp_f: Optional[float] = float(spread_pct) if spread_pct is not None else None
+            except (TypeError, ValueError):
+                _sp_f = None
+            try:
+                _avm_low_bs: Optional[float] = float(low) if low is not None else None
+            except (TypeError, ValueError):
+                _avm_low_bs = None
+
+            _tight_market = (
+                _sp_f is not None and _sp_f <= 0.12
+                and _dts_int is not None and 21 <= _dts_int <= 60
+            )
+            if _avm_low_bs is not None:
+                if _tight_market:
+                    _bs_agg: Optional[int] = round(min(_avm_low_bs * 0.90, _bs_target * 1.08))
+                else:
+                    _bs_agg = round(min(_avm_low_bs * 0.87, _bs_target * 1.05))
+            else:
+                _bs_agg = None
+
+            doc.section("Bid Range")
+            if _bs_agg is not None:
+                doc.kv("Aggressive Bid", f"${_bs_agg:,}", bold_v=True)
+            doc.kv("Target Bid",    f"${_bs_target_r:,}", bold_v=True)
+            doc.kv("Walk-Away Bid", f"${_bs_walk:,}")
+            doc.gap(8)
+    except Exception:
+        pass
+
+    # 8) Foreclosure Contact
+    doc.section("Foreclosure Contact Path")
     _lead_key = fields.get("lead_key") or ""
     _nc = _fetch_notice_contact(_lead_key)
     _ft = _fetch_prov_fields(
@@ -1104,15 +1757,22 @@ def _page1_executive(
         ["ft_trustee_firm", "ft_trustee_person", "ft_trustee_name_raw"],
     )
 
-    # Supplement from LP notice artifact — fills phone/email/trustee when
-    # the lead_field_provenance table has no notice contact rows yet.
+    # Supplement from LP notice artifact — fills all contact fields when
+    # the lead_field_provenance table has no foreclosure contact rows yet.
     _lp = _extract_lp_contact(_lead_key)
     if _lp.get("phone") and not _nc.get("notice_phone"):
         _nc["notice_phone"] = _lp["phone"]
     if _lp.get("email") and not _nc.get("notice_email"):
         _nc["notice_email"] = _lp["email"]
+    if _lp.get("law_firm") and not _nc.get("notice_law_firm"):
+        _nc["notice_law_firm"] = _lp["law_firm"]
+    if _lp.get("address") and not _nc.get("notice_trustee_address"):
+        _nc["notice_trustee_address"] = _lp["address"]
+    # sale_time / sale_location live only in _lp (not in provenance table yet)
+    _nc_sale_time     = _lp.get("sale_time")
+    _nc_sale_location = _lp.get("sale_location")
 
-    # Build trustee display: priority ft > notice > lp_rj, sanitize each candidate.
+    # Build trustee display: priority ft > notice > lp_rj > lp_text
     _trustee_display: Optional[str] = None
     # a) ft_trustee_firm (+ " / " + ft_trustee_person if both present)
     _ft_firm   = _sanitize_trustee(_ft.get("ft_trustee_firm"))
@@ -1129,26 +1789,53 @@ def _page1_executive(
     if not _trustee_display:
         _trustee_display = _sanitize_trustee(_lp.get("trustee"))
 
-    _nc_has_any = bool(_trustee_display) or any(
-        _nc.get(k) for k in ("notice_phone", "notice_email", "notice_trustee_address")
+    # Tier-2 / Tier-3 contact enrichment results (written by contact_enricher)
+    _enrich_prov = _fetch_prov_fields(
+        _lead_key,
+        ["trustee_phone_public", "trustee_phone_source",
+         "owner_phone_primary", "owner_phone_secondary", "owner_phone_source"],
+    )
+    _t2_phone  = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
+    _t3_phone  = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
+    _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
+
+    _nc_has_any = (
+        bool(_trustee_display)
+        or bool(_nc_sale_time)
+        or bool(_nc_sale_location)
+        or bool(_t2_phone)
+        or bool(_t3_phone)
+        or any(
+            _nc.get(k) for k in (
+                "notice_phone", "notice_email", "notice_trustee_address", "notice_law_firm",
+            )
+        )
     )
     if _nc_has_any:
         if _trustee_display:
-            doc.kv("Trustee / Attorney", _trustee_display, bold_v=True)
-        if _nc.get("notice_trustee_address"):
-            doc.kv("Mailing Address", _nc["notice_trustee_address"])
-        if _nc.get("notice_email"):
-            doc.kv("Notice Email", _nc["notice_email"])
-        if _nc.get("notice_phone"):
-            doc.kv("Notice Phone", _nc["notice_phone"], bold_v=True)
+            doc.kv("Trustee / Firm", _trustee_display, bold_v=True)
+        if _nc.get("notice_law_firm") and _nc["notice_law_firm"] != _trustee_display:
+            doc.kv("Law Firm", _nc["notice_law_firm"])
+        # Phone priority: notice-native > trustee firm table (T2)
+        _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
+        if _ph_clean:
+            doc.kv("Phone", _ph_clean, bold_v=True)
+        elif _t2_phone:
+            doc.kv("Trustee Phone", _t2_phone, bold_v=True)
+        # Owner phone (T3) — always shown when present, separate row
+        if _t3_phone:
+            _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
+            doc.kv(_t3_lbl, _t3_phone, bold_v=True)
+        if _nc_sale_location:
+            doc.kv("Sale Location", _nc_sale_location, lw=110)
     else:
         doc.bullet("No contact found in notice artifacts yet.")
     doc.gap(6)
 
-    # 7) Execution Notes — exit strategy + analyst notes from Manual UW
+    # 7) Auctioneer Notes — exit strategy + analyst notes from underwriting
     _es_p1 = str(_uw.get("exit_strategy") or "").strip()
     if _es_p1 or _uw_notes:
-        doc.section("Execution Notes")
+        doc.section("Auctioneer Notes")
         if _es_p1:
             _STRAT_P1 = {
                 "auction_retail": "Auction / Retail",
@@ -1190,13 +1877,15 @@ def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: An
     c.rect(x, y_top - title_h, w, title_h, fill=1, stroke=0)
     c.setFont("Helvetica-Bold", 8.5)
     c.setFillColor(_NAVY)
-    c.drawString(x + 8, y_top - 11.5, "DUE DILIGENCE CHECKLIST (PRE-BID)")
+    c.drawString(x + 8, y_top - 11.5, "PRE-BID CHECKLIST")
 
     # Content
     c.setFont("Helvetica", 8.25)
     c.setFillColor(_SLATE)
 
-    lane = str(fields.get("distress_lane") or "").strip()
+    lane = _distress_label(fields)
+    if lane == "Unknown":
+        lane = ""
     sale = str(fields.get("sale_date_iso") or fields.get("sale_date") or "").strip()
 
     bid_cap_txt = "N/A"
@@ -1206,15 +1895,15 @@ def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: An
     except Exception:
         bid_cap_txt = "N/A"
     if bid_cap_txt == "N/A":
-        try:
-            _uw_bc = json.loads(fields.get("uw_json") or "{}") or {}
-            if isinstance(_uw_bc, dict):
-                _uw_bc_nums = _uw_bc.get("numbers") if isinstance(_uw_bc.get("numbers"), dict) else {}
-                _mb = _uw_bc_nums.get("max_bid")
-                if _mb is not None:
+        _uw_bc = _normalize_uw_json(fields.get("uw_json"))
+        if _uw_bc:
+            _uw_bc_nums = _uw_bc.get("numbers") if isinstance(_uw_bc.get("numbers"), dict) else {}
+            _mb = _uw_bc_nums.get("max_bid")
+            if _mb is not None:
+                try:
                     bid_cap_txt = f"${float(_mb):,.0f} (Manual UW)"
-        except Exception:
-            pass
+                except (TypeError, ValueError):
+                    pass
 
     lines = [
         "\u25a1 Title + lien payoff verified (full chain, open liens, HOA if applicable)",
@@ -1249,24 +1938,18 @@ def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: An
 
 
 def _page2_valuation(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -> None:
-    doc.page_header("Valuation Analysis")
+    doc.page_header("Value & Bid Framework")
 
     low  = fields.get("value_anchor_low")
     mid  = fields.get("value_anchor_mid")
     high = fields.get("value_anchor_high")
 
-    doc.section("Valuation Range")
+    doc.section("Estimated Market Value")
     if low is not None and mid is not None and high is not None:
         _draw_val_bar(doc, float(low), float(mid), float(high))
     else:
         # Fall back to Manual UW numbers when ATTOM AVM is absent
-        _uw2: Dict[str, Any] = {}
-        try:
-            _uw2 = json.loads(fields.get("uw_json") or "{}") or {}
-            if not isinstance(_uw2, dict):
-                _uw2 = {}
-        except Exception:
-            pass
+        _uw2: Dict[str, Any] = _normalize_uw_json(fields.get("uw_json"))
         _uw2_nums = _uw2.get("numbers") if isinstance(_uw2.get("numbers"), dict) else {}
         _uw2_conf = str(_uw2_nums.get("avm_confidence") or "").strip()
         _uw2_bid_r = _uw2_nums.get("max_bid")
@@ -1275,28 +1958,26 @@ def _page2_valuation(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -
         except (TypeError, ValueError):
             _uw2_bid = ""
         if _uw2_conf or _uw2_bid:
-            doc.kv("Value Basis", "Manual Underwriting", bold_v=True)
+            doc.kv("Value Source", "Underwriting Estimate", bold_v=True)
             if _uw2_conf:
-                doc.kv("Manual UW Value Anchor", _uw2_conf, bold_v=True)
+                doc.kv("Appraiser Estimate", _uw2_conf, bold_v=True)
             if _uw2_bid:
                 doc.kv("Recommended Max Bid", _uw2_bid, bold_v=True)
         else:
             doc.body("Valuation range data unavailable.", size=9, color=_AMBER)
     doc.gap(10)
 
-    doc.section("Auction Pricing Guidance")
+    doc.section("Pricing Guidance")
     doc.body(brief.get("auction_positioning", "Pricing guidance unavailable."), size=9, leading=13)
     doc.gap(10)
 
-    doc.section("Liquidity Analysis")
+    doc.section("Market Liquidity")
     doc.body(brief.get("liquidity_analysis", "Liquidity analysis unavailable."), size=9, color=_AMBER, leading=13)
     doc.gap(10)
 
-    doc.section("Internal Comps Proxy (SQLite)")
     comps = fields.get("internal_comps") or []
-    if not comps:
-        doc.body("No comparable internal auction leads currently in the FALCO database for this geography and valuation band.", size=9, color=_GRAY)
-    else:
+    if comps:
+        doc.section("Comparable Properties")
         for comp in comps[:6]:
             avm = comp.get("avm_value") or comp.get("avm_low")
             avm_str  = f"${float(avm):,.0f}" if avm is not None else "N/A"
@@ -1305,6 +1986,45 @@ def _page2_valuation(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -
             addr_str = (str(comp.get("address") or "")).strip() or "—"
             doc.body(
                 f"AVM {avm_str}  |  DTS {dts_str}  |  {date_str}  |  {addr_str}",
+                size=8, color=_SLATE, leading=12,
+            )
+    else:
+        doc.section("Comparable Properties")
+        _cty_raw = (fields.get("county") or "").strip()
+        if _cty_raw.lower().endswith(" county"):
+            _cty_raw = _cty_raw[:-7].rstrip()
+        _cty_disp = _cty_raw or "this"
+        doc.body(
+            "No comparable auction records currently on file "
+            f"for {_cty_disp} County in this valuation band. "
+            "Independent MLS and auction-history research is required before bidding.",
+            size=9, color=_GRAY, leading=13,
+        )
+        # Market context — derived only from verified packet fields, no fabrication
+        _ctx_parts: List[str] = []
+        _mc_county = (fields.get("county") or "").strip()
+        _mc_ptype  = (fields.get("property_type") or "").strip()
+        _mc_sqft   = fields.get("building_area_sqft")
+        _mc_low    = fields.get("value_anchor_low")
+        _mc_mid    = fields.get("value_anchor_mid")
+        _mc_high   = fields.get("value_anchor_high")
+        _mc_spread = (fields.get("spread_band") or "").upper()
+        if _mc_county:
+            _ctx_parts.append(f"County: {_mc_county}")
+        if _mc_ptype:
+            _ctx_parts.append(f"Type: {_mc_ptype}")
+        if _mc_sqft is not None:
+            _ctx_parts.append(f"Living area: {int(_mc_sqft):,} sqft")
+        if _mc_low is not None and _mc_high is not None:
+            _ctx_parts.append(f"AVM range: {_fmt_cur(_mc_low)} \u2013 {_fmt_cur(_mc_high)}")
+        elif _mc_mid is not None:
+            _ctx_parts.append(f"AVM mid: {_fmt_cur(_mc_mid)}")
+        if _mc_spread:
+            _ctx_parts.append(f"Spread: {_mc_spread}")
+        if _ctx_parts:
+            doc.gap(6)
+            doc.body(
+                "Property context:  " + "  \u2022  ".join(_ctx_parts),
                 size=8, color=_SLATE, leading=12,
             )
 
@@ -1335,13 +2055,21 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
         if isinstance(_ow, dict):
             _ow1 = _ow.get("owner1") or {}
             if isinstance(_ow1, dict):
-                full = _ow1.get("fullName") or " ".join(
-                    filter(None, [_ow1.get("firstName"), _ow1.get("lastName")])
-                ) or None
+                full = (
+                    _ow1.get("fullname")        # current shape (lowercase key)
+                    or _ow1.get("fullName")     # old shape
+                    or " ".join(filter(None, [
+                        _ow1.get("firstnameandmi") or _ow1.get("firstName"),
+                        _ow1.get("lastname")       or _ow1.get("lastName"),
+                    ])).strip()
+                    or None
+                )
                 out["owner_name"] = full or None
-            _mail = _ow.get("mailAddress") or {}
-            if isinstance(_mail, dict):
-                out["owner_mail"] = _mail.get("oneLine") or None
+            out["owner_mail"] = (
+                _ow.get("mailingaddressoneline")                  # current shape
+                or (_ow.get("mailAddress") or {}).get("oneLine")  # old shape
+                or None
+            )
         _sale = owner_blob.get("sale") or {}
         if isinstance(_sale, dict):
             out["last_sale_date"] = _sale.get("saleTransDate") or None
@@ -1354,8 +2082,9 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
     if isinstance(mort_blob, dict):
         _mort = mort_blob.get("mortgage") or {}
         if isinstance(_mort, dict):
+            # Old shape: firstMortgage sub-object
             _fm = _mort.get("firstMortgage") or {}
-            if isinstance(_fm, dict):
+            if isinstance(_fm, dict) and _fm:
                 _ldr = _fm.get("lender") or {}
                 out["mortgage_lender"] = (
                     _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
@@ -1367,6 +2096,26 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
                     except (TypeError, ValueError):
                         out["mortgage_amount"] = str(_amt)
                 out["mortgage_date"] = _fm.get("recordingDate") or None
+            # Current shape: direct fields on mortgage.mortgage
+            if not out["mortgage_lender"]:
+                _ldr = _mort.get("lender") or {}
+                if isinstance(_ldr, dict):
+                    out["mortgage_lender"] = (
+                        _ldr.get("lastname") or _ldr.get("institution")
+                    ) or None
+                elif _ldr:
+                    out["mortgage_lender"] = str(_ldr)
+            if not out["mortgage_amount"]:
+                _amt = _mort.get("amount")
+                if _amt is not None:
+                    try:
+                        out["mortgage_amount"] = f"${float(_amt):,.0f}"
+                    except (TypeError, ValueError):
+                        out["mortgage_amount"] = str(_amt)
+            if not out["mortgage_date"]:
+                out["mortgage_date"] = (
+                    _mort.get("date") or _mort.get("recordingDate") or None
+                )
 
     return out
 
@@ -1394,8 +2143,9 @@ def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(mort_blob, dict):
         _mort = mort_blob.get("mortgage") or {}
         if isinstance(_mort, dict):
+            # Old shape: firstMortgage sub-object
             _fm = _mort.get("firstMortgage") or {}
-            if isinstance(_fm, dict):
+            if isinstance(_fm, dict) and _fm:
                 _ldr = _fm.get("lender") or {}
                 out["first_lender"] = (
                     _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
@@ -1404,6 +2154,22 @@ def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
                     out["first_amount"] = float(_fm["amount"]) if _fm.get("amount") is not None else None
                 except (TypeError, ValueError):
                     pass
+            # Current shape: direct fields on mortgage.mortgage
+            if out["first_lender"] is None:
+                _ldr = _mort.get("lender") or {}
+                if isinstance(_ldr, dict):
+                    out["first_lender"] = (
+                        _ldr.get("lastname") or _ldr.get("institution")
+                    ) or None
+                elif _ldr:
+                    out["first_lender"] = str(_ldr)
+            if out["first_amount"] is None:
+                _da = _mort.get("amount")
+                if _da is not None:
+                    try:
+                        out["first_amount"] = float(_da)
+                    except (TypeError, ValueError):
+                        pass
             _sm = _mort.get("secondMortgage") or {}
             if isinstance(_sm, dict):
                 try:
@@ -1450,6 +2216,48 @@ def _draw_lien_skeleton_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     doc.kv("Equity Proxy (AVM Low - Total Orig)",
            f"${data['equity_proxy_low']:,.0f}" if data["equity_proxy_low"] is not None else "Not available",
            lw=200)
+    try:
+        _avm_low_ls = fields.get("value_anchor_low")
+        if data["equity_proxy_low"] is not None and _avm_low_ls is not None and float(_avm_low_ls) > 0:
+            _eq_pct_ls = data["equity_proxy_low"] / float(_avm_low_ls) * 100
+            doc.kv("Equity Proxy %", f"{_eq_pct_ls:.1f}%")
+    except (TypeError, ValueError):
+        pass
+
+
+def _draw_value_stack_section(doc: _Doc, fields: Dict[str, Any]) -> None:
+    """
+    Compact Value / Equity Stack summary block.
+    Renders AVM range, debt basis, equity proxy, and equity %.
+    Silent no-op when no AVM anchors are present.
+    Additive — does not replace or modify the Lien Skeleton section.
+    """
+    high = fields.get("value_anchor_high")
+    mid  = fields.get("value_anchor_mid")
+    low  = fields.get("value_anchor_low")
+    if high is None and mid is None and low is None:
+        return
+    _lien   = _extract_lien_skeleton(fields)
+    debt    = _lien["total_amount"]
+    eq_prox = _lien["equity_proxy_low"]
+
+    doc.section("Value Stack")
+    if high is not None:
+        doc.kv("AVM High",     _fmt_cur(high))
+    if mid is not None:
+        doc.kv("AVM Mid",      _fmt_cur(mid))
+    if low is not None:
+        doc.kv("AVM Low",      _fmt_cur(low))
+    if debt is not None:
+        doc.kv("Debt Basis",   f"${debt:,.0f}")
+    if eq_prox is not None:
+        doc.kv("Equity Proxy", f"${eq_prox:,.0f}")
+        try:
+            if low is not None and float(low) > 0:
+                _eq_pct = eq_prox / float(low) * 100
+                doc.kv("Equity Proxy %", f"{_eq_pct:.1f}%")
+        except (TypeError, ValueError):
+            pass
 
 
 def _draw_ownership_section(doc: _Doc, fields: Dict[str, Any]) -> None:
@@ -1477,12 +2285,16 @@ def _page_property_snapshot(
     Works cleanly with or without ATTOM enrichment — only renders known fields,
     never spams 'Not available' rows.
     """
-    doc.page_header("Property Snapshot")
+    doc.page_header("Property & Location Snapshot")
 
     # ── Exterior image (only when we actually have one) ────────────────────────
     if img_path:
         _draw_hero(doc, img_path=img_path, imagery_date=fields.get("streetview_imagery_date"))
     doc.gap(4)
+
+    # ── Exterior observation note (conservative — derived from structured facts only) ──
+    doc.body(_sv_exterior_note(img_path, fields), size=7.5, color=_GRAY)
+    doc.gap(6)
 
     # ── Compact facts grid — silently skips unknown fields ─────────────────────
     doc.section("Property Facts")
@@ -1525,7 +2337,7 @@ def _page_property_snapshot(
 
 
 def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
-    doc.page_header("Property Facts")
+    doc.page_header("Property Record & Title Context")
 
     detail = fields.get("attom_detail")
     if not detail or not isinstance(detail, dict):
@@ -1540,6 +2352,8 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
         _draw_ownership_section(doc, fields)
         doc.gap(10)
         _draw_lien_skeleton_section(doc, fields)
+        doc.gap(10)
+        _draw_value_stack_section(doc, fields)
         return
 
     doc.section("Property Record")
@@ -1555,7 +2369,12 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
     _add("Year Built",       fields.get("year_built"))
     bsqft = fields.get("building_area_sqft")
     _add("Living Area",      f"{int(bsqft):,} sqft" if bsqft is not None else None)
-    _add("Lot Size",         fields.get("lot_size"))
+    _ls = fields.get("lot_size")
+    try:
+        _ls_fmt = f"{int(float(_ls)):,} sqft" if _ls is not None else None
+    except (TypeError, ValueError):
+        _ls_fmt = str(_ls) if _ls else None
+    _add("Lot Size", _ls_fmt)
     _add("Bedrooms",         fields.get("beds"))
     _add("Bathrooms",        fields.get("baths"))
     _add("Construction",     fields.get("construction_type"))
@@ -1568,23 +2387,23 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
     else:
         doc.body("Detail record present but no structured fields extracted.", size=9, color=_AMBER)
 
-    top_keys = sorted(detail.keys())[:24]
-    if top_keys:
-        doc.gap(10)
-        doc.section("Available Detail Keys (property record)")
-        doc.body(", ".join(top_keys), size=7.5, color=_GRAY)
-
     doc.gap(10)
     _draw_ownership_section(doc, fields)
     doc.gap(10)
     _draw_lien_skeleton_section(doc, fields)
+    doc.gap(10)
+    _draw_value_stack_section(doc, fields)
 
 
 def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -> None:
-    doc.page_header("Timeline & Risk Flags")
+    doc.page_header("Timing, Risk & Underwriting")
 
     doc.section("Sale Timeline")
-    doc.kv("Days to Sale",      _val(fields.get("dts_days")), bold_v=True)
+    doc.kv("Sale Date",         _val(fields.get("sale_date_iso") or fields.get("sale_date")), bold_v=True)
+    doc.kv("Sale Time",         _val(fields.get("sale_time")))
+    doc.kv("Days to Sale",      _val(fields.get("dts_days")))
+    doc.kv("Sale Location",     _val(fields.get("sale_location")), lw=110)
+    doc.kv("Sale Type",         _val(fields.get("sale_type")))
     doc.kv("Enriched At",       _val(fields.get("enriched_at")))
     doc.kv("Enrichment Status", _val(fields.get("attom_status")))
     _notice_verified = fields.get("notice_verified")
@@ -1596,7 +2415,7 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
         doc.kv("Sale Notice Verification", "UNVERIFIED")
     doc.gap(6)
 
-    doc.section("Primary Risk Drivers")
+    doc.section("Risk Factors")
     flags = _risk_flags(fields)
     if not flags:
         doc.bullet("No automated risk triggers detected.")
@@ -1610,7 +2429,7 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
     doc.gap(6)
     _draw_manual_uw_section(doc, fields)
     doc.gap(6)
-    doc.section("Capital Commit Conditions")
+    doc.section("Before You Bid")
 
     if _lien["equity_proxy_low"] is not None:
         doc.body(
@@ -1644,20 +2463,17 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     raw = fields.get("uw_json") or ""
 
     if not raw:
-        doc.section("Manual Underwriting")
+        doc.section("Underwriting Notes")
         doc.body("No manual underwriting notes recorded for this lead.", size=9, color=_AMBER)
         return
 
-    try:
-        uw = json.loads(raw) if isinstance(raw, str) else raw
-        if not isinstance(uw, dict):
-            raise ValueError("uw_json not a dict")
-    except Exception:
-        doc.section("Manual Underwriting")
+    uw = _normalize_uw_json(raw)
+    if not uw:
+        doc.section("Underwriting Notes")
         doc.body("Manual underwriting blob present but unreadable (invalid JSON).", size=9, color=_AMBER)
         return
 
-    doc.section("Manual Underwriting")
+    doc.section("Underwriting Notes")
 
     _uw_is_ready = int(uw_ready or 0) == 1
     _uw_label    = "UNDERWRITTEN" if _uw_is_ready else "NEEDS UW"
@@ -2018,13 +2834,13 @@ def _page5_scoring_appendix(
     fields: Dict[str, Any],
     img_embedded: bool = False,
 ) -> None:
-    doc.page_header("Internal Scoring Appendix")
+    doc.page_header("Qualification Appendix")
 
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
 
-    doc.section("Scoring Snapshot")
-    doc.kv("Falco Score (Internal)", _val(fields.get("falco_score_internal")), bold_v=True)
+    doc.section("Scoring Summary")
+    doc.kv("FALCO Score", _val(fields.get("falco_score_internal")), bold_v=True)
     doc.kv("Auction Readiness",      _readiness_label(readiness), vc=rc, bold_v=True)
     doc.kv("Equity Band",            _val(fields.get("equity_band")))
     doc.kv("Days to Sale",           _val(fields.get("dts_days")))
@@ -2032,7 +2848,7 @@ def _page5_scoring_appendix(
     doc.kv("AVM Confidence",         _val(fields.get("confidence")))
     doc.gap(10)
 
-    doc.section("ACQUISITION QUALIFICATION MATRIX")
+    doc.section("QUALIFICATION CHECKLIST")
     low        = fields.get("value_anchor_low")
     dts        = fields.get("dts_days")
     spread_pct = fields.get("spread_pct")
@@ -2052,15 +2868,15 @@ def _page5_scoring_appendix(
     diamond_pass = all(g for _, g in gates)
     if diamond_pass:
         doc.kv(
-            "Diamond Qualification",
-            "QUALIFIED — All threshold criteria satisfied.",
+            "Full Qualification",
+            "QUALIFIED — All criteria met.",
             vc=_GREEN,
             bold_v=True,
         )
     else:
         doc.kv(
-            "Diamond Qualification",
-            "CONDITIONAL — One or more threshold criteria not satisfied. Review gating components above.",
+            "Full Qualification",
+            "NOT FULLY QUALIFIED — One or more criteria not met. See checklist above.",
             vc=_AMBER,
             bold_v=True,
         )
@@ -2068,13 +2884,13 @@ def _page5_scoring_appendix(
 
     
     doc.section("Data Sources")
-    doc.bullet("Third-party automated valuation model (AVM)")
+    doc.bullet("Automated valuation model (AVM)")
     if fields.get("attom_detail"):
-        doc.bullet("Property record attributes (if available)")
+        doc.bullet("Property records (if available)")
     else:
-        doc.bullet("Property record attributes — not available for this lead")
-    doc.bullet("FALCO internal scoring and gating")
-    doc.bullet("SQLite lead store (address, county, timeline)")
+        doc.bullet("Property records — not available for this address")
+    doc.bullet("FALCO scoring and qualification")
+    doc.bullet("Lead records (address, county, timeline)")
     if img_embedded:
         doc.bullet("Image Source: Google Street View (static)")
 
@@ -2084,7 +2900,7 @@ def _page5_scoring_appendix(
     try:
         _prov_rows, _art_rows = _fetch_provenance_data(fields.get("lead_key") or "")
         if _prov_rows or _art_rows:
-            doc.section("Data Provenance (Appendix)")
+            doc.section("Source Log")
             _c   = doc.c
             _FSZ = 7.0
             _LH  = 10.0
@@ -2131,45 +2947,53 @@ def _page5_scoring_appendix(
         pass  # provenance section never aborts PDF build
 
     doc.page_break()
-    doc.page_header("Methodology and Data Transparency Appendix")
+    doc.page_header("Methodology & Disclaimer")
 
     doc.body(
-        "FALCO packets are produced from structured ingest, enrichment, and deterministic gating logic. "
-        "Qualification outcomes reflect rule-based thresholds rather than discretionary opinion.",
+        "This brief is produced from published property data, automated valuation models, and rule-based scoring. "
+        "Qualification results reflect fixed thresholds, not personal opinion.",
         size=9,
         leading=13,
     )
 
     doc.gap(12)
 
-    doc.section("Key Derived Metrics")
+    doc.section("How Values Are Calculated")
     doc.bullet("AVM Spread Percent = (AVM High minus AVM Low) divided by AVM Low")
     doc.bullet("Spread Classification: Tight (<=12), Normal (<=18), Wide (>18)")
-    doc.bullet("Bid Cap Guidance = AVM Low multiplied by 0.85")
-    doc.bullet("Diamond Window = 21 to 60 days to sale")
-    doc.bullet("AVM Floor Threshold = 300000 minimum")
+    doc.bullet("Bid Cap Guidance = Value Low x 0.85")
+    doc.bullet("Target Bid Window = 21 to 60 days to sale")
+    doc.bullet("Minimum Value Threshold = $300,000")
 
     doc.gap(12)
 
-    doc.section("Diamond Qualification Logic")
-    doc.bullet("Enrichment status must equal enriched")
-    doc.bullet("Auction Readiness must equal GREEN")
-    doc.bullet("Days-to-sale must fall within the Diamond Window")
-    doc.bullet("AVM Low must exceed the AVM Floor threshold")
-    doc.bullet("Spread must be less than or equal to 18 percent")
-    doc.bullet("Manual underwriting must be complete (uw_ready equals 1)")
+    doc.section("Full Qualification Criteria")
+    doc.bullet("Property data must be enriched")
+    doc.bullet("Auction readiness must be GREEN")
+    doc.bullet("Days-to-sale must be 21 to 60 days")
+    doc.bullet("Value Low must be at least $300,000")
+    doc.bullet("Value spread must be 18 percent or less")
+    doc.bullet("Underwriting must be complete")
 
     doc.gap(16)
 
     doc.section("Disclaimer")
     doc.body(
-        "This document is generated from automated data pipelines and is provided for informational purposes only. "
+        "This document is prepared from public property records, automated valuation data, and internal scoring and is provided for informational purposes only. "
         "It does not constitute investment advice, legal counsel, or a guarantee of property value. "
         "Investors must conduct independent due diligence including title search, lien verification, "
         "physical inspection, and legal review prior to any acquisition decision.",
         size=8,
         color=_GRAY,
         leading=12,
+    )
+
+    doc.gap(20)
+    doc.body(
+        "Prepared by FALCO.  Auction partner inquiries: falco.llc",
+        size=7.5,
+        color=_GRAY,
+        leading=11,
     )
 
 
@@ -2265,6 +3089,127 @@ def build_pdf_packet(fields: Dict[str, Any], out_dir: str) -> str:
             if _fv and not fields.get(_fk):
                 fields[_fk] = _fv
 
+    # Inject sale_time / sale_location from the notice artifact so both the
+    # Page-1 Why This Property Is in Distress and Page-4 Sale Timeline can render them.
+    # Respects any value already present (e.g. from ingest_event raw_json).
+    _lk_pdf = (fields.get("lead_key") or "").strip()
+    if _lk_pdf and (not fields.get("sale_time") or not fields.get("sale_location")):
+        _lp_sale = _extract_lp_contact(_lk_pdf)
+        if not fields.get("sale_time") and _lp_sale.get("sale_time"):
+            fields["sale_time"] = _lp_sale["sale_time"]
+        if not fields.get("sale_location") and _lp_sale.get("sale_location"):
+            fields["sale_location"] = _lp_sale["sale_location"]
+
+    # Hydrate property fields from ATTOM detail blob when fields are missing.
+    # Parse attom_detail JSON string → dict if needed.
+    _ad = fields.get("attom_detail")
+    if _ad and isinstance(_ad, str):
+        try:
+            _ad = json.loads(_ad)
+            fields["attom_detail"] = _ad
+        except Exception:
+            _ad = None
+
+    # Resolve the canonical detail sub-dict.
+    # fields["attom_detail"] may be the detail dict directly (current pipeline),
+    # a wrapper {"detail": {...}} (old shape), or absent — fall back to attom_raw_json.
+    _det: Dict[str, Any] = {}
+    if isinstance(_ad, dict):
+        if "identifier" in _ad or "address" in _ad or "summary" in _ad:
+            _det = _ad                          # attom_detail IS the detail dict
+        elif "detail" in _ad:
+            _det = _ad.get("detail") or {}      # wrapper shape
+    if not _det:
+        _rj = fields.get("attom_raw_json")
+        if _rj:
+            try:
+                _rb = json.loads(_rj) if isinstance(_rj, str) else _rj
+                if isinstance(_rb, dict):
+                    _det = _rb.get("detail") or {}
+            except Exception:
+                pass
+
+    if _det:
+        _d_id   = _det.get("identifier")  or {}
+        _d_addr = _det.get("address")     or {}
+        _d_sum  = _det.get("summary")     or {}
+        _d_bld  = _det.get("building")    or {}
+        _d_lot  = _det.get("lot")         or {}
+
+        def _hyd(key: str, val: Any) -> None:
+            if val is not None and str(val).strip() and not fields.get(key):
+                fields[key] = val
+
+        # APN wins unconditionally — ATTOM internal Id must not appear as parcel ID
+        _apn = _d_id.get("apn")
+        if _apn:
+            fields["property_identifier"] = _apn
+            fields["parcel_id"]           = _apn
+
+        _hyd("city",         _d_addr.get("locality"))
+        _hyd("zip",          _d_addr.get("postal1"))
+        _hyd("year_built",   _d_sum.get("yearbuilt"))
+        _hyd("property_type",
+             _d_sum.get("propertyType") or _d_sum.get("proptype") or _d_sum.get("propclass"))
+        _hyd("land_use",     _d_sum.get("propLandUse"))
+        _hyd("lot_size",     (_d_lot.get("lotsize2") if isinstance(_d_lot, dict) else None))
+
+        _bld_sz  = (_d_bld.get("size")         or {}) if isinstance(_d_bld, dict) else {}
+        _bld_rm  = (_d_bld.get("rooms")        or {}) if isinstance(_d_bld, dict) else {}
+        _bld_con = (_d_bld.get("construction") or {}) if isinstance(_d_bld, dict) else {}
+        _bld_sum = (_d_bld.get("summary")      or {}) if isinstance(_d_bld, dict) else {}
+
+        if not fields.get("building_area_sqft"):
+            for _szk in ("livingsize", "bldgsize", "grosssizeadjusted", "universalsize"):
+                _szv = _bld_sz.get(_szk)
+                if _szv is not None:
+                    try:
+                        fields["building_area_sqft"] = float(_szv)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+
+        _hyd("construction_type",
+             _bld_con.get("constructiontype") or _bld_con.get("frameType"))
+        _hyd("stories",
+             _bld_sum.get("stories") or _bld_sz.get("stories") or _bld_sum.get("levels"))
+
+        # Beds/baths: set when genuinely present; otherwise infer and label as estimated
+        _hyd("beds",  _bld_rm.get("beds")  or _bld_sz.get("bdrms"))
+        _hyd("baths", _bld_rm.get("bathstotal") or _bld_rm.get("baths")
+                      or _bld_sz.get("bathstotal"))
+
+        # Bathroom inference from fixture count when baths still missing
+        if not fields.get("baths"):
+            try:
+                _fixtures = int(_bld_rm.get("bathfixtures") or 0)
+                if _fixtures > 0:
+                    _bath_est = (
+                        1 if _fixtures <= 6  else
+                        2 if _fixtures <= 10 else
+                        3 if _fixtures <= 14 else
+                        4
+                    )
+                    fields["baths"] = f"{_bath_est} (est.)"
+            except (TypeError, ValueError):
+                pass
+
+        # Bedroom inference from living sqft when beds still missing
+        if not fields.get("beds"):
+            _sqft = fields.get("building_area_sqft")
+            if _sqft is not None:
+                try:
+                    _sqft_f = float(_sqft)
+                    _bed_est = (
+                        2 if _sqft_f < 900  else
+                        3 if _sqft_f < 2200 else
+                        4 if _sqft_f < 3000 else
+                        5
+                    )
+                    fields["beds"] = f"{_bed_est} (est.)"
+                except (TypeError, ValueError):
+                    pass
+
     os.makedirs(out_dir, exist_ok=True)
     lead_key = (fields.get("lead_key") or "").strip()
     filename = f"{lead_key}.pdf" if lead_key else "unknown.pdf"
@@ -2318,11 +3263,11 @@ def build_pdf_packet(fields: Dict[str, Any], out_dir: str) -> str:
     doc.new_page()
     _page_property_snapshot(doc, fields, img_path=img_path)
     doc.new_page()
+    _page4_timeline_risk(doc, fields, brief)
+    doc.new_page()
     _page2_valuation(doc, fields, brief)
     doc.new_page()
     _page3_property_facts(doc, fields)
-    doc.new_page()
-    _page4_timeline_risk(doc, fields, brief)
     if (fields.get("distress_type") or "").upper() == "LIS_PENDENS":
         doc.new_page()
         _page_foreclosure_notice(doc, fields)
