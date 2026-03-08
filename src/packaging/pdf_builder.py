@@ -1605,7 +1605,7 @@ def _page1_executive(
     high       = fields.get("value_anchor_high")
     spread_pct = fields.get("spread_pct")
     doc.section("Value Range")
-    # Always show manual UW value when present — not gated on AVM being absent
+    # Always show underwriting-derived value when present — not gated on AVM being absent
     _uw_avm_conf = str(_uw_nums.get("avm_confidence") or "").strip()
     _mb_raw = _uw_nums.get("max_bid")
     try:
@@ -1614,7 +1614,7 @@ def _page1_executive(
         _uw_bid_fmt = str(_mb_raw).strip() if _mb_raw is not None else ""
     if _uw_avm_conf:
         doc.kv("Appraiser Estimate", _uw_avm_conf, bold_v=True)
-        doc.kv("Valuation Source", "Manual Underwriting")
+        doc.kv("Valuation Source", "Falco Underwriting")
     elif low is None and mid is None and high is None:
         doc.body("Value: Pending Review (no property data yet)", size=8.5, color=_AMBER)
     doc.kv("Value Low",    _fmt_cur(low))
@@ -1832,7 +1832,7 @@ def _page1_executive(
         doc.bullet("No contact found in notice artifacts yet.")
     doc.gap(6)
 
-    # 7) Auctioneer Notes — exit strategy + analyst notes from underwriting
+    # 7) Auctioneer Notes — exit strategy + system notes from underwriting
     _es_p1 = str(_uw.get("exit_strategy") or "").strip()
     if _es_p1 or _uw_notes:
         doc.section("Auctioneer Notes")
@@ -1846,7 +1846,7 @@ def _page1_executive(
             }
             doc.kv("Exit Strategy", _STRAT_P1.get(_es_p1.lower().replace(" ", "_"), _es_p1), bold_v=True)
         if _uw_notes:
-            doc.body(f"Analyst Notes: {_uw_notes[:200]}", size=8.5, color=_SLATE, leading=12)
+            doc.body(f"System Notes: {_uw_notes[:200]}", size=8.5, color=_SLATE, leading=12)
         doc.gap(6)
 
     _draw_due_diligence_checklist(doc, fields, low)
@@ -1901,7 +1901,7 @@ def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: An
             _mb = _uw_bc_nums.get("max_bid")
             if _mb is not None:
                 try:
-                    bid_cap_txt = f"${float(_mb):,.0f} (Manual UW)"
+                    bid_cap_txt = f"${float(_mb):,.0f} (Falco underwriting)"
                 except (TypeError, ValueError):
                     pass
 
@@ -1948,7 +1948,7 @@ def _page2_valuation(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -
     if low is not None and mid is not None and high is not None:
         _draw_val_bar(doc, float(low), float(mid), float(high))
     else:
-        # Fall back to Manual UW numbers when ATTOM AVM is absent
+        # Fall back to underwriting numbers when ATTOM AVM is absent
         _uw2: Dict[str, Any] = _normalize_uw_json(fields.get("uw_json"))
         _uw2_nums = _uw2.get("numbers") if isinstance(_uw2.get("numbers"), dict) else {}
         _uw2_conf = str(_uw2_nums.get("avm_confidence") or "").strip()
@@ -2454,7 +2454,7 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
 
 def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     """
-    Manual Underwriting block (operator-entered checklist).
+    Underwriting block.
     Reads:
       fields["uw_ready"] (0/1)
       fields["uw_json"] (JSON string)
@@ -2464,13 +2464,13 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
 
     if not raw:
         doc.section("Underwriting Notes")
-        doc.body("No manual underwriting notes recorded for this lead.", size=9, color=_AMBER)
+        doc.body("No underwriting notes recorded for this lead.", size=9, color=_AMBER)
         return
 
     uw = _normalize_uw_json(raw)
     if not uw:
         doc.section("Underwriting Notes")
-        doc.body("Manual underwriting blob present but unreadable (invalid JSON).", size=9, color=_AMBER)
+        doc.body("Underwriting data present but unreadable (invalid JSON).", size=9, color=_AMBER)
         return
 
     doc.section("Underwriting Notes")
@@ -2483,8 +2483,14 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     meta = uw.get("_meta") if isinstance(uw.get("_meta"), dict) else {}
     if meta:
         doc.kv("Updated At", _val(meta.get("updated_at")))
-        doc.kv("Updated By", _val(meta.get("updated_by")))
-        doc.kv("Source", _val(meta.get("source")))
+        _updated_by = str(meta.get("updated_by") or "").strip()
+        _source = str(meta.get("source") or "").strip()
+        if _updated_by.lower() == "manual_underwriting":
+            _updated_by = "Falco"
+        if _source.lower() == "manual_underwriting":
+            _source = "Falco underwriting"
+        doc.kv("Updated By", _val(_updated_by))
+        doc.kv("Source", _val(_source))
 
     # Core checklist (safe reads)
     def _fmt_obj(x):
@@ -2859,7 +2865,7 @@ def _page5_scoring_appendix(
         ("DTS in [21, 60]",     dts is not None and 21 <= int(dts) <= 60),
         ("AVM Low >= $300,000", low is not None and float(low) >= 300_000),
         ("Spread <= 18%",       spread_pct is not None and spread_pct <= 0.18),
-        ("Manual UW Complete",  uw_pass),
+        ("Underwriting Complete",  uw_pass),
     ]
     for gate_label, gate_pass in gates:
         mark = "PASS" if gate_pass else "NOT MET"
@@ -2973,7 +2979,7 @@ def _page5_scoring_appendix(
     doc.bullet("Days-to-sale must be 21 to 60 days")
     doc.bullet("Value Low must be at least $300,000")
     doc.bullet("Value spread must be 18 percent or less")
-    doc.bullet("Underwriting must be complete")
+    doc.bullet("Falco underwriting must be complete")
 
     doc.gap(16)
 
