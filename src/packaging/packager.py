@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from ..settings import get_dts_window, is_allowed_county, within_target_counties
+from .data_quality import assess_packet_data
 from .pdf_builder import build_pdf_packet
 from .drive_uploader import upload_pdf, have_drive_creds
 from ..gating.convertibility import is_institutional, apply_convertibility_gate
@@ -28,6 +29,16 @@ def _sha256_file(path: str) -> Tuple[str, int]:
 
 def _canonical_pdf_path(out_dir: str, lead_key: str) -> str:
     return os.path.join(out_dir, f"{lead_key}.pdf")
+
+
+def _quality_sidecar_path(out_dir: str, lead_key: str) -> str:
+    return os.path.join(out_dir, f"{lead_key}.quality.json")
+
+
+def _write_json(path: str, payload: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def _hydrate_trustee_from_provenance(cur, lead_key: str) -> dict:
@@ -215,6 +226,9 @@ def run() -> Dict[str, int]:
     upload_failures = 0
     skipped_upload_missing_creds = 0
     skipped_institutional = 0
+    vault_ready = 0
+    batchdata_candidate_leads = 0
+    quality_rows: List[Dict[str, Any]] = []
 
     drive_enabled = have_drive_creds()
 
@@ -420,6 +434,18 @@ def run() -> Dict[str, int]:
         else:
             fields["internal_comps"] = []
 
+        quality = assess_packet_data(fields)
+        fields["packet_quality"] = quality
+        fields["packet_completeness_pct"] = quality["packet_completeness_pct"]
+        fields["vault_publish_ready"] = quality["vault_publish_ready"]
+        fields["vault_publish_blockers"] = quality["vault_publish_blockers"]
+        fields["batchdata_fallback_targets"] = quality["batchdata_fallback_targets"]
+
+        if quality["vault_publish_ready"]:
+            vault_ready += 1
+        if quality["batchdata_fallback_targets"]:
+            batchdata_candidate_leads += 1
+
         # Build deterministic pdf path (pdf_builder should accept out_dir)
         try:
             local_path = build_pdf_packet(fields, out_dir=out_dir)
@@ -457,9 +483,41 @@ def run() -> Dict[str, int]:
 
         if is_repack:
             print(f"[REPACK] Packet written: {local_path}")
+
+        sidecar = {
+            "lead_key": lead_key,
+            "address": fields.get("address"),
+            "county": fields.get("county"),
+            "distress_type": fields.get("distress_type"),
+            "auction_readiness": fields.get("auction_readiness"),
+            "falco_score_internal": fields.get("falco_score_internal"),
+            "packet_pdf_path": local_path,
+            **quality,
+        }
+        _write_json(_quality_sidecar_path(out_dir, lead_key), sidecar)
+        quality_rows.append(sidecar)
         packaged += 1
 
     con.close()
+
+    if quality_rows:
+        blocker_counts: Dict[str, int] = {}
+        for row in quality_rows:
+            for blocker in row.get("vault_publish_blockers", []):
+                blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+        report = {
+            "run_id": run_id,
+            "generated_at": _utc_now_iso(),
+            "packaged_count": packaged,
+            "vault_ready_count": vault_ready,
+            "batchdata_candidate_leads": batchdata_candidate_leads,
+            "top_blockers": sorted(
+                blocker_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            ),
+            "leads": quality_rows,
+        }
+        _write_json(os.path.join(out_dir, "vault_readiness_report.json"), report)
 
     print(
         f"[PACKAGER] packaged={packaged}"
@@ -467,6 +525,8 @@ def run() -> Dict[str, int]:
         f" skipped_missing={skipped_missing}"
         f" skipped_already={skipped_already}"
         f" skipped_institutional={skipped_institutional}"
+        f" vault_ready={vault_ready}"
+        f" batchdata_candidates={batchdata_candidate_leads}"
     )
 
     summary: Dict[str, Any] = {
@@ -476,6 +536,8 @@ def run() -> Dict[str, int]:
         "skipped_packaging_already_done": skipped_already,
         "upload_failures": upload_failures,
         "skipped_packaging_institutional": skipped_institutional,
+        "vault_ready_count": vault_ready,
+        "batchdata_candidate_leads": batchdata_candidate_leads,
     }
     if not drive_enabled:
         summary["skipped_upload_missing_creds"] = skipped_upload_missing_creds
