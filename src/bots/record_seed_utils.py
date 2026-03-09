@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
@@ -16,6 +17,83 @@ def repo_root() -> Path:
 
 def default_seed_path(filename: str) -> str:
     return str(repo_root() / "data" / "seeds" / filename)
+
+
+_MONTHS_RX = (
+    r"January|February|March|April|May|June|July|August|September|October|November|December|"
+    r"Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec"
+)
+
+_ADDR_RX = re.compile(
+    r"\b\d{1,6}\s+[A-Za-z0-9#.,'\-\s]{2,100}\s+"
+    r"(Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Court|Ct\.?|"
+    r"Boulevard|Blvd\.?|Way|Place|Pl\.?|Circle|Cir\.?|Pike|Highway|Hwy|Trace|Terrace|Ter\.?)\b",
+    re.IGNORECASE,
+)
+
+_NON_PROPERTY_ADDRESS_TOKENS = (
+    "chancery court",
+    "clerk and master",
+    "suite ",
+    "public square",
+    "courthouse",
+    "register of deeds",
+    "tax assessor",
+    "office",
+)
+
+_DATE_RXES = [
+    re.compile(rf"\b({_MONTHS_RX})\s+\d{{1,2}},\s+\d{{4}}\b", re.IGNORECASE),
+    re.compile(r"\b\d{1,2}/\d{1,2}/\d{4}\b"),
+    re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+]
+
+
+def extract_address_candidates(text: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in _ADDR_RX.finditer(text or ""):
+        address = " ".join(match.group(0).strip(" ,.;").split())
+        lower = address.lower()
+        if any(token in lower for token in _NON_PROPERTY_ADDRESS_TOKENS):
+            continue
+        key = address.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(address)
+    return out
+
+
+def parse_date_flex(value: str) -> Optional[str]:
+    import datetime as _dt
+
+    text = str(value or "").strip().rstrip(".,;")
+    if not text:
+        return None
+    text = re.sub(r"(st|nd|rd|th)\b", "", text, flags=re.IGNORECASE).strip()
+    if re.search(r"[A-Za-z]", text):
+        text = text.title()
+
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return _dt.datetime.strptime(text, fmt).date().isoformat()
+        except Exception:
+            continue
+    return None
+
+
+def extract_date_candidates(text: str) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for rx in _DATE_RXES:
+        for match in rx.finditer(text or ""):
+            iso = parse_date_flex(match.group(0))
+            if not iso or iso in seen:
+                continue
+            seen.add(iso)
+            out.append(iso)
+    return out
 
 
 def load_seed_rows(path: str) -> list[dict[str, Any]]:

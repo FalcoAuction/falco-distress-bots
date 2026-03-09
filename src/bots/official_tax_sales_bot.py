@@ -2,26 +2,96 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urljoin
+
+import requests
+from bs4 import BeautifulSoup
 
 from ..gating.convertibility import apply_convertibility_gate
 from ..scoring.days_to_sale import days_to_sale
 from ..settings import get_dts_window, is_allowed_county, within_target_counties
 from ..storage import sqlite_store as _store
 from ..utils import make_lead_key
-from .record_seed_utils import default_seed_path, iter_normalized_rows, load_seed_rows
+from .record_seed_utils import (
+    default_seed_path,
+    extract_address_candidates,
+    extract_date_candidates,
+    iter_normalized_rows,
+    load_seed_rows,
+)
 
 
 _DTS_MIN, _DTS_MAX = get_dts_window("OFFICIAL_TAX_SALE")
+_HEADERS = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
+_LIVE_SOURCES = [
+    ("Davidson County", "https://chanceryclerkandmaster.nashville.gov/fees/property-tax-schedule/"),
+    ("Davidson County", "https://chanceryclerkandmaster.nashville.gov/fees/delinquent-tax-sales/"),
+    ("Rutherford County", "https://rutherfordcountytn.gov/delinquent-taxes"),
+]
+
+
+def _fetch_live_rows() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for county, url in _LIVE_SOURCES:
+        try:
+            html = requests.get(url, headers=_HEADERS, timeout=30).text
+        except Exception:
+            continue
+
+        soup = BeautifulSoup(html, "html.parser")
+        page_text = soup.get_text("\n")
+        date_candidates = extract_date_candidates(page_text)
+        if not date_candidates:
+            continue
+
+        for address in extract_address_candidates(page_text):
+            sale_date = date_candidates[0]
+            key = (county.lower(), sale_date, address.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "address": address,
+                    "county": county,
+                    "sale_date": sale_date,
+                    "source_url": url,
+                    "notes": "official tax sale live scrape",
+                }
+            )
+
+        for link in soup.find_all("a", href=True):
+            href = urljoin(url, link["href"])
+            text = " ".join(link.get_text(" ", strip=True).split())
+            if "tax sale" not in text.lower() and "delinquent" not in text.lower():
+                continue
+            for sale_date in extract_date_candidates(text):
+                key = (county.lower(), sale_date, href.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                rows.append(
+                    {
+                        "address": "",
+                        "county": county,
+                        "sale_date": sale_date,
+                        "source_url": href,
+                        "notes": text or "official tax sale schedule link",
+                    }
+                )
+
+    return rows
 
 
 def run():
     seed_file = os.environ.get("FALCO_TAX_SALE_SEED_FILE") or default_seed_path("official_tax_sales.csv")
-    if not os.path.isfile(seed_file):
-        print("[OfficialTaxSalesBot] Seed file not found.")
-        return {}
-
-    rows = load_seed_rows(seed_file)
-    seed_rows = len(rows)
+    seed_rows = load_seed_rows(seed_file) if os.path.isfile(seed_file) else []
+    live_rows = _fetch_live_rows()
+    rows = [*live_rows, *seed_rows]
+    seed_count = len(seed_rows)
+    live_count = len(live_rows)
     valid_rows = 0
     dts_skipped = 0
     geo_skipped = 0
@@ -95,7 +165,8 @@ def run():
             stored_ingests += 1
 
     summary = {
-        "seed_rows": seed_rows,
+        "seed_rows": seed_count,
+        "live_rows": live_count,
         "valid_rows": valid_rows,
         "dts_skipped": dts_skipped,
         "geo_skipped": geo_skipped,
