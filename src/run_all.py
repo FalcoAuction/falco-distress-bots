@@ -17,6 +17,7 @@ from .bots import official_tax_sales_bot
 from .bots import sheriff_sales_bot
 from .enrichment import notice_extractor
 from .enrichment import notice_pdf_extractor
+from .enrichment import batchdata_fallback
 from .enrichment import bankruptcy_overlay
 from .enrichment import probate_overlay
 from .automation import maybe_publish_to_vault, write_run_summary
@@ -92,6 +93,7 @@ def main():
 
         stage_results.append(run_bot("Stage2_ATTOMEnrichment", _run_attom_enrichment))
         stage_results.append(run_bot("Stage2_CompsEngine", _run_comps))
+        stage_results.append(run_bot("Stage2_BatchDataFallback", batchdata_fallback.run))
         stage_results.append(run_bot("Stage2_BankruptcyOverlay", bankruptcy_overlay.run))
         stage_results.append(run_bot("Stage2_ProbateOverlay", probate_overlay.run))
 

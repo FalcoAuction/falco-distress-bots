@@ -105,6 +105,37 @@ def _truthy_flag(value: Optional[str]) -> bool:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
+
+def _latest_prov_text(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> Optional[str]:
+    row = cur.execute(
+        """
+        SELECT field_value_text
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=?
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return str(row[0]).strip() if row and row[0] is not None else None
+
+
+def _latest_prov_num(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> Optional[float]:
+    row = cur.execute(
+        """
+        SELECT field_value_num
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=?
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    try:
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:
+        return None
+
 def score_leads_for_run(run_id: str):
     conn = sqlite3.connect(db_path())
     conn.row_factory = sqlite3.Row
@@ -156,6 +187,21 @@ def score_leads_for_run(run_id: str):
         property_detail = _extract_property_detail(r["attom_raw_json"])
         owner_mortgage = _extract_owner_mortgage(r["attom_raw_json"])
         contact_ready = _truthy_flag(r["contact_ready"])
+
+        for key in ("owner_name", "owner_mail", "last_sale_date", "mortgage_lender"):
+            prov_value = _latest_prov_text(conn, r["lead_key"], key)
+            if prov_value:
+                owner_mortgage[key] = prov_value
+
+        for key in ("property_identifier",):
+            prov_value = _latest_prov_text(conn, r["lead_key"], key)
+            if prov_value:
+                property_detail[key] = prov_value
+
+        for key in ("year_built", "building_area_sqft", "beds", "baths"):
+            prov_value = _latest_prov_num(conn, r["lead_key"], key)
+            if prov_value is not None:
+                property_detail[key] = prov_value
 
         completeness_score = 10 if r["address"] and r["county"] else 0
         property_score = 10 if (

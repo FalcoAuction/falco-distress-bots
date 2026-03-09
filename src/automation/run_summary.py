@@ -91,6 +91,26 @@ def _latest_field_map(con: sqlite3.Connection, field_name: str) -> Dict[str, str
     return out
 
 
+def _latest_num_field_map(con: sqlite3.Connection, field_name: str) -> Dict[str, float]:
+    rows = con.execute(
+        """
+        SELECT lead_key, field_value_num
+        FROM lead_field_provenance
+        WHERE field_name = ?
+          AND field_value_num IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        """,
+        (field_name,),
+    ).fetchall()
+    out: Dict[str, float] = {}
+    for row in rows:
+        lead_key = row["lead_key"]
+        if lead_key in out:
+            continue
+        out[lead_key] = float(row["field_value_num"])
+    return out
+
+
 def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
@@ -105,6 +125,15 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
     owner_phone_primary_map = _latest_field_map(con, "owner_phone_primary")
     owner_phone_secondary_map = _latest_field_map(con, "owner_phone_secondary")
     notice_phone_map = _latest_field_map(con, "notice_phone")
+    owner_name_map = _latest_field_map(con, "owner_name")
+    owner_mail_map = _latest_field_map(con, "owner_mail")
+    last_sale_map = _latest_field_map(con, "last_sale_date")
+    mortgage_map = _latest_field_map(con, "mortgage_lender")
+    property_identifier_map = _latest_field_map(con, "property_identifier")
+    year_built_map = _latest_num_field_map(con, "year_built")
+    building_area_map = _latest_num_field_map(con, "building_area_sqft")
+    beds_map = _latest_num_field_map(con, "beds")
+    baths_map = _latest_num_field_map(con, "baths")
 
     leads = con.execute(
         """
@@ -145,6 +174,15 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
         fields["owner_phone_primary"] = owner_phone_primary_map.get(lead_key)
         fields["owner_phone_secondary"] = owner_phone_secondary_map.get(lead_key)
         fields["notice_phone"] = notice_phone_map.get(lead_key)
+        fields["owner_name"] = owner_name_map.get(lead_key)
+        fields["owner_mail"] = owner_mail_map.get(lead_key)
+        fields["last_sale_date"] = last_sale_map.get(lead_key)
+        fields["mortgage_lender"] = mortgage_map.get(lead_key)
+        fields["property_identifier"] = property_identifier_map.get(lead_key)
+        fields["year_built"] = year_built_map.get(lead_key)
+        fields["building_area_sqft"] = building_area_map.get(lead_key)
+        fields["beds"] = beds_map.get(lead_key)
+        fields["baths"] = baths_map.get(lead_key)
 
         quality = assess_packet_data(fields)
         readiness = str(fields.get("auction_readiness") or "UNKNOWN").upper()
