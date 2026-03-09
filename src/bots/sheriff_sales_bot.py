@@ -8,17 +8,14 @@ from ..scoring.days_to_sale import days_to_sale
 from ..settings import get_dts_window, is_allowed_county, within_target_counties
 from ..storage import sqlite_store as _store
 from ..utils import make_lead_key
-from .record_seed_utils import iter_normalized_rows, load_seed_rows
+from .record_seed_utils import default_seed_path, iter_normalized_rows, load_seed_rows
 
 
 _DTS_MIN, _DTS_MAX = get_dts_window("SHERIFF_SALE")
 
 
 def run():
-    seed_file = os.environ.get("FALCO_SHERIFF_SALE_SEED_FILE")
-    if not seed_file:
-        print("[SheriffSalesBot] No seed file configured - skipping.")
-        return {}
+    seed_file = os.environ.get("FALCO_SHERIFF_SALE_SEED_FILE") or default_seed_path("sheriff_sales.csv")
     if not os.path.isfile(seed_file):
         print("[SheriffSalesBot] Seed file not found.")
         return {}

@@ -6,14 +6,11 @@ import sqlite3
 
 from ..storage import sqlite_store as _store
 from ..utils import canonicalize_url
-from ..bots.record_seed_utils import iter_normalized_rows, load_seed_rows, match_lead_key
+from ..bots.record_seed_utils import default_seed_path, iter_normalized_rows, load_seed_rows, match_lead_key
 
 
 def run():
-    seed_file = os.environ.get("FALCO_BANKRUPTCY_SEED_FILE")
-    if not seed_file:
-        print("[BankruptcyOverlay] No seed file configured - skipping.")
-        return {}
+    seed_file = os.environ.get("FALCO_BANKRUPTCY_SEED_FILE") or default_seed_path("bankruptcy_overlay.csv")
     if not os.path.isfile(seed_file):
         print("[BankruptcyOverlay] Seed file not found.")
         return {}

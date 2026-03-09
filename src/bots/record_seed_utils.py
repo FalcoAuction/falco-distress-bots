@@ -4,9 +4,18 @@ import csv
 import json
 import os
 import sqlite3
+from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from ..settings import normalize_county_full
+
+
+def repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def default_seed_path(filename: str) -> str:
+    return str(repo_root() / "data" / "seeds" / filename)
 
 
 def load_seed_rows(path: str) -> list[dict[str, Any]]:
