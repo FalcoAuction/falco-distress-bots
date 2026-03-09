@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date
 from urllib.parse import urljoin
 
 import requests
@@ -24,6 +25,13 @@ from .record_seed_utils import (
 
 _DTS_MIN, _DTS_MAX = get_dts_window("CLERK_MASTER_SALE")
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
+_SRI_HEADERS = {
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "User-Agent": "Mozilla/5.0 (Falco Distress Bot)",
+}
+_SRI_API_URL = "https://sriservicesusermgmtprod.azurewebsites.net/api"
+_SRI_PUBLIC_API_KEY = "9f8fd9fe5160294175e1c737567030f495d838a7922a678bc06e0a093910"
 _LIVE_SOURCES = [
     ("Montgomery County", "https://montgomerytn.gov/chancery/upcoming-clerk-and-master-sales"),
 ]
@@ -68,7 +76,126 @@ def _event_text(blob: dict[str, object]) -> str:
     return "\n".join(parts)
 
 
-def _fetch_live_rows() -> list[dict[str, str]]:
+def _sri_headers() -> dict[str, str]:
+    headers = dict(_SRI_HEADERS)
+    headers["x-api-key"] = os.environ.get("FALCO_SRI_API_KEY") or _SRI_PUBLIC_API_KEY
+    return headers
+
+
+def _map_sale_type(code: str, description: str) -> str:
+    normalized = (code or "").strip().upper()
+    desc = (description or "").lower()
+    if normalized == "F" or "foreclosure" in desc:
+        return "FORECLOSURE"
+    if normalized in {"A", "C", "J", "O"} or "tax" in desc or "certificate" in desc or "redemption" in desc:
+        return "TAX_SALE"
+    return "COURT_SALE"
+
+
+def _fetch_sri_rows() -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    headers = _sri_headers()
+    allowed_counties = sorted(
+        {
+            normalize_county_full(county)
+            for county in (
+                "Davidson County",
+                "Williamson County",
+                "Rutherford County",
+                "Sumner County",
+                "Wilson County",
+                "Maury County",
+                "Montgomery County",
+            )
+            if is_allowed_county(normalize_county_full(county))
+        }
+    )
+
+    for county in allowed_counties:
+        payload = {
+            "searchText": "",
+            "state": "TN",
+            "county": county,
+            "propertySaleType": "",
+            "auctionStyle": "",
+            "saleStatus": "",
+            "auctionDateRange": {
+                "startDate": date.today().isoformat(),
+                "endDate": "",
+                "compareOperator": ">",
+            },
+            "recordCount": 25,
+            "startIndex": 0,
+        }
+        try:
+            auctions = requests.post(
+                f"{_SRI_API_URL}/auction/listall",
+                headers=headers,
+                json=payload,
+                timeout=30,
+            ).json()
+        except Exception:
+            continue
+        if not isinstance(auctions, list):
+            continue
+
+        for auction in auctions:
+            sale_id = auction.get("saleId")
+            if not sale_id:
+                continue
+            try:
+                detail = requests.post(
+                    f"{_SRI_API_URL}/property/carddetail",
+                    headers=headers,
+                    json={"saleId": sale_id, "state": "TN", "county": county},
+                    timeout=45,
+                ).json()
+            except Exception:
+                continue
+            properties = detail.get("properties") if isinstance(detail, dict) else None
+            if not isinstance(properties, list):
+                continue
+
+            for prop in properties:
+                address_parts = [
+                    str(prop.get("address1") or "").strip(),
+                    str(prop.get("city") or "").strip(),
+                    "TN",
+                    str(prop.get("zip") or "").strip(),
+                ]
+                address = ", ".join(part for part in address_parts if part)
+                sale_date = parse_date_flex(str(prop.get("date") or prop.get("auctionDate") or ""))
+                if not address or not sale_date:
+                    continue
+                key = (county.lower(), sale_date, address.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                sale_type_code = str(prop.get("saleType") or "")
+                sale_type_description = str(prop.get("saleTypeDescription") or "")
+                rows.append(
+                    {
+                        "address": address,
+                        "county": county,
+                        "sale_date": sale_date,
+                        "source_url": "https://www.sriservices.com/properties",
+                        "notes": sale_type_description or "clerk and master sale",
+                        "distress_type": _map_sale_type(sale_type_code, sale_type_description),
+                        "sale_type": sale_type_description,
+                        "sale_location": str(prop.get("location") or ""),
+                        "sale_time": str(prop.get("time") or ""),
+                        "owner_name": " ".join(
+                            part for part in [str(prop.get("ownerName1") or "").strip(), str(prop.get("ownerName2") or "").strip()] if part
+                        ),
+                        "property_id": str(prop.get("propertyId") or prop.get("altPropertyId") or "").strip(),
+                    }
+                )
+
+    return rows
+
+
+def _fetch_html_rows() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
 
@@ -140,6 +267,20 @@ def _fetch_live_rows() -> list[dict[str, str]]:
     return rows
 
 
+def _fetch_live_rows() -> list[dict[str, str]]:
+    sri_rows = _fetch_sri_rows()
+    html_rows = _fetch_html_rows()
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in [*sri_rows, *html_rows]:
+        key = (row["county"].lower(), row["sale_date"], row["address"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(row)
+    return merged
+
+
 def run():
     seed_file = os.environ.get("FALCO_CLERK_MASTER_SALE_SEED_FILE") or default_seed_path("clerk_master_sales.csv")
     seed_rows = load_seed_rows(seed_file) if os.path.isfile(seed_file) else []
@@ -177,7 +318,7 @@ def run():
             "address": address,
             "county": county,
             "state": "TN",
-            "distress_type": "COURT_SALE",
+            "distress_type": row.get("distress_type") or "COURT_SALE",
             "source": "ClerkMasterSale",
             "raw": row,
         }
@@ -205,9 +346,22 @@ def run():
             "source_url": row["source_url"],
             "notes": row["notes"],
             "channel": "CLERK_MASTER_SALE",
+            "sale_type": row.get("sale_type"),
+            "sale_location": row.get("sale_location"),
+            "sale_time": row.get("sale_time"),
+            "owner_name": row.get("owner_name"),
+            "property_id": row.get("property_id"),
         }
 
-        if _store.upsert_lead(lead_key, {"address": address, "state": "TN"}, county, distress_type="COURT_SALE"):
+        lead_attrs = {
+            "address": address,
+            "state": "TN",
+        }
+        if row.get("owner_name"):
+            lead_attrs["owner_name"] = row["owner_name"]
+        if row.get("property_id"):
+            lead_attrs["property_identifier"] = row["property_id"]
+        if _store.upsert_lead(lead_key, lead_attrs, county, distress_type=row.get("distress_type") or "COURT_SALE"):
             stored_leads += 1
         if _store.insert_ingest_event(
             lead_key,
