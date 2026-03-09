@@ -370,29 +370,15 @@ def _score_candidate(track: str, title: str, snippet: str, summary: str, url: st
     return score, ", ".join(reasons[:4]) or "regional fit"
 
 
-def _personalized_line(track: str, org: str, city: str, summary: str) -> str:
-    location = f" in {city}" if city else ""
-    clean_summary = _clean_summary(summary, 95) or "regional execution work"
-    if track == "auction_partner":
-        return (
-            f"I came across {org}{location} while mapping active real-estate auction operators, "
-            f"and your positioning around {clean_summary} looks directionally aligned with what we are building."
-        )
-    return (
-        f"I came across {org}{location} while looking for Tennessee broker leadership teams, "
-        f"and your platform appears active in {clean_summary or 'brokerage operations and supervision'}."
-    )
-
-
-def _build_email(track: str, org: str, personalized_line: str) -> tuple[str, str]:
+def _build_email(track: str, org: str) -> tuple[str, str]:
     if track == "auction_partner":
         subject = "Controlled Upstream Distress Opportunity Flow"
         body = (
             f"Hi {org} team,\n\n"
-            f"{personalized_line}\n\n"
-            "I'm reaching out because I'm building a focused distress-origination platform in Middle Tennessee and think there may be a fit with your auction activity.\n\n"
-            "We're sourcing and packaging upstream distressed opportunities before they become crowded, then routing only a small number of cleaner, controlled opportunities through a gated partner workflow. This is not broad public inventory or generic lead volume. The focus is curated, auction-viable opportunities with tighter packaging and controlled distribution.\n\n"
-            "I'd be interested in a short conversation to understand what kinds of distressed opportunities are most useful to you, how you prefer to evaluate incoming inventory, and whether there's a fit to route a small number of clean opportunities your way.\n\n"
+            "I'm building FALCO, a Middle Tennessee distress-origination platform focused on surfacing and packaging cleaner upstream opportunities before they become crowded.\n\n"
+            "Given your auction focus, I thought there could be a fit.\n\n"
+            "We are not pushing broad public inventory or generic lead volume. The model is controlled distribution of a small number of curated, auction-viable opportunities through a gated partner workflow.\n\n"
+            "I would be interested in a short conversation to learn what types of opportunities are most useful to you, how you like to evaluate incoming inventory, and whether there is a fit to route a few strong deals your way.\n\n"
             "If it makes sense, I can share a sample packet and walk you through how we're structuring the flow.\n\n"
             "Best,\n"
             "Patrick Yuri Armour\n"
@@ -404,9 +390,8 @@ def _build_email(track: str, org: str, personalized_line: str) -> tuple[str, str
     subject = "Peregrine Realty Group / Principal Broker Opportunity"
     body = (
         f"Hi {org} team,\n\n"
-        f"{personalized_line}\n\n"
         "I'm building Peregrine Realty Group around a live distress-origination and controlled deal-flow system, and I'm looking for the right principal broker relationship to structure the brokerage side correctly from the beginning.\n\n"
-        "The underlying origination engine and partner-facing distribution layer already exist. What I'm looking for now is the right principal broker and office home to serve as the appointed principal broker, host the brokerage under an established office/location, oversee brokerage compliance and supervision as required, and help ensure the operation is structured correctly from a regulatory and operational standpoint.\n\n"
+        "The underlying origination engine and partner-facing distribution layer already exist. What I'm looking for now is the right principal broker and office home to serve as the appointed principal broker, host the brokerage under an established office, oversee brokerage compliance and supervision, and help ensure the operation is structured correctly from the start.\n\n"
         "This is not meant to be a passive license arrangement. I want the brokerage built on a real supervisory and compliance foundation.\n\n"
         "On economics, I'm open to structuring it the right way for the right fit, but the basic framework would be principal broker oversight and hosting, plus revenue share tied to brokerage-side deal flow generated through Peregrine.\n\n"
         "If this is something you'd be open to discussing, I'd value a short conversation.\n\n"
@@ -438,8 +423,7 @@ def build_candidates(track: str, limit: int = 50) -> list[Candidate]:
             if _is_bad_candidate(track, result["url"], result["title"], result["snippet"], str(ctx.get("summary") or ""), primary_email):
                 continue
             score, reason = _score_candidate(track, result["title"], result["snippet"], str(ctx.get("summary") or ""), result["url"])
-            personalized = _personalized_line(track, str(ctx["organization"]), str(ctx["city"]), str(ctx["summary"]))
-            subject, body = _build_email(track, str(ctx["organization"]), personalized)
+            subject, body = _build_email(track, str(ctx["organization"]))
             rank += 1
             by_domain[domain] = Candidate(
                 track=track,
@@ -454,7 +438,7 @@ def build_candidates(track: str, limit: int = 50) -> list[Candidate]:
                 state=str(ctx["state"]),
                 reason=reason,
                 snippet=result["snippet"],
-                personalized_line=personalized,
+                personalized_line="",
                 subject=subject,
                 body=body,
                 query=result["query"],
