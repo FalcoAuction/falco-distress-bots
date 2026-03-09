@@ -7,6 +7,7 @@
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -102,7 +103,16 @@ def _val(v: Any, fallback: str = "Unavailable") -> str:
     if v is None:
         return fallback
     s = str(v).strip()
-    return fallback if s in ("", "None", "null") else s
+    if s in ("", "None", "null"):
+        return fallback
+    if re.fullmatch(r"-?\d+\.0+", s):
+        s = str(int(float(s)))
+    return (
+        s.replace("Goodletsville", "Goodlettsville")
+         .replace("GOODLETSVILLE", "GOODLETTSVILLE")
+         .replace("Lavergne", "La Vergne")
+         .replace("LAVERGNE", "LA VERGNE")
+    )
 
 
 def _trim_line(text: str, font: str, size: float, max_w: float) -> str:
@@ -1460,10 +1470,14 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     _uw_s_cond = _uw_s.get("condition")  if isinstance(_uw_s.get("condition"),  dict) else {}
     _occ_str   = str(_uw_s_occ.get("status")  or "Not Observed")
     _cond_str  = str(_uw_s_cond.get("status") or "Not Observed")
+    if _occ_str.lower() in {"unknown", "unknown (street_view)"}:
+        _occ_str = "Not yet verified"
+    if _cond_str.lower() in {"unknown", "unknown (street_view)"}:
+        _cond_str = "Not yet verified"
 
     # Key Risk: first HIGH or MED flag; fall back to first flag
     _flags    = _risk_flags(fields)
-    _risk_str = "None Triggered"
+    _risk_str = "No primary blockers"
     for _ft, _sv in _flags:
         if _sv in ("HIGH", "MED"):
             _risk_str = _ft[:50]
@@ -1608,12 +1622,8 @@ def _page1_executive(
     _uw_notes = str(_uw.get("access_notes") or _uw.get("notes") or "").strip()
 
     # 1) Property Overview
-    doc.section("Opportunity Snapshot")
+    doc.section("Property Overview")
     doc.kv("Address",      addr)
-    _addr_raw = (fields.get("address") or "").strip()
-    if _addr_raw:
-        from urllib.parse import quote_plus as _qp
-        doc.kv("Google Maps", f"https://maps.google.com/?q={_qp(_addr_raw)}", vc=_GRAY)
     doc.kv("County",       _val(fields.get("county")))
     doc.kv("Property Type", _val(fields.get("property_type")))
     doc.kv("Year Built",   _val(fields.get("year_built")))
@@ -1650,7 +1660,7 @@ def _page1_executive(
         _uw_bid_fmt = str(_mb_raw).strip() if _mb_raw is not None else ""
     if _uw_avm_conf:
         doc.kv("Appraiser Estimate", _uw_avm_conf, bold_v=True)
-        doc.kv("Valuation Source", "Falco Underwriting")
+        doc.kv("Valuation Source", "ATTOM AVM + Falco pricing")
     elif low is None and mid is None and high is None:
         doc.body("Value: Pending Review (no property data yet)", size=8.5, color=_AMBER)
     doc.kv("Value Low",    _fmt_cur(low))
@@ -1686,26 +1696,40 @@ def _page1_executive(
         doc.kv("Total Orig Mortgages", f"${_lien['total_amount']:,.0f}")
         doc.body("Equity proxy unavailable — verify AVM low + title.", size=8.5, color=_AMBER)
     else:
-        doc.body(
-            "Mortgage data not available. Verify title independently before bidding.",
-            size=8.5,
-            color=_AMBER,
-        )
+        _mort_lender = _val(fields.get("mortgage_lender"), None)
+        if _mort_lender:
+            doc.body(
+                f"Mortgage lender identified: {_mort_lender}. Title and lien payoff still require independent verification before bidding.",
+                size=8.5,
+                color=_AMBER,
+            )
+        else:
+            doc.body(
+                "Mortgage data not available. Verify title independently before bidding.",
+                size=8.5,
+                color=_AMBER,
+            )
     doc.gap(6)
 
     # 5) Risk Flags
     doc.section("Risk Flags")
     flags = _risk_flags(fields)
     if not flags:
-        doc.bullet("No automated red flags triggered.", color=_GREEN)
+        doc.bullet("No primary automated blockers identified.", color=_GREEN)
     else:
         sev_color = {"HIGH": _RED, "MED": _AMBER, "LOW": _GRAY}
         for flag_text, sev in flags[:3]:
             doc.bullet(f"[{sev}] {flag_text}", color=sev_color.get(sev, _SLATE))
     if _uw_occ.get("status"):
-        doc.kv("Occupancy (Observed)", str(_uw_occ["status"]), bold_v=True)
+        _occ_status = str(_uw_occ["status"]).strip()
+        if _occ_status.lower() in {"unknown", "unknown (street_view)"}:
+            _occ_status = "Not yet verified"
+        doc.kv("Occupancy", _occ_status, bold_v=True)
     if _uw_cond.get("status"):
-        doc.kv("Property Condition", str(_uw_cond["status"]), bold_v=True)
+        _cond_status = str(_uw_cond["status"]).strip()
+        if _cond_status.lower() in {"unknown", "unknown (street_view)"}:
+            _cond_status = "Not yet verified"
+        doc.kv("Condition", _cond_status, bold_v=True)
     doc.gap(6)
 
     # 6) Bid Guidance
@@ -1870,8 +1894,13 @@ def _page1_executive(
 
     # 7) Auctioneer Notes — exit strategy + system notes from underwriting
     _es_p1 = str(_uw.get("exit_strategy") or "").strip()
-    if _es_p1 or _uw_notes:
-        doc.section("Auctioneer Notes")
+    _ignore_notes = {
+        "initial uw shell for testing",
+        "initial uw shell",
+    }
+    _show_notes = _uw_notes and _uw_notes.strip().lower() not in _ignore_notes
+    if _es_p1 or _show_notes:
+        doc.section("Execution Notes")
         if _es_p1:
             _STRAT_P1 = {
                 "auction_retail": "Auction / Retail",
@@ -1881,8 +1910,8 @@ def _page1_executive(
                 "assign":         "Assignment",
             }
             doc.kv("Exit Strategy", _STRAT_P1.get(_es_p1.lower().replace(" ", "_"), _es_p1), bold_v=True)
-        if _uw_notes:
-            doc.body(f"System Notes: {_uw_notes[:200]}", size=8.5, color=_SLATE, leading=12)
+        if _show_notes:
+            doc.body(_uw_notes[:200], size=8.5, color=_SLATE, leading=12)
         doc.gap(6)
 
 def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: Any) -> None:
@@ -2283,7 +2312,7 @@ def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
 def _draw_lien_skeleton_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     """Lien Skeleton (ATTOM Mortgage) section — max 6 lines."""
     data = _extract_lien_skeleton(fields)
-    doc.section("Lien Skeleton (ATTOM Mortgage)")
+    doc.section("Recorded Debt Snapshot")
     doc.kv("First Lender",        data["first_lender"]  or "Not available")
     doc.kv("First Orig Amount",
            f"${data['first_amount']:,.0f}" if data["first_amount"] is not None else "Not available")
@@ -2341,7 +2370,7 @@ def _draw_value_stack_section(doc: _Doc, fields: Dict[str, Any]) -> None:
 def _draw_ownership_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     """Ownership & Mortgage (ATTOM) section — max 8 lines."""
     data = _extract_owner_mortgage(fields)
-    doc.section("Ownership & Mortgage (ATTOM)")
+    doc.section("Ownership & Mortgage")
     doc.kv("Owner Name",         data["owner_name"]       or "Not available")
     doc.kv("Mailing Address",    data["owner_mail"]        or "Not available")
     doc.kv("Last Transfer Date", data["last_sale_date"]    or "Not available")
@@ -2511,6 +2540,7 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
     doc.gap(6)
     doc.section("Before You Bid")
 
+    _owner_mort = _extract_owner_mortgage(fields)
     if _lien["equity_proxy_low"] is not None:
         doc.body(
             f"Equity proxy based on AVM low less total original mortgage: ${_lien['equity_proxy_low']:,.0f}. "
@@ -2524,9 +2554,15 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
             size=9,
             leading=13,
         )
+    elif _owner_mort.get("mortgage_lender"):
+        doc.body(
+            f"Mortgage lender identified: {_owner_mort['mortgage_lender']}. Full title and payoff verification remain required before bidding.",
+            size=9,
+            leading=13,
+        )
     else:
         doc.body(
-            "Mortgage data unavailable. Full title search required. Do not assume free & clear status.",
+            "Mortgage position unavailable. Full title search required. Do not assume free & clear status.",
             size=9,
             leading=13,
         )
@@ -2556,21 +2592,13 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     doc.section("Underwriting Notes")
 
     _uw_is_ready = int(uw_ready or 0) == 1
-    _uw_label    = "UNDERWRITTEN" if _uw_is_ready else "NEEDS UW"
+    _uw_label    = "UNDERWRITTEN" if _uw_is_ready else "PENDING"
     sc = _GREEN if _uw_is_ready else _AMBER
     doc.kv("UW Status", _uw_label, vc=sc, bold_v=True)
 
     meta = uw.get("_meta") if isinstance(uw.get("_meta"), dict) else {}
     if meta:
         doc.kv("Updated At", _val(meta.get("updated_at")))
-        _updated_by = str(meta.get("updated_by") or "").strip()
-        _source = str(meta.get("source") or "").strip()
-        if _updated_by.lower() == "manual_underwriting":
-            _updated_by = "Falco"
-        if _source.lower() == "manual_underwriting":
-            _source = "Falco underwriting"
-        doc.kv("Updated By", _val(_updated_by))
-        doc.kv("Source", _val(_source))
 
     # Core checklist (safe reads)
     def _fmt_obj(x):
@@ -2582,17 +2610,23 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
 
     title = _fmt_obj(uw.get("title_check"))
     if title:
-        doc.kv("Title Check", f"{_val(title.get('status'))} ({_val(title.get('source'))})")
+        doc.kv("Title Check", _val(title.get("status")))
 
     occ = _fmt_obj(uw.get("occupancy"))
     if occ and occ.get("status"):
         _src = occ.get("source")
-        doc.kv("Occupancy", f"{occ['status']} ({_src})" if _src else str(occ["status"]))
+        _occ_status = str(occ["status"]).strip()
+        if _occ_status.lower() in {"unknown", "unknown (street_view)"}:
+            _occ_status = "Not yet verified"
+        doc.kv("Occupancy", _occ_status)
 
     cond = _fmt_obj(uw.get("condition"))
     if cond and cond.get("status"):
         _src = cond.get("source")
-        doc.kv("Condition", f"{cond['status']} ({_src})" if _src else str(cond["status"]))
+        _cond_status = str(cond["status"]).strip()
+        if _cond_status.lower() in {"unknown", "unknown (street_view)"}:
+            _cond_status = "Not yet verified"
+        doc.kv("Condition", _cond_status)
 
     exit_strat = uw.get("exit_strategy")
     if exit_strat:
@@ -2609,7 +2643,8 @@ def _draw_manual_uw_section(doc: _Doc, fields: Dict[str, Any]) -> None:
     notes = uw.get("access_notes") or uw.get("notes")
     if notes:
         doc.gap(4)
-        doc.body(f"Analyst Notes: {notes}", size=9, leading=13)
+        if str(notes).strip().lower() not in {"initial uw shell for testing", "initial uw shell"}:
+            doc.body(str(notes), size=9, leading=13)
 
     nums = _fmt_obj(uw.get("numbers"))
     if nums:
@@ -2984,54 +3019,7 @@ def _page5_scoring_appendix(
     doc.gap(8)
 
     # ── Data Provenance (Appendix) ────────────────────────────────────────────
-    try:
-        _prov_rows, _art_rows = _fetch_provenance_data(fields.get("lead_key") or "")
-        if _prov_rows or _art_rows:
-            doc.section("Source Log")
-            _c   = doc.c
-            _FSZ = 7.0
-            _LH  = 10.0
-            if _prov_rows:
-                # header
-                _c.setFont("Helvetica-Bold", _FSZ)
-                _c.setFillColor(_GRAY)
-                _c.drawString(ML,       doc.y, "Field")
-                _c.drawString(ML + 115, doc.y, "Value")
-                _c.drawString(ML + 245, doc.y, "Source")
-                _c.drawString(ML + 320, doc.y, "Retrieved")
-                doc.y -= _LH
-                doc.hline()
-                for _pr in _prov_rows:
-                    _c.setFont("Helvetica", _FSZ)
-                    _c.setFillColor(_SLATE)
-                    _c.drawString(ML,       doc.y, (_pr["field_name"] or "")[:22])
-                    _c.drawString(ML + 115, doc.y, _prov_display_value(_pr))
-                    _c.drawString(ML + 245, doc.y, (_pr["source_channel"] or "")[:14])
-                    _c.drawString(ML + 320, doc.y, (_pr["retrieved_at"] or "")[:19])
-                    doc.y -= _LH
-            if _art_rows:
-                doc.gap(5)
-                _c.setFont("Helvetica-Bold", _FSZ)
-                _c.setFillColor(_GRAY)
-                _c.drawString(ML,       doc.y, "Channel")
-                _c.drawString(ML + 65,  doc.y, "Content-Type")
-                _c.drawString(ML + 175, doc.y, "Retrieved")
-                _c.drawString(ML + 285, doc.y, "Bytes")
-                _c.drawString(ML + 335, doc.y, "Source URL")
-                doc.y -= _LH
-                doc.hline()
-                for _ar in _art_rows:
-                    _c.setFont("Helvetica", _FSZ)
-                    _c.setFillColor(_SLATE)
-                    _abytes = str(_ar["payload_len"]) if _ar["payload_len"] is not None else ""
-                    _c.drawString(ML,       doc.y, (_ar["channel"] or "")[:10])
-                    _c.drawString(ML + 65,  doc.y, (_ar["content_type"] or "")[:18])
-                    _c.drawString(ML + 175, doc.y, (_ar["retrieved_at"] or "")[:19])
-                    _c.drawString(ML + 285, doc.y, _abytes[:8])
-                    _c.drawString(ML + 335, doc.y, (_ar["source_url"] or "")[:30])
-                    doc.y -= _LH
-    except Exception:
-        pass  # provenance section never aborts PDF build
+    # Internal provenance remains available in storage and operator tooling rather than the partner-facing packet.
 
     doc.page_break()
     doc.page_header("Methodology & Disclaimer")
