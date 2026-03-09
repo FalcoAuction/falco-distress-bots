@@ -15,6 +15,7 @@ from .bots import lis_pendens_bot
 from .bots import substitution_of_trustee_bot
 from .bots import official_tax_sales_bot
 from .bots import sheriff_sales_bot
+from .bots import clerk_master_sales_bot
 from .enrichment import notice_extractor
 from .enrichment import notice_pdf_extractor
 from .enrichment import batchdata_fallback
@@ -78,6 +79,7 @@ def main():
         stage_results.append(run_bot("API_TaxDelinquentBot", api_tax_delinquent_bot.run))
         stage_results.append(run_bot("OfficialTaxSalesBot", official_tax_sales_bot.run))
         stage_results.append(run_bot("SheriffSalesBot", sheriff_sales_bot.run))
+        stage_results.append(run_bot("ClerkMasterSalesBot", clerk_master_sales_bot.run))
 
         stage_results.append(run_bot("Stage1_NoticeExtractor", notice_extractor.run))
         stage_results.append(run_bot("Stage1_NoticePDFExtractor", notice_pdf_extractor.run))
