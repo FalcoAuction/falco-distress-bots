@@ -239,11 +239,32 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         and _has_actionable_outreach(enriched)
         and not any(
             not _present(enriched.get(key))
-            for key in ("property_identifier", "year_built", "building_area_sqft", "baths")
+            for key in (
+                "owner_name",
+                "owner_mail",
+                "last_sale_date",
+                "mortgage_lender",
+                "property_identifier",
+                "year_built",
+                "building_area_sqft",
+                "beds",
+                "baths",
+            )
         )
     )
 
     return {
+        "enriched_fields": {
+            "property_identifier": enriched.get("property_identifier"),
+            "owner_name": enriched.get("owner_name"),
+            "owner_mail": enriched.get("owner_mail"),
+            "last_sale_date": enriched.get("last_sale_date"),
+            "mortgage_lender": enriched.get("mortgage_lender"),
+            "year_built": enriched.get("year_built"),
+            "building_area_sqft": enriched.get("building_area_sqft"),
+            "beds": enriched.get("beds"),
+            "baths": enriched.get("baths"),
+        },
         "packet_completeness_pct": completeness,
         "vault_publish_ready": len(vault_blockers) == 0,
         "vault_publish_blockers": vault_blockers,

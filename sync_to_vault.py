@@ -252,6 +252,7 @@ def main() -> None:
                 "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
             }
         )
+        enriched_fields = quality.get("enriched_fields", {})
         published_readiness = readiness
         if readiness == "GREEN" and not quality["top_tier_ready"]:
             published_readiness = "YELLOW"
@@ -302,15 +303,15 @@ def main() -> None:
             "equityBand": equity_band or "",
             "dtsDays": int(dts_days) if dts_days is not None else None,
             "contactReady": contact_ready,
-            "propertyIdentifier": latest_prov_text(cur, lead_key, "property_identifier"),
-            "ownerName": latest_prov_text(cur, lead_key, "owner_name"),
-            "ownerMail": latest_prov_text(cur, lead_key, "owner_mail"),
-            "lastSaleDate": latest_prov_text(cur, lead_key, "last_sale_date"),
-            "mortgageLender": latest_prov_text(cur, lead_key, "mortgage_lender"),
-            "yearBuilt": latest_prov_num(cur, lead_key, "year_built"),
-            "buildingAreaSqft": latest_prov_num(cur, lead_key, "building_area_sqft"),
-            "beds": latest_prov_num(cur, lead_key, "beds"),
-            "baths": latest_prov_num(cur, lead_key, "baths"),
+            "propertyIdentifier": enriched_fields.get("property_identifier"),
+            "ownerName": enriched_fields.get("owner_name"),
+            "ownerMail": enriched_fields.get("owner_mail"),
+            "lastSaleDate": enriched_fields.get("last_sale_date"),
+            "mortgageLender": enriched_fields.get("mortgage_lender"),
+            "yearBuilt": enriched_fields.get("year_built"),
+            "buildingAreaSqft": enriched_fields.get("building_area_sqft"),
+            "beds": enriched_fields.get("beds"),
+            "baths": enriched_fields.get("baths"),
             "topTierReady": bool(quality["top_tier_ready"]),
             "vaultPublishReady": bool(quality["vault_publish_ready"]),
             "dataNotes": quality["vault_publish_blockers"][:4],
