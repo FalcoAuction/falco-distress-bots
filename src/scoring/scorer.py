@@ -14,13 +14,13 @@ def db_path() -> str:
 
 def score_dts(dts: int) -> int:
     if 21 <= dts <= 45:
-        return 35
-    if 46 <= dts <= 60:
         return 25
+    if 46 <= dts <= 60:
+        return 18
     if 61 <= dts <= 75:
-        return 15
+        return 10
     if 76 <= dts <= 90:
-        return 5
+        return 4
     return 0
 
 def score_equity(avm_low: Optional[float], avm_high: Optional[float]) -> (int, str):
@@ -30,10 +30,10 @@ def score_equity(avm_low: Optional[float], avm_high: Optional[float]) -> (int, s
     spread = (avm_high - avm_low) / avm_high if avm_high else 0
 
     if spread < 0.08:
-        return 25, "HIGH"
+        return 18, "HIGH"
     if spread < 0.15:
-        return 18, "MED"
-    return 10, "LOW"
+        return 12, "MED"
+    return 6, "LOW"
 
 def _load_raw_json(raw_json: Optional[str]) -> dict:
     if not raw_json:
@@ -203,43 +203,58 @@ def score_leads_for_run(run_id: str):
             if prov_value is not None:
                 property_detail[key] = prov_value
 
-        completeness_score = 10 if r["address"] and r["county"] else 0
-        property_score = 10 if (
+        completeness_score = 8 if r["address"] and r["county"] else 0
+        property_score = 12 if (
             property_detail.get("property_type")
             and property_detail.get("property_identifier")
             and property_detail.get("city")
             and property_detail.get("zip")
-        ) else 5 if property_detail.get("property_type") else 0
-        ownership_score = 10 if (
+        ) else 6 if (
+            property_detail.get("property_type")
+            or property_detail.get("property_identifier")
+        ) else 0
+        ownership_score = 14 if (
             owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail")
-        ) else 5 if (
+        ) else 7 if (
             owner_mortgage.get("owner_name") or owner_mortgage.get("owner_mail")
         ) else 0
-        debt_history_score = 10 if (
+        debt_history_score = 18 if (
             owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date")
-        ) else 5 if (
+        ) else 9 if (
             owner_mortgage.get("mortgage_lender") or owner_mortgage.get("last_sale_date")
+        ) else 0
+        property_depth_score = 10 if (
+            property_detail.get("year_built") is not None
+            and property_detail.get("building_area_sqft") is not None
+            and property_detail.get("baths") is not None
+        ) else 5 if (
+            property_detail.get("year_built") is not None
+            or property_detail.get("building_area_sqft") is not None
+            or property_detail.get("beds") is not None
+            or property_detail.get("baths") is not None
         ) else 0
         contact_score = 10 if contact_ready else 0
 
-        total_score = (
+        raw_score = (
             dts_score
             + equity_score
             + completeness_score
             + property_score
+            + property_depth_score
             + ownership_score
             + debt_history_score
             + contact_score
         )
+        total_score = max(0, min(100, raw_score))
 
         has_valuation = bool(r["avm_low"] and r["avm_high"])
         has_owner_pair = bool(owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail"))
         has_debt_pair = bool(owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date"))
         inside_green_window = 21 <= dts <= 60
 
-        if total_score >= 75 and has_valuation and has_owner_pair and has_debt_pair and contact_ready and inside_green_window:
+        if total_score >= 80 and has_valuation and has_owner_pair and has_debt_pair and contact_ready and inside_green_window:
             readiness = "GREEN"
-        elif total_score >= 50 and has_valuation and dts <= 75:
+        elif total_score >= 55 and has_valuation and dts <= 75:
             readiness = "YELLOW"
         else:
             readiness = "RED"
