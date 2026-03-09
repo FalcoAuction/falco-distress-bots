@@ -126,6 +126,29 @@ def _trim_line(text: str, font: str, size: float, max_w: float) -> str:
 
 # ─── PDF document wrapper ─────────────────────────────────────────────────────
 
+def _title_case_if_all_caps(v: Any) -> Optional[str]:
+    s = _val(v, None)
+    if not s:
+        return None
+    letters = [ch for ch in s if ch.isalpha()]
+    if letters and all(ch.isupper() for ch in letters):
+        return s.title()
+    return s
+
+
+def _valuation_display(v: Any) -> Optional[str]:
+    s = _val(v, None)
+    if not s:
+        return None
+    key = s.strip().lower()
+    mapping = {
+        "attom": "ATTOM AVM",
+        "falco": "Falco Underwriting",
+        "falco_underwriting": "Falco Underwriting",
+    }
+    return mapping.get(key, s)
+
+
 class _Doc:
     """Thin canvas wrapper: page management, typography helpers."""
 
@@ -1659,7 +1682,7 @@ def _page1_executive(
     except (TypeError, ValueError):
         _uw_bid_fmt = str(_mb_raw).strip() if _mb_raw is not None else ""
     if _uw_avm_conf:
-        doc.kv("Appraiser Estimate", _uw_avm_conf, bold_v=True)
+        doc.kv("Primary Valuation Input", _valuation_display(_uw_avm_conf), bold_v=True)
         doc.kv("Valuation Source", "ATTOM AVM + Falco pricing")
     elif low is None and mid is None and high is None:
         doc.body("Value: Pending Review (no property data yet)", size=8.5, color=_AMBER)
@@ -1808,8 +1831,8 @@ def _page1_executive(
     except Exception:
         pass
 
-    # 8) Foreclosure Contact
-    doc.section("Foreclosure Contact Path")
+    # 8) Contact & Routing
+    doc.section("Contact & Routing")
     _lead_key = fields.get("lead_key") or ""
     _nc = _fetch_notice_contact(_lead_key)
     _ft = _fetch_prov_fields(
@@ -1857,7 +1880,18 @@ def _page1_executive(
     )
     _t2_phone  = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
     _t3_phone  = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
+    _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
     _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
+    _owner_mort = _extract_owner_mortgage(fields)
+
+    if _owner_mort.get("owner_name"):
+        doc.kv("Owner Name", _owner_mort["owner_name"], bold_v=True)
+    if _owner_mort.get("owner_mail"):
+        doc.kv("Owner Mailing", _owner_mort["owner_mail"])
+    if fields.get("property_identifier"):
+        doc.kv("Parcel / APN", _val(fields.get("property_identifier")))
+    if _owner_mort.get("mortgage_lender"):
+        doc.kv("Mortgage Lender", _owner_mort["mortgage_lender"])
 
     _nc_has_any = (
         bool(_trustee_display)
@@ -1865,6 +1899,7 @@ def _page1_executive(
         or bool(_nc_sale_location)
         or bool(_t2_phone)
         or bool(_t3_phone)
+        or bool(_t3_phone_2)
         or any(
             _nc.get(k) for k in (
                 "notice_phone", "notice_email", "notice_trustee_address", "notice_law_firm",
@@ -1886,6 +1921,14 @@ def _page1_executive(
         if _t3_phone:
             _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
             doc.kv(_t3_lbl, _t3_phone, bold_v=True)
+        if _t3_phone_2 and _t3_phone_2 != _t3_phone:
+            doc.kv("Owner Phone 2", _t3_phone_2, bold_v=True)
+        if _nc.get("notice_email"):
+            doc.kv("Notice Email", _nc["notice_email"])
+        if _nc.get("notice_trustee_address"):
+            doc.kv("Trustee Address", _nc["notice_trustee_address"], lw=110)
+        if _nc_sale_time:
+            doc.kv("Sale Time", _nc_sale_time)
         if _nc_sale_location:
             doc.kv("Sale Location", _nc_sale_location, lw=110)
     else:
@@ -2419,7 +2462,7 @@ def _page_property_snapshot(
             pairs.append((label, s))
 
     # Location fields first — most likely to be populated for LP leads
-    _snap_add("City",        fields.get("city"))
+    _snap_add("City",        _title_case_if_all_caps(fields.get("city")))
     _snap_add("ZIP",         fields.get("zip"))
     _snap_add("County",      fields.get("county"))
     _snap_add("Parcel ID",   fields.get("property_identifier") or fields.get("parcel_id"))
@@ -2485,7 +2528,7 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
     _add("Bedrooms",         fields.get("beds"))
     _add("Bathrooms",        fields.get("baths"))
     _add("Construction",     fields.get("construction_type"))
-    _add("City",             fields.get("city"))
+    _add("City",             _title_case_if_all_caps(fields.get("city")))
     _add("ZIP",              fields.get("zip"))
     _add("Property ID",      fields.get("property_identifier"))
 
