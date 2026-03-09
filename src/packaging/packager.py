@@ -7,9 +7,12 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ..settings import get_dts_window, is_allowed_county, within_target_counties
 from .pdf_builder import build_pdf_packet
+from .data_quality import assess_packet_data
 from .drive_uploader import upload_pdf, have_drive_creds
 from ..gating.convertibility import is_institutional, apply_convertibility_gate
 from ..utils import get_current_run_id
+from ..enrichment.contact_enricher import enrich_contact_data
+from ..uw.auto_underwrite import auto_underwrite, to_uw_json_payload, persist_auto_uw
 
 
 def _utc_now_iso() -> str:
@@ -30,6 +33,16 @@ def _canonical_pdf_path(out_dir: str, lead_key: str) -> str:
     return os.path.join(out_dir, f"{lead_key}.pdf")
 
 
+def _quality_sidecar_path(out_dir: str, lead_key: str) -> str:
+    return os.path.join(out_dir, f"{lead_key}.quality.json")
+
+
+def _write_json(path: str, payload: Dict[str, Any]) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+
+
 def _hydrate_trustee_from_provenance(cur, lead_key: str) -> dict:
     want = ("ft_trustee_firm", "ft_trustee_name_raw", "notice_trustee_firm", "notice_trustee_name_raw")
     out = {}
@@ -47,6 +60,141 @@ def _hydrate_trustee_from_provenance(cur, lead_key: str) -> dict:
         if row and row[0]:
             out[k] = row[0]
     return out
+
+def _hydrate_trustee_from_ingest_events(cur, lead_key: str) -> dict:
+    out = {}
+    try:
+        rows = cur.execute(
+            "SELECT raw_json FROM ingest_events WHERE lead_key=? AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 5",
+            (lead_key,),
+        ).fetchall()
+    except Exception:
+        return out
+
+    for row in rows:
+        try:
+            blob = json.loads(row[0] or "{}")
+        except Exception:
+            continue
+
+        for key in ("trustee_attorney", "trustee_firm", "trustee", "contact_info"):
+            value = blob.get(key)
+            if isinstance(value, str) and value.strip():
+                out.setdefault("trustee_attorney", value.strip())
+                return out
+
+    return out
+
+
+def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
+    want_text = (
+        "owner_name",
+        "owner_mail",
+        "last_sale_date",
+        "mortgage_lender",
+        "property_identifier",
+    )
+    want_num = (
+        "year_built",
+        "building_area_sqft",
+        "beds",
+        "baths",
+    )
+    out = {}
+    for field_name in want_text:
+        row = cur.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key, field_name),
+        ).fetchone()
+        if row and row[0]:
+            out[field_name] = row[0]
+    for field_name in want_num:
+        row = cur.execute(
+            """
+            SELECT field_value_num
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_num IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key, field_name),
+        ).fetchone()
+        if row and row[0] is not None:
+            out[field_name] = row[0]
+    return out
+
+
+# Distress types where a foreclosure contact is expected and required for outreach
+_FORECLOSURE_DISTRESS_TYPES = frozenset({
+    "LIS_PENDENS", "FORECLOSURE", "FORECLOSURE_TN",
+    "SOT", "SUBSTITUTION_OF_TRUSTEE",
+})
+
+
+def _has_foreclosure_contact(cur: sqlite3.Cursor, lead_key: str, fields: Dict[str, Any]) -> bool:
+    """
+    Return True when at least one outreach-ready foreclosure contact signal is present.
+
+    Signals checked (any one suffices):
+      - trustee name  : ft_trustee_name_raw / notice_trustee_name_raw (already in fields)
+      - trustee firm  : ft_trustee_firm / notice_trustee_firm (already in fields)
+      - phone         : notice_phone in lead_field_provenance
+      - sale location : notice_trustee_address in lead_field_provenance
+                        OR sale_location in ingest_events raw_json
+    """
+    # Name, firm, and enriched phones loaded into fields by hydration / enrich_contact_data
+    for k in (
+        "ft_trustee_name_raw", "notice_trustee_name_raw",
+        "ft_trustee_firm",     "notice_trustee_firm",
+        "trustee_phone_public", "owner_phone_primary",
+    ):
+        if (fields.get(k) or "").strip():
+            return True
+
+    # Phone / address / enriched phone fallback via provenance
+    for fname in ("notice_phone", "notice_trustee_address",
+                  "trustee_phone_public", "owner_phone_primary"):
+        try:
+            row = cur.execute(
+                """
+                SELECT field_value_text FROM lead_field_provenance
+                WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (lead_key, fname),
+            ).fetchone()
+            if row and (row[0] or "").strip():
+                return True
+        except Exception:
+            pass
+
+    # Fallback: check ingest_events raw_json for sale_location / trustee / phone
+    try:
+        ie_rows = cur.execute(
+            "SELECT raw_json FROM ingest_events WHERE lead_key=? AND raw_json IS NOT NULL ORDER BY id DESC LIMIT 5",
+            (lead_key,),
+        ).fetchall()
+        for ie_row in ie_rows:
+            try:
+                blob = json.loads(ie_row[0] or "{}")
+                for k in (
+                    "sale_location", "trustee", "trustee_firm", "phone",
+                    "trustee_attorney", "contact_info",  # keys used by TNForeclosureNotices
+                ):
+                    if (blob.get(k) or "").strip():
+                        return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    return False
 
 
 def _fetch_internal_comps(
@@ -212,9 +360,14 @@ def run() -> Dict[str, int]:
     skipped_missing = 0
     skipped_already = 0
     skipped_due_to_uw = 0
+    auto_uw_generated = 0
     upload_failures = 0
     skipped_upload_missing_creds = 0
     skipped_institutional = 0
+    skipped_missing_contact = 0
+    vault_ready = 0
+    batchdata_candidate_leads = 0
+    quality_rows: List[Dict[str, Any]] = []
 
     drive_enabled = have_drive_creds()
 
@@ -262,11 +415,6 @@ def run() -> Dict[str, int]:
         lead_key = (r["lead_key"] or "").strip()
         if not lead_key:
             skipped_missing += 1
-            continue
-
-        # UW gate — repack is a manual override, so it bypasses
-        if not is_repack and require_uw and int(r["uw_ready"] or 0) != 1:
-            skipped_due_to_uw += 1
             continue
 
         fields: Dict[str, Any] = dict(r)
@@ -344,6 +492,12 @@ def run() -> Dict[str, int]:
         # ── End computed fields ────────────────────────────────────────────────
 
         fields.update(_hydrate_trustee_from_provenance(cur, lead_key))
+        for _k, _v in _hydrate_trustee_from_ingest_events(cur, lead_key).items():
+            if _v and not (fields.get(_k) or "").strip():
+                fields[_k] = _v
+        for _k, _v in _hydrate_fallback_fields(cur, lead_key).items():
+            if _v is not None:
+                fields[_k] = _v
 
         try:
             fields = apply_convertibility_gate(fields)
@@ -353,6 +507,50 @@ def run() -> Dict[str, int]:
         if is_institutional(fields):
             skipped_institutional += 1
             continue
+
+        # ── Tier-2 / Tier-3 contact enrichment ────────────────────────────────
+        # Runs after the institutional gate so we don't waste lookups on skipped leads.
+        # Mutates `fields` and writes to lead_field_provenance; commit immediately
+        # so provenance rows are durable even if this lead is later skipped.
+        try:
+            _ce_summary = enrich_contact_data(lead_key, fields, cur)
+            if _ce_summary.get("t2_written") or _ce_summary.get("t3_written"):
+                con.commit()
+                print(
+                    f"[CONTACT] lead_key={lead_key!r}"
+                    f" t2={_ce_summary['t2_written']}"
+                    f" t3={_ce_summary['t3_written']}"
+                )
+        except Exception as _ce_exc:
+            print(f"[CONTACT][WARN] enrich_contact_data failed lead_key={lead_key!r}: {_ce_exc}")
+
+        # UW gate — attempt auto-underwriting when uw_ready is missing.
+        # Manual UW in manual_underwriting table is authoritative and is not overwritten.
+        # In repack mode: auto-UW is still attempted so the packet gets UW data;
+        #   if it fails, repack proceeds anyway (sparse UW section).
+        _uw_ready_raw = int(fields.get("uw_ready") or 0)
+        if _uw_ready_raw != 1:
+            _auto_uw = auto_underwrite(fields)
+            if _auto_uw["uw_ready"] == 1:
+                fields["uw_json"]  = json.dumps(
+                    to_uw_json_payload(_auto_uw, fields), ensure_ascii=False
+                )
+                fields["uw_ready"] = 1
+                persist_auto_uw(lead_key, _auto_uw, fields, cur, con)
+                auto_uw_generated += 1
+                print(
+                    f"[AUTO_UW] generated lead_key={lead_key!r}"
+                    f" ready=1 blocker=none"
+                    f" bid_cap={_auto_uw.get('manual_bid_cap')}"
+                )
+            elif not is_repack and require_uw:
+                print(
+                    f"[AUTO_UW] skipped lead_key={lead_key!r}"
+                    f" blocker={_auto_uw.get('uw_blocker')!r}"
+                )
+                skipped_due_to_uw += 1
+                continue
+            # repack + auto-UW failed → fall through; packet builds with sparse UW
 
         if is_repack or force_repackage:
             # Force-rebuild: bypass the "already packaged this run" guard
@@ -387,6 +585,14 @@ def run() -> Dict[str, int]:
             skipped_missing += 1
             continue
 
+        # Foreclosure contact gate — skip if no outreach signal exists
+        _distress_upper = (fields.get("distress_type") or "").upper()
+        if _distress_upper in _FORECLOSURE_DISTRESS_TYPES:
+            if not _has_foreclosure_contact(cur, lead_key, fields):
+                print(f"[PACKAGER] skipped lead_key={lead_key!r} reason=missing_foreclosure_contact")
+                skipped_missing_contact += 1
+                continue
+
         # Internal comps proxy (no new APIs)
         _subject_avm  = fields.get("avm_value") or fields.get("avm_low")
         _county       = fields.get("county") or ""
@@ -419,6 +625,18 @@ def run() -> Dict[str, int]:
                 fields["internal_comps"] = []
         else:
             fields["internal_comps"] = []
+
+        quality = assess_packet_data(fields)
+        fields["packet_quality"] = quality
+        fields["packet_completeness_pct"] = quality["packet_completeness_pct"]
+        fields["vault_publish_ready"] = quality["vault_publish_ready"]
+        fields["vault_publish_blockers"] = quality["vault_publish_blockers"]
+        fields["batchdata_fallback_targets"] = quality["batchdata_fallback_targets"]
+
+        if quality["vault_publish_ready"]:
+            vault_ready += 1
+        if quality["batchdata_fallback_targets"]:
+            batchdata_candidate_leads += 1
 
         # Build deterministic pdf path (pdf_builder should accept out_dir)
         try:
@@ -457,25 +675,65 @@ def run() -> Dict[str, int]:
 
         if is_repack:
             print(f"[REPACK] Packet written: {local_path}")
+
+        sidecar = {
+            "lead_key": lead_key,
+            "address": fields.get("address"),
+            "county": fields.get("county"),
+            "distress_type": fields.get("distress_type"),
+            "auction_readiness": fields.get("auction_readiness"),
+            "falco_score_internal": fields.get("falco_score_internal"),
+            "packet_pdf_path": local_path,
+            **quality,
+        }
+        _write_json(_quality_sidecar_path(out_dir, lead_key), sidecar)
+        quality_rows.append(sidecar)
         packaged += 1
 
     con.close()
 
+    if quality_rows:
+        blocker_counts: Dict[str, int] = {}
+        for row in quality_rows:
+            for blocker in row.get("vault_publish_blockers", []):
+                blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+        report = {
+            "run_id": run_id,
+            "generated_at": _utc_now_iso(),
+            "packaged_count": packaged,
+            "vault_ready_count": vault_ready,
+            "batchdata_candidate_leads": batchdata_candidate_leads,
+            "top_blockers": sorted(
+                blocker_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            ),
+            "leads": quality_rows,
+        }
+        _write_json(os.path.join(out_dir, "vault_readiness_report.json"), report)
+
     print(
         f"[PACKAGER] packaged={packaged}"
+        f" auto_uw={auto_uw_generated}"
         f" skipped_uw={skipped_due_to_uw}"
         f" skipped_missing={skipped_missing}"
         f" skipped_already={skipped_already}"
         f" skipped_institutional={skipped_institutional}"
+        f" skipped_missing_contact={skipped_missing_contact}"
+        f" vault_ready={vault_ready}"
+        f" batchdata_candidates={batchdata_candidate_leads}"
     )
 
     summary: Dict[str, Any] = {
-        "packaged_count": packaged,
+        "packaged_count":    packaged,
+        "auto_uw_generated": auto_uw_generated,
         "skipped_due_to_uw": skipped_due_to_uw,
         "skipped_packaging_missing_fields": skipped_missing,
         "skipped_packaging_already_done": skipped_already,
         "upload_failures": upload_failures,
         "skipped_packaging_institutional": skipped_institutional,
+        "skipped_missing_contact": skipped_missing_contact,
+        "vault_ready_count": vault_ready,
+        "batchdata_candidate_leads": batchdata_candidate_leads,
     }
     if not drive_enabled:
         summary["skipped_upload_missing_creds"] = skipped_upload_missing_creds

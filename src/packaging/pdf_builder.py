@@ -2106,10 +2106,10 @@ def _render_compact_value_framework(doc: _Doc, fields: Dict[str, Any], brief: Di
 def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Extract owner/mortgage fields from raw_merged['owner'] and raw_merged['mortgage']."""
     out: Dict[str, Optional[str]] = {
-        "owner_name":       None,
-        "owner_mail":       None,
-        "last_sale_date":   None,
-        "mortgage_lender":  None,
+        "owner_name":       _val(fields.get("owner_name"), None),
+        "owner_mail":       _val(fields.get("owner_mail"), None),
+        "last_sale_date":   _val(fields.get("last_sale_date"), None),
+        "mortgage_lender":  _val(fields.get("mortgage_lender"), None),
         "mortgage_amount":  None,
         "mortgage_date":    None,
     }
@@ -2138,15 +2138,18 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
                     ])).strip()
                     or None
                 )
-                out["owner_name"] = full or None
-            out["owner_mail"] = (
-                _ow.get("mailingaddressoneline")                  # current shape
-                or (_ow.get("mailAddress") or {}).get("oneLine")  # old shape
-                or None
-            )
+                if not out["owner_name"]:
+                    out["owner_name"] = full or None
+            if not out["owner_mail"]:
+                out["owner_mail"] = (
+                    _ow.get("mailingaddressoneline")                  # current shape
+                    or (_ow.get("mailAddress") or {}).get("oneLine")  # old shape
+                    or None
+                )
         _sale = owner_blob.get("sale") or {}
         if isinstance(_sale, dict):
-            out["last_sale_date"] = _sale.get("saleTransDate") or None
+            if not out["last_sale_date"]:
+                out["last_sale_date"] = _sale.get("saleTransDate") or None
             if not out["last_sale_date"]:
                 hist = _sale.get("salesHistory")
                 if isinstance(hist, list) and hist:
@@ -2160,9 +2163,10 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
             _fm = _mort.get("firstMortgage") or {}
             if isinstance(_fm, dict) and _fm:
                 _ldr = _fm.get("lender") or {}
-                out["mortgage_lender"] = (
-                    _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
-                ) or None
+                if not out["mortgage_lender"]:
+                    out["mortgage_lender"] = (
+                        _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
+                    ) or None
                 _amt = _fm.get("amount")
                 if _amt is not None:
                     try:
