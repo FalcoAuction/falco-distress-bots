@@ -1,0 +1,3 @@
+lead_key,address,county,case_number,chapter,filed_at,status,source_url
+"26f721d976e5645e4830896301c063f8875e076f","123 Example Ave, Nashville TN 37203","Davidson County","3:26-bk-01234","13","2026-03-01","Open","https://pacer.example/case/3:26-bk-01234"
+,"456 Market St, Franklin TN 37064","Williamson County","3:26-bk-04567","7","2026-03-03","Dismissed","https://pacer.example/case/3:26-bk-04567"

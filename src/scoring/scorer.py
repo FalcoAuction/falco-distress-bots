@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import json
 from datetime import datetime, timezone, date
 from typing import Optional
 
@@ -13,26 +14,96 @@ def db_path() -> str:
 
 def score_dts(dts: int) -> int:
     if 21 <= dts <= 45:
-        return 40
+        return 35
     if 46 <= dts <= 60:
-        return 30
+        return 25
     if 61 <= dts <= 75:
-        return 20
+        return 15
     if 76 <= dts <= 90:
-        return 10
+        return 5
     return 0
 
 def score_equity(avm_low: Optional[float], avm_high: Optional[float]) -> (int, str):
     if not avm_low or not avm_high:
-        return 10, "UNKNOWN"
+        return 0, "UNKNOWN"
 
     spread = (avm_high - avm_low) / avm_high if avm_high else 0
 
     if spread < 0.08:
-        return 40, "HIGH"
+        return 25, "HIGH"
     if spread < 0.15:
-        return 30, "MED"
-    return 20, "LOW"
+        return 18, "MED"
+    return 10, "LOW"
+
+def _load_raw_json(raw_json: Optional[str]) -> dict:
+    if not raw_json:
+        return {}
+    try:
+        parsed = json.loads(raw_json)
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+def _extract_property_detail(raw_json: Optional[str]) -> dict:
+    blob = _load_raw_json(raw_json)
+    detail = blob.get("detail") if isinstance(blob.get("detail"), dict) else blob
+    if not isinstance(detail, dict):
+        return {}
+
+    ident = detail.get("identifier") or {}
+    summary = detail.get("summary") or {}
+    address = detail.get("address") or {}
+
+    return {
+        "property_identifier": ident.get("apn") or ident.get("attomId") or ident.get("fips"),
+        "property_type": summary.get("proptype") or summary.get("propClass"),
+        "city": address.get("locality") or address.get("city"),
+        "zip": address.get("postal1") or address.get("zip"),
+    }
+
+def _extract_owner_mortgage(raw_json: Optional[str]) -> dict:
+    blob = _load_raw_json(raw_json)
+    out = {
+        "owner_name": None,
+        "owner_mail": None,
+        "last_sale_date": None,
+        "mortgage_lender": None,
+    }
+
+    owner_blob = blob.get("owner")
+    if isinstance(owner_blob, dict):
+        owner = owner_blob.get("owner") or {}
+        if isinstance(owner, dict):
+            owner1 = owner.get("owner1") or {}
+            if isinstance(owner1, dict):
+                parts = [
+                    str(owner1.get(k) or "").strip()
+                    for k in ("firstnameandmi", "lastname")
+                    if str(owner1.get(k) or "").strip()
+                ]
+                out["owner_name"] = " ".join(parts) or None
+            out["owner_mail"] = (
+                owner.get("mailingaddressoneline")
+                or (owner.get("mailAddress") or {}).get("oneLine")
+                or None
+            )
+
+        sale = owner_blob.get("sale") or {}
+        if isinstance(sale, dict):
+            out["last_sale_date"] = sale.get("saleTransDate") or None
+
+    mortgage_blob = blob.get("mortgage")
+    if isinstance(mortgage_blob, dict):
+        lender = mortgage_blob.get("lender") or {}
+        if isinstance(lender, dict):
+            out["mortgage_lender"] = lender.get("name") or None
+
+    return out
+
+def _truthy_flag(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 def score_leads_for_run(run_id: str):
     conn = sqlite3.connect(db_path())
@@ -41,7 +112,8 @@ def score_leads_for_run(run_id: str):
     rows = conn.execute("""
         SELECT l.lead_key, l.address, l.county,
                ie.sale_date,
-               ae.avm_low, ae.avm_high
+               ae.avm_low, ae.avm_high, ae.attom_raw_json,
+               cp.field_value_text AS contact_ready
         FROM leads l
         JOIN (
             SELECT lead_key, MAX(id) AS max_ie_id
@@ -56,6 +128,18 @@ def score_leads_for_run(run_id: str):
             GROUP BY lead_key
         ) latest_ae ON latest_ae.lead_key = l.lead_key
         LEFT JOIN attom_enrichments ae ON ae.id = latest_ae.max_ae_id
+        LEFT JOIN (
+            SELECT lead_key, field_value_text
+            FROM (
+                SELECT
+                    lead_key,
+                    field_value_text,
+                    ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY created_at DESC) AS rn
+                FROM lead_field_provenance
+                WHERE field_name = 'contact_ready'
+            )
+            WHERE rn = 1
+        ) cp ON cp.lead_key = l.lead_key
         WHERE ie.sale_date IS NOT NULL
     """, (run_id,)).fetchall()
 
@@ -69,14 +153,47 @@ def score_leads_for_run(run_id: str):
 
         dts_score = score_dts(dts)
         equity_score, equity_band = score_equity(r["avm_low"], r["avm_high"])
+        property_detail = _extract_property_detail(r["attom_raw_json"])
+        owner_mortgage = _extract_owner_mortgage(r["attom_raw_json"])
+        contact_ready = _truthy_flag(r["contact_ready"])
 
-        completeness_score = 20 if r["address"] and r["county"] else 0
+        completeness_score = 10 if r["address"] and r["county"] else 0
+        property_score = 10 if (
+            property_detail.get("property_type")
+            and property_detail.get("property_identifier")
+            and property_detail.get("city")
+            and property_detail.get("zip")
+        ) else 5 if property_detail.get("property_type") else 0
+        ownership_score = 10 if (
+            owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail")
+        ) else 5 if (
+            owner_mortgage.get("owner_name") or owner_mortgage.get("owner_mail")
+        ) else 0
+        debt_history_score = 10 if (
+            owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date")
+        ) else 5 if (
+            owner_mortgage.get("mortgage_lender") or owner_mortgage.get("last_sale_date")
+        ) else 0
+        contact_score = 10 if contact_ready else 0
 
-        total_score = dts_score + equity_score + completeness_score
+        total_score = (
+            dts_score
+            + equity_score
+            + completeness_score
+            + property_score
+            + ownership_score
+            + debt_history_score
+            + contact_score
+        )
 
-        if total_score >= 75:
+        has_valuation = bool(r["avm_low"] and r["avm_high"])
+        has_owner_pair = bool(owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail"))
+        has_debt_pair = bool(owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date"))
+        inside_green_window = 21 <= dts <= 60
+
+        if total_score >= 75 and has_valuation and has_owner_pair and has_debt_pair and contact_ready and inside_green_window:
             readiness = "GREEN"
-        elif total_score >= 50:
+        elif total_score >= 50 and has_valuation and dts <= 75:
             readiness = "YELLOW"
         else:
             readiness = "RED"

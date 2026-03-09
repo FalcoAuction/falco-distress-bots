@@ -1,0 +1,3 @@
+lead_key,address,county,case_number,filed_at,estate_name,contact_name,status,source_url
+"b664bdae8d547d9254052024afdf57da0d968b55","789 Estate Ln, Nashville TN 37211","Davidson County","26PR1234","2026-02-22","Estate of Jane Doe","John Doe, Executor","Open","https://court.example/probate/26PR1234"
+,"101 Inheritance Ct, Murfreesboro TN 37129","Rutherford County","26PR5678","2026-02-28","Estate of Richard Roe","Mary Roe, Administrator","Letters Issued","https://court.example/probate/26PR5678"

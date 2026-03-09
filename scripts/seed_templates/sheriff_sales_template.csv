@@ -1,0 +1,3 @@
+address,county,sale_date,source_url,notes
+"789 Civil Sale Dr, Murfreesboro TN 37130","Rutherford County","2026-04-14","https://county.example/sheriff-sales/789","Civil execution sale posting"
+"101 Auction Row, Nashville TN 37201","Davidson County","2026-04-28","https://county.example/sheriff-sales/101","Sheriff sale docket entry"

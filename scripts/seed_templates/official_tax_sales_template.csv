@@ -1,0 +1,3 @@
+address,county,sale_date,source_url,notes
+"123 Example Ave, Nashville TN 37203","Davidson County","2026-04-07","https://county.example/tax-sale/123","Delinquent tax sale calendar row"
+"456 Market St, Franklin TN 37064","Williamson County","2026-04-21","https://county.example/tax-sale/456","Chancery tax sale notice"

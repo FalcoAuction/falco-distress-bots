@@ -485,3 +485,47 @@ def insert_provenance_num(
         return True
     except Exception:
         return False
+
+
+def insert_provenance_text(
+    lead_key: str,
+    field_name: str,
+    value_text: str,
+    source_channel: str,
+    retrieved_at: Optional[str] = None,
+    artifact_id: Optional[str] = None,
+    confidence: Optional[float] = None,
+) -> bool:
+    """
+    Insert a single text provenance row into lead_field_provenance. Never raises.
+    """
+    try:
+        _ensure_init()
+        _run_id = os.getenv("FALCO_RUN_ID")
+        _at = retrieved_at or _now()
+        with _connect() as con:
+            con.execute(
+                """
+                INSERT INTO lead_field_provenance
+                    (lead_key, field_name, value_type,
+                     field_value_text, confidence,
+                     source_channel, artifact_id,
+                     retrieved_at, run_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lead_key,
+                    field_name,
+                    "raw",
+                    value_text,
+                    confidence,
+                    source_channel,
+                    artifact_id,
+                    _at,
+                    _run_id,
+                    _at,
+                ),
+            )
+        return True
+    except Exception:
+        return False
