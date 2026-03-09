@@ -1884,17 +1884,12 @@ def _page1_executive(
     _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
     _owner_mort = _extract_owner_mortgage(fields)
 
-    if _owner_mort.get("owner_name"):
-        doc.kv("Owner Name", _owner_mort["owner_name"], bold_v=True)
-    if _owner_mort.get("owner_mail"):
-        doc.kv("Owner Mailing", _owner_mort["owner_mail"])
-    if fields.get("property_identifier"):
-        doc.kv("Parcel / APN", _val(fields.get("property_identifier")))
-    if _owner_mort.get("mortgage_lender"):
-        doc.kv("Mortgage Lender", _owner_mort["mortgage_lender"])
-
     _nc_has_any = (
-        bool(_trustee_display)
+        bool(_owner_mort.get("owner_name"))
+        or bool(_owner_mort.get("owner_mail"))
+        or bool(fields.get("property_identifier"))
+        or bool(_owner_mort.get("mortgage_lender"))
+        or bool(_trustee_display)
         or bool(_nc_sale_time)
         or bool(_nc_sale_location)
         or bool(_t2_phone)
@@ -1907,30 +1902,41 @@ def _page1_executive(
         )
     )
     if _nc_has_any:
+        _contact_pairs: List[Tuple[str, str]] = []
+        if _owner_mort.get("owner_name"):
+            _contact_pairs.append(("Owner Name", _owner_mort["owner_name"]))
+        if _owner_mort.get("owner_mail"):
+            _contact_pairs.append(("Owner Mailing", _owner_mort["owner_mail"]))
+        if fields.get("property_identifier"):
+            _contact_pairs.append(("Parcel / APN", _val(fields.get("property_identifier"))))
+        if _owner_mort.get("mortgage_lender"):
+            _contact_pairs.append(("Mortgage Lender", _owner_mort["mortgage_lender"]))
         if _trustee_display:
-            doc.kv("Trustee / Firm", _trustee_display, bold_v=True)
+            _contact_pairs.append(("Trustee / Firm", _trustee_display))
         if _nc.get("notice_law_firm") and _nc["notice_law_firm"] != _trustee_display:
-            doc.kv("Law Firm", _nc["notice_law_firm"])
+            _contact_pairs.append(("Law Firm", _nc["notice_law_firm"]))
+
         # Phone priority: notice-native > trustee firm table (T2)
         _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
         if _ph_clean:
-            doc.kv("Phone", _ph_clean, bold_v=True)
+            _contact_pairs.append(("Phone", _ph_clean))
         elif _t2_phone:
-            doc.kv("Trustee Phone", _t2_phone, bold_v=True)
+            _contact_pairs.append(("Trustee Phone", _t2_phone))
         # Owner phone (T3) — always shown when present, separate row
         if _t3_phone:
             _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
-            doc.kv(_t3_lbl, _t3_phone, bold_v=True)
+            _contact_pairs.append((_t3_lbl, _t3_phone))
         if _t3_phone_2 and _t3_phone_2 != _t3_phone:
-            doc.kv("Owner Phone 2", _t3_phone_2, bold_v=True)
+            _contact_pairs.append(("Owner Phone 2", _t3_phone_2))
         if _nc.get("notice_email"):
-            doc.kv("Notice Email", _nc["notice_email"])
+            _contact_pairs.append(("Notice Email", _nc["notice_email"]))
         if _nc.get("notice_trustee_address"):
-            doc.kv("Trustee Address", _nc["notice_trustee_address"], lw=110)
+            _contact_pairs.append(("Trustee Address", _nc["notice_trustee_address"]))
         if _nc_sale_time:
-            doc.kv("Sale Time", _nc_sale_time)
+            _contact_pairs.append(("Sale Time", _nc_sale_time))
         if _nc_sale_location:
-            doc.kv("Sale Location", _nc_sale_location, lw=110)
+            _contact_pairs.append(("Sale Location", _nc_sale_location))
+        doc.two_col(_contact_pairs, lw=82)
     else:
         doc.bullet("No contact found in notice artifacts yet.")
     doc.gap(6)
