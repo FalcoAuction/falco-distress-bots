@@ -32,7 +32,7 @@ GLOBAL_DTS_WINDOW = (21, 90)
 
 # Default allowed counties if env not set and TARGET_COUNTIES empty.
 # (Bots treat this as "base county names" without "County")
-DEFAULT_ALLOWED_COUNTIES_BASE = ["Davidson", "Rutherford", "Sumner", "Williamson", "Wilson"]
+DEFAULT_ALLOWED_COUNTIES_BASE = ["Davidson", "Rutherford", "Sumner", "Williamson", "Wilson", "Maury"]
 
 
 # ============================================================

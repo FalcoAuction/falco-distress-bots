@@ -33,7 +33,7 @@ def get_allowed_counties_base() -> set[str]:
     Returns a set of base county names (no 'County' suffix).
     """
     # WAR-PLAN DEFAULTS (hard): only these counties unless explicitly overridden by env
-    raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford")
+    raw = os.getenv("FALCO_ALLOWED_COUNTIES", "Davidson,Williamson,Rutherford,Sumner,Wilson,Maury")
     vals: list[str] = []
     for part in raw.split(","):
         p = part.strip()
