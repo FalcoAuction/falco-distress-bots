@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -11,7 +12,8 @@ import requests
 from ..packaging.data_quality import assess_packet_data
 from ..storage import sqlite_store as _store
 
-_DEFAULT_URL = "https://api.batchdata.com/api/v1/property/detail"
+_VERIFY_URL = "https://api.batchdata.com/api/v1/address/verify"
+_LOOKUP_URL = "https://api.batchdata.com/api/v1/property/lookup/all-attributes"
 _FALLBACK_SOURCE = "BATCHDATA"
 _TARGET_FIELDS = (
     "owner_name",
@@ -116,22 +118,21 @@ def _latest_prov_map(cur: sqlite3.Cursor, lead_key: str) -> Dict[str, Any]:
 
 
 def _first_obj(payload: Dict[str, Any]) -> Dict[str, Any]:
-    for key in ("results", "data", "properties", "property"):
+    results = payload.get("results")
+    if isinstance(results, dict):
+        properties = results.get("properties")
+        if isinstance(properties, list) and properties and isinstance(properties[0], dict):
+            return properties[0]
+        prop = results.get("property")
+        if isinstance(prop, dict):
+            return prop
+    for key in ("data", "properties", "property"):
         value = payload.get(key)
         if isinstance(value, list) and value and isinstance(value[0], dict):
             return value[0]
         if isinstance(value, dict):
             return value
     return payload
-
-
-def _dig(obj: Any, *path: str) -> Any:
-    cur = obj
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-    return cur
 
 
 def _coerce_date(value: Any) -> Optional[str]:
@@ -170,37 +171,65 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     owner_mail = (
         _dig(item, "owner", "mailingAddress", "full")
+        or _format_address(_dig(item, "owner", "mailingAddress"))
         or _dig(item, "owner", "mailingAddress")
         or item.get("mailingAddress")
-        or _dig(item, "mailingAddress", "street")
+        or _format_address(_dig(item, "mailingAddress"))
     )
     last_sale_date = (
         _dig(item, "lastSale", "date")
+        or _dig(item, "sale", "lastTransfer", "saleDate")
+        or _dig(item, "sale", "lastSale", "saleDate")
         or item.get("lastSaleDate")
         or _dig(item, "saleHistory", "lastSaleDate")
         or _dig(item, "deed", "recordingDate")
+        or _dig(item, "deedHistory", "recordingDate")
     )
     mortgage_lender = (
         _dig(item, "mortgage", "lenderName")
         or _dig(item, "mortgage", "lender", "name")
         or item.get("mortgageLender")
         or _dig(item, "openMortgage", "lenderName")
+        or _dig(item, "openLien", "mortgages", "lenderName")
+        or _dig(item, "openLien", "mortgages", 0, "lenderName")
+        or _dig(item, "sale", "lastSale", "mortgages", 0, "lenderName")
+        or _dig(item, "sale", "lastTransfer", "mortgages", 0, "lenderName")
     )
     property_identifier = (
         _dig(item, "parcel", "apn")
+        or _dig(item, "ids", "apn")
         or item.get("apn")
         or item.get("parcelId")
         or item.get("assessorParcelNumber")
     )
-    year_built = item.get("yearBuilt") or _dig(item, "building", "yearBuilt")
+    year_built = (
+        item.get("yearBuilt")
+        or _dig(item, "building", "yearBuilt")
+        or _dig(item, "building", "effectiveYearBuilt")
+        or _dig(item, "listing", "yearBuilt")
+    )
     building_area_sqft = (
         item.get("buildingArea")
         or item.get("livingArea")
         or _dig(item, "building", "sqft")
         or _dig(item, "building", "livingArea")
+        or _dig(item, "building", "totalBuildingAreaSquareFeet")
+        or _dig(item, "listing", "totalBuildingAreaSquareFeet")
+        or _dig(item, "listing", "livingArea")
     )
-    beds = item.get("beds") or _dig(item, "building", "beds")
-    baths = item.get("baths") or _dig(item, "building", "baths")
+    beds = (
+        item.get("beds")
+        or _dig(item, "building", "beds")
+        or _dig(item, "building", "bedroomCount")
+        or _dig(item, "listing", "bedroomCount")
+    )
+    baths = (
+        item.get("baths")
+        or _dig(item, "building", "baths")
+        or _dig(item, "building", "bathroomCount")
+        or _dig(item, "building", "calculatedBathroomCount")
+        or _dig(item, "listing", "bathroomCount")
+    )
 
     if _truthy(owner_name):
         fields["owner_name"] = str(owner_name).strip()
@@ -224,6 +253,70 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
             fields[key] = numeric
 
     return fields
+
+
+def _dig(obj: Any, *path: Any) -> Any:
+    cur = obj
+    for key in path:
+        if isinstance(key, int):
+            if not isinstance(cur, list) or key >= len(cur):
+                return None
+            cur = cur[key]
+            continue
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(key)
+    return cur
+
+
+def _format_address(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value.strip() or None
+    if not isinstance(value, dict):
+        return None
+    parts = [
+        str(value.get("street") or "").strip(),
+        str(value.get("city") or "").strip(),
+        str(value.get("state") or "").strip(),
+        str(value.get("zip") or "").strip(),
+    ]
+    line1 = parts[0]
+    locality = " ".join(p for p in parts[1:] if p)
+    out = ", ".join(p for p in (line1, locality) if p)
+    return out or None
+
+
+def _split_address(raw: str, fallback_state: str) -> Dict[str, str]:
+    text = " ".join((raw or "").strip().split()).rstrip(",")
+    if not text:
+        return {}
+    match = re.match(
+        r"^(?P<street>.+?),\s*(?P<city>[^,]+),\s*(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)$",
+        text,
+    )
+    if match:
+        return {k: v.strip() for k, v in match.groupdict().items()}
+
+    match = re.match(
+        r"^(?P<street>.+?)\s+(?P<city>[A-Za-z .'-]+),\s*(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)$",
+        text,
+    )
+    if match:
+        return {k: v.strip() for k, v in match.groupdict().items()}
+
+    match = re.match(
+        r"^(?P<street>.+?)\s+(?P<city>[A-Za-z .'-]+)\s+(?P<state>[A-Z]{2})\s+(?P<zip>\d{5}(?:-\d{4})?)$",
+        text,
+    )
+    if match:
+        return {k: v.strip() for k, v in match.groupdict().items()}
+
+    return {
+        "street": text,
+        "city": "",
+        "state": (fallback_state or "TN").strip() or "TN",
+        "zip": "",
+    }
 
 
 def _write_field(lead_key: str, field_name: str, value: Any, artifact_id: Optional[str], retrieved_at: str) -> bool:
@@ -254,28 +347,44 @@ def _call_batchdata(address: str, county: str, state: str) -> Dict[str, Any]:
     if not api_key:
         raise RuntimeError("Missing FALCO_BATCHDATA_API_KEY")
 
-    url = os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _DEFAULT_URL).strip() or _DEFAULT_URL
-    payload = {
-        "requests": [
-            {
-                "propertyAddress": {
-                    "address": address,
-                    "state": state or "TN",
-                }
-            }
-        ]
+    parts = _split_address(address, state)
+    if not parts.get("street"):
+        raise RuntimeError("Missing structured street for BatchData lookup")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
-    response = requests.post(
-        url,
+    verify_response = requests.post(
+        os.environ.get("FALCO_BATCHDATA_VERIFY_URL", _VERIFY_URL).strip() or _VERIFY_URL,
+        headers=headers,
+        json={"requests": [parts]},
+        timeout=25,
+    )
+    verify_response.raise_for_status()
+    verify_payload = verify_response.json()
+    addresses = _dig(verify_payload, "results", "addresses") or []
+    if not isinstance(addresses, list) or not addresses:
+        raise RuntimeError("BatchData address verify returned no addresses")
+    verified = addresses[0] if isinstance(addresses[0], dict) else {}
+    address_hash = str(verified.get("hash") or "").strip()
+    if not address_hash:
+        error = str(verified.get("error") or "BatchData address verify failed").strip()
+        raise RuntimeError(error)
+
+    lookup_response = requests.post(
+        os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _LOOKUP_URL).strip() or _LOOKUP_URL,
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         },
-        json=payload,
+        json={"requests": [{"hash": address_hash}]},
         timeout=25,
     )
-    response.raise_for_status()
-    return response.json()
+    lookup_response.raise_for_status()
+    lookup_payload = lookup_response.json()
+    lookup_payload["_batchdata_verify"] = verify_payload
+    return lookup_payload
 
 
 def run() -> Dict[str, int]:
@@ -387,7 +496,7 @@ def run() -> Dict[str, int]:
             artifact_ok, artifact_id = _store.insert_raw_artifact(
                 lead_key=lead_key,
                 channel=_FALLBACK_SOURCE,
-                source_url=os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _DEFAULT_URL),
+                source_url=os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _LOOKUP_URL),
                 retrieved_at=retrieved_at,
                 content_type="application/json",
                 payload_text=json.dumps(payload, ensure_ascii=False),
