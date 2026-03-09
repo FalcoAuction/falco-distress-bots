@@ -87,14 +87,28 @@ def latest_prov_text(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> str
     return row[0] if row and row[0] is not None else None
 
 
+def latest_prov_num(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> float | None:
+    row = cur.execute(
+        """
+        SELECT field_value_num
+        FROM lead_field_provenance
+        WHERE lead_key = ? AND field_name = ?
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
 def latest_contact_ready(cur: sqlite3.Cursor, lead_key: str) -> str | None:
     return latest_prov_text(cur, lead_key, "contact_ready")
 
 
-def latest_attom_raw_json(cur: sqlite3.Cursor, lead_key: str) -> str | None:
+def latest_attom_snapshot(cur: sqlite3.Cursor, lead_key: str) -> dict[str, object | None]:
     row = cur.execute(
         """
-        SELECT attom_raw_json
+        SELECT attom_raw_json, avm_value, avm_low, avm_high
         FROM attom_enrichments
         WHERE lead_key = ?
         ORDER BY enriched_at DESC, id DESC
@@ -102,7 +116,12 @@ def latest_attom_raw_json(cur: sqlite3.Cursor, lead_key: str) -> str | None:
         """,
         (lead_key,),
     ).fetchone()
-    return row[0] if row and row[0] is not None else None
+    return {
+        "attom_raw_json": row[0] if row and row[0] is not None else None,
+        "value_anchor_mid": float(row[1]) if row and row[1] is not None else None,
+        "value_anchor_low": float(row[2]) if row and row[2] is not None else None,
+        "value_anchor_high": float(row[3]) if row and row[3] is not None else None,
+    }
 
 
 def derive_status(existing_row: dict, dts_days) -> str:
@@ -158,6 +177,7 @@ def main() -> None:
         """
         SELECT
             lead_key,
+            address,
             county,
             state,
             auction_readiness,
@@ -187,6 +207,7 @@ def main() -> None:
 
     for (
         lead_key,
+        address,
         county,
         state,
         readiness,
@@ -201,9 +222,10 @@ def main() -> None:
             continue
 
         contact_ready = latest_contact_ready(cur, lead_key) == "1"
-        raw_json = latest_attom_raw_json(cur, lead_key)
+        attom = latest_attom_snapshot(cur, lead_key)
         quality = assess_packet_data(
             {
+                "address": address or "",
                 "county": county,
                 "distress_type": distress_type,
                 "falco_score_internal": falco_score,
@@ -211,7 +233,19 @@ def main() -> None:
                 "equity_band": equity_band,
                 "dts_days": dts_days,
                 "contact_ready": contact_ready,
-                "attom_raw_json": raw_json,
+                "attom_raw_json": attom["attom_raw_json"],
+                "value_anchor_mid": attom["value_anchor_mid"],
+                "value_anchor_low": attom["value_anchor_low"],
+                "value_anchor_high": attom["value_anchor_high"],
+                "property_identifier": latest_prov_text(cur, lead_key, "property_identifier"),
+                "owner_name": latest_prov_text(cur, lead_key, "owner_name"),
+                "owner_mail": latest_prov_text(cur, lead_key, "owner_mail"),
+                "last_sale_date": latest_prov_text(cur, lead_key, "last_sale_date"),
+                "mortgage_lender": latest_prov_text(cur, lead_key, "mortgage_lender"),
+                "year_built": latest_prov_num(cur, lead_key, "year_built"),
+                "building_area_sqft": latest_prov_num(cur, lead_key, "building_area_sqft"),
+                "beds": latest_prov_num(cur, lead_key, "beds"),
+                "baths": latest_prov_num(cur, lead_key, "baths"),
                 "trustee_phone_public": latest_prov_text(cur, lead_key, "trustee_phone_public"),
                 "owner_phone_primary": latest_prov_text(cur, lead_key, "owner_phone_primary"),
                 "owner_phone_secondary": latest_prov_text(cur, lead_key, "owner_phone_secondary"),
