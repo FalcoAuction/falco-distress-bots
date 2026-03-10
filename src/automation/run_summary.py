@@ -192,8 +192,10 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
         reviewed.append(
             {
                 "lead_key": lead_key,
+                "address": fields.get("address"),
                 "county": fields.get("county"),
                 "distress_type": fields.get("distress_type"),
+                "falco_score_internal": fields.get("falco_score_internal"),
                 "auction_readiness": readiness,
                 "dts_days": fields.get("dts_days"),
                 "packet_completeness_pct": quality["packet_completeness_pct"],
@@ -303,4 +305,5 @@ def write_run_summary(
         "packets_created": report["packets"]["packet_count"],
         "vault_ready_count": report["quality"]["vault_ready_count"],
         "top_tier_ready_count": report["quality"]["top_tier_ready_count"],
+        "report": report,
     }
