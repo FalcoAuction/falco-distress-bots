@@ -223,6 +223,10 @@ def main() -> None:
 
         contact_ready = latest_contact_ready(cur, lead_key) == "1"
         attom = latest_attom_snapshot(cur, lead_key)
+        title = masked_title(county or "", distress_type or "")
+        slug = f"{slugify(title)}-{lead_key[:8]}"
+        base = existing.get(slug, {})
+
         quality = assess_packet_data(
             {
                 "address": address or "",
@@ -252,19 +256,18 @@ def main() -> None:
                 "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
             }
         )
+        if not quality["vault_publish_ready"] and not base:
+            continue
         enriched_fields = quality.get("enriched_fields", {})
         published_readiness = readiness
         if readiness == "GREEN" and not quality["top_tier_ready"]:
             published_readiness = "YELLOW"
 
-        title = masked_title(county or "", distress_type or "")
-        slug = f"{slugify(title)}-{lead_key[:8]}"
         packet_file_name = f"{slug}.pdf"
         site_packet_path = SITE_PACKET_DIR / packet_file_name
         shutil.copy2(packet_path, site_packet_path)
         copied += 1
 
-        base = existing.get(slug, {})
         status = derive_status(base, dts_days)
         market = f"{county or 'Unknown County'}, {state or 'TN'}"
         auction_window = f"{int(dts_days)} Days" if dts_days is not None else "Confidential"
