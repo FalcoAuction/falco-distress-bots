@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..packaging.data_quality import assess_packet_data
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE_REPO = ROOT.parent / "falco-site"
@@ -71,6 +72,148 @@ def _attach_vault_state(rows: list[dict[str, Any]], live_slugs: list[str]) -> li
             }
         )
     return attached
+
+
+def _build_vault_candidates(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    attom_map: dict[str, dict[str, Any]] = {}
+    for row in con.execute(
+        """
+        WITH latest_attom AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+        FROM latest_attom
+        WHERE rn = 1
+        """
+    ).fetchall():
+        attom_map[row["lead_key"]] = dict(row)
+
+    candidates: list[dict[str, Any]] = []
+    lead_rows = con.execute(
+        """
+        SELECT
+          lead_key,
+          address,
+          county,
+          distress_type,
+          falco_score_internal,
+          auction_readiness,
+          equity_band,
+          dts_days,
+          COALESCE(uw_ready, 0) AS uw_ready
+        FROM leads
+        WHERE dts_days IS NOT NULL
+        ORDER BY COALESCE(dts_days, 9999) ASC, COALESCE(falco_score_internal, 0) DESC
+        LIMIT 50
+        """
+    ).fetchall()
+
+    for lead in lead_rows:
+        lead_key = str(lead["lead_key"] or "")
+        prefix = _lead_key_prefix(lead_key)
+        matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
+        if matched:
+            continue
+
+        attom = attom_map.get(lead_key) or {}
+        fields: dict[str, Any] = dict(lead)
+        fields["contact_ready"] = _fetch_scalar(
+            con.cursor(),
+            """
+            SELECT COUNT(*)
+            FROM lead_field_provenance
+            WHERE lead_key=?
+              AND field_name='contact_ready'
+              AND field_value_text='1'
+            """,
+            (lead_key,),
+        ) > 0
+        fields["attom_raw_json"] = attom.get("attom_raw_json")
+        fields["value_anchor_mid"] = attom.get("avm_value")
+        fields["value_anchor_low"] = attom.get("avm_low")
+        fields["value_anchor_high"] = attom.get("avm_high")
+        for field_name in (
+            "trustee_phone_public",
+            "owner_phone_primary",
+            "owner_phone_secondary",
+            "notice_phone",
+            "owner_name",
+            "owner_mail",
+            "last_sale_date",
+            "mortgage_lender",
+            "property_identifier",
+        ):
+            row = con.execute(
+                """
+                SELECT field_value_text
+                FROM lead_field_provenance
+                WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+                ORDER BY created_at DESC, prov_id DESC
+                LIMIT 1
+                """,
+                (lead_key, field_name),
+            ).fetchone()
+            if row and row[0]:
+                fields[field_name] = row[0]
+        for field_name in ("year_built", "building_area_sqft", "beds", "baths"):
+            row = con.execute(
+                """
+                SELECT field_value_num
+                FROM lead_field_provenance
+                WHERE lead_key=? AND field_name=? AND field_value_num IS NOT NULL
+                ORDER BY created_at DESC, prov_id DESC
+                LIMIT 1
+                """,
+                (lead_key, field_name),
+            ).fetchone()
+            if row and row[0] is not None:
+                fields[field_name] = float(row[0])
+
+        quality = assess_packet_data(fields)
+        readiness = str(lead["auction_readiness"] or "").upper()
+        if not quality["vault_publish_ready"]:
+            continue
+
+        candidates.append(
+            {
+                "lead_key": lead_key,
+                "address": lead["address"],
+                "county": lead["county"],
+                "distress_type": lead["distress_type"],
+                "falco_score_internal": lead["falco_score_internal"],
+                "auction_readiness": lead["auction_readiness"],
+                "equity_band": lead["equity_band"],
+                "dts_days": lead["dts_days"],
+                "uw_ready": lead["uw_ready"],
+                "vaultLive": False,
+                "vaultSlug": None,
+                "vaultPublishReady": bool(quality["vault_publish_ready"]),
+                "topTierReady": bool(quality["top_tier_ready"]),
+                "packetCompletenessPct": quality["packet_completeness_pct"],
+                "executionBlockers": quality["execution_blockers"],
+            }
+        )
+
+    candidates.sort(
+        key=lambda row: (
+            0 if row["vaultPublishReady"] else 1,
+            0 if str(row.get("auction_readiness") or "").upper() == "GREEN" else 1,
+            -(row.get("falco_score_internal") or 0),
+            row.get("dts_days") or 9999,
+        )
+    )
+    return candidates[:limit]
 
 
 def _fetch_scalar(cur: sqlite3.Cursor, sql: str, params: tuple[Any, ...] = ()) -> int:
@@ -180,10 +323,10 @@ def _operator_snapshot() -> dict[str, Any]:
                 """
             ).fetchall()
         ]
+        live_slugs = _load_live_slugs()
+        vault_candidates = _build_vault_candidates(con, live_slugs)
     finally:
         con.close()
-
-    live_slugs = _load_live_slugs()
 
     return {
         "generatedAt": _utc_now(),
@@ -197,11 +340,13 @@ def _operator_snapshot() -> dict[str, Any]:
             "packeted": packeted,
             "contactReady": contact_ready,
             "vaultLive": len(live_slugs),
+            "vaultQueue": len(vault_candidates),
             "pendingApprovals": 0,
         },
         "recentLeads": _attach_vault_state(recent_leads, live_slugs),
         "topCandidates": _attach_vault_state(top_candidates, live_slugs),
         "recentPackets": _attach_vault_state(recent_packets, live_slugs),
+        "vaultCandidates": vault_candidates,
     }
 
 

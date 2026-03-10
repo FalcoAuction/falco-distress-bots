@@ -9,7 +9,9 @@ from typing import Any, Dict, Optional
 
 import requests
 
+from .contact_enricher import enrich_contact_data
 from ..packaging.data_quality import assess_packet_data
+from ..settings import is_allowed_county, within_target_counties
 from ..storage import sqlite_store as _store
 
 _VERIFY_URL = "https://api.batchdata.com/api/v1/address/verify"
@@ -115,6 +117,71 @@ def _latest_prov_map(cur: sqlite3.Cursor, lead_key: str) -> Dict[str, Any]:
         elif row[1] is not None:
             out[field_name] = row[1]
     return out
+
+
+def _latest_text_field(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> Optional[str]:
+    row = cur.execute(
+        """
+        SELECT field_value_text
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    if not row or row[0] is None:
+        return None
+    return str(row[0]).strip() or None
+
+
+def _hydrate_contact_fields(cur: sqlite3.Cursor, lead_key: str, fields: Dict[str, Any]) -> None:
+    for field_name in (
+        "notice_phone",
+        "ft_trustee_firm",
+        "ft_trustee_name_raw",
+        "notice_trustee_firm",
+        "notice_trustee_name_raw",
+        "trustee_attorney",
+        "trustee_phone_public",
+        "owner_phone_primary",
+        "owner_phone_secondary",
+        "contact_ready",
+    ):
+        value = _latest_text_field(cur, lead_key, field_name)
+        if value and not _truthy(fields.get(field_name)):
+            fields[field_name] = value
+
+    rows = cur.execute(
+        """
+        SELECT raw_json
+        FROM ingest_events
+        WHERE lead_key=? AND raw_json IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 5
+        """,
+        (lead_key,),
+    ).fetchall()
+    for row in rows:
+        raw_json = row[0]
+        if not raw_json:
+            continue
+        try:
+            blob = json.loads(raw_json)
+        except Exception:
+            continue
+        if not isinstance(blob, dict):
+            continue
+        for source_key, target_key in (
+            ("trustee_firm", "ft_trustee_firm"),
+            ("trustee_attorney", "trustee_attorney"),
+            ("trustee", "ft_trustee_name_raw"),
+            ("contact_info", "notice_trustee_name_raw"),
+            ("phone", "notice_phone"),
+        ):
+            value = blob.get(source_key)
+            if _truthy(value) and not _truthy(fields.get(target_key)):
+                fields[target_key] = str(value).strip()
 
 
 def _first_obj(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -455,6 +522,7 @@ def run() -> Dict[str, int]:
     summary = {
         "requested": 0,
         "enriched_count": 0,
+        "contact_enriched_count": 0,
         "skipped_missing_address": 0,
         "skipped_already_complete": 0,
         "skipped_not_worth_it": 0,
@@ -473,6 +541,9 @@ def run() -> Dict[str, int]:
         if not address:
             summary["skipped_missing_address"] += 1
             continue
+        if county and (not is_allowed_county(county) or not within_target_counties(county)):
+            summary["skipped_not_worth_it"] += 1
+            continue
 
         score = float(row["falco_score_internal"] or 0)
         readiness = str(row["auction_readiness"] or "").upper()
@@ -483,36 +554,52 @@ def run() -> Dict[str, int]:
         fields = dict(row)
         fields.update(_extract_attom_fields(row["attom_raw_json"]))
         fields.update(_latest_prov_map(cur, lead_key))
+        _hydrate_contact_fields(cur, lead_key, fields)
         quality = assess_packet_data(fields)
         targets = quality["batchdata_fallback_targets"]
-        if not targets:
+        needs_contact = "Actionable outreach path missing" in quality["execution_blockers"]
+        if not targets and not needs_contact:
             summary["skipped_already_complete"] += 1
             continue
 
         try:
-            summary["requested"] += 1
-            payload = _call_batchdata(address, county, state)
             retrieved_at = _now_iso()
-            artifact_ok, artifact_id = _store.insert_raw_artifact(
-                lead_key=lead_key,
-                channel=_FALLBACK_SOURCE,
-                source_url=os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _LOOKUP_URL),
-                retrieved_at=retrieved_at,
-                content_type="application/json",
-                payload_text=json.dumps(payload, ensure_ascii=False),
-                notes="fallback_property_detail",
-            )
-            if not artifact_ok:
-                artifact_id = None
-
-            extracted = _extract_batchdata_fields(payload)
             wrote_any = False
-            for field_name in targets:
-                value = extracted.get(field_name)
-                if not _truthy(value):
-                    continue
-                if _write_field(lead_key, field_name, value, artifact_id, retrieved_at):
-                    wrote_any = True
+            artifact_id = None
+
+            if targets:
+                summary["requested"] += 1
+                payload = _call_batchdata(address, county, state)
+                artifact_ok, artifact_id = _store.insert_raw_artifact(
+                    lead_key=lead_key,
+                    channel=_FALLBACK_SOURCE,
+                    source_url=os.environ.get("FALCO_BATCHDATA_PROPERTY_URL", _LOOKUP_URL),
+                    retrieved_at=retrieved_at,
+                    content_type="application/json",
+                    payload_text=json.dumps(payload, ensure_ascii=False),
+                    notes="fallback_property_detail",
+                )
+                if not artifact_ok:
+                    artifact_id = None
+
+                extracted = _extract_batchdata_fields(payload)
+                for field_name in targets:
+                    value = extracted.get(field_name)
+                    if not _truthy(value):
+                        continue
+                    if _write_field(lead_key, field_name, value, artifact_id, retrieved_at):
+                        wrote_any = True
+                        fields[field_name] = value
+
+            contact_written = False
+            if needs_contact:
+                contact_summary = enrich_contact_data(lead_key, fields, cur)
+                if contact_summary.get("t2_written") or contact_summary.get("t3_written"):
+                    contact_written = True
+                    summary["contact_enriched_count"] += 1
+
+            if wrote_any or contact_written:
+                con.commit()
             if wrote_any:
                 summary["enriched_count"] += 1
         except Exception as exc:
