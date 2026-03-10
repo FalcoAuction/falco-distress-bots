@@ -21,7 +21,12 @@ from .enrichment import notice_pdf_extractor
 from .enrichment import batchdata_fallback
 from .enrichment import bankruptcy_overlay
 from .enrichment import probate_overlay
-from .automation import maybe_publish_to_vault, write_agent_reports, write_run_summary
+from .automation import (
+    maybe_publish_to_vault,
+    write_agent_reports,
+    write_run_summary,
+)
+from .automation.site_snapshots import write_site_snapshots
 from .core.run_metadata import store_run_metadata
 from .telemetry import run_logger
 
@@ -126,6 +131,8 @@ def main():
         print(f"[RunSummary] {summary_result}")
         agent_result = write_agent_reports(run_id, stage_results, summary_result["report"])
         print(f"[AgentReports] {agent_result}")
+        snapshot_result = write_site_snapshots()
+        print(f"[SiteSnapshots] {snapshot_result}")
 
         run_logger.finish_run_success(run_id, {
             "run_id": run_id,
@@ -134,6 +141,7 @@ def main():
             "publish": publish_result,
             "report": summary_result,
             "agents": agent_result,
+            "site_snapshots": snapshot_result,
         })
 
     except Exception:

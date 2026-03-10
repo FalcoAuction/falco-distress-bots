@@ -17,6 +17,8 @@ from urllib.parse import parse_qs, quote_plus, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 
+from .site_snapshots import write_site_snapshots
+
 
 SEARCH_URL = "https://html.duckduckgo.com/html/"
 USER_AGENT = "Mozilla/5.0 (Falco Outreach Agent)"
@@ -560,6 +562,11 @@ def main() -> None:
             "outputs": outputs,
             "send": send_result,
         }
+
+    try:
+        summary["site_snapshots"] = write_site_snapshots()
+    except Exception as exc:
+        summary["site_snapshots"] = {"ok": False, "error": str(exc)}
 
     print(json.dumps(summary, indent=2))
 

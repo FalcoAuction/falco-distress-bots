@@ -142,7 +142,7 @@ def _valuation_display(v: Any) -> Optional[str]:
         return None
     key = s.strip().lower()
     mapping = {
-        "attom": "ATTOM AVM",
+        "attom": "Enterprise Third-Party API",
         "falco": "Falco Underwriting",
         "falco_underwriting": "Falco Underwriting",
     }
@@ -1683,7 +1683,7 @@ def _page1_executive(
         _uw_bid_fmt = str(_mb_raw).strip() if _mb_raw is not None else ""
     if _uw_avm_conf:
         doc.kv("Primary Valuation Input", _valuation_display(_uw_avm_conf), bold_v=True)
-        doc.kv("Valuation Source", "ATTOM AVM + Falco pricing")
+        doc.kv("Valuation Source", "Enterprise third-party API + Falco pricing")
     elif low is None and mid is None and high is None:
         doc.body("Value: Pending Review (no property data yet)", size=8.5, color=_AMBER)
     doc.kv("Value Low",    _fmt_cur(low))
