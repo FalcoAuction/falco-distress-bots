@@ -188,7 +188,7 @@ class _Doc:
         run_id   = os.getenv("FALCO_RUN_ID", "unknown_run")
         gen_date = datetime.utcnow().date().isoformat()
         footer_left = (
-            f"FALCO Auction Opportunity Brief | Confidential — For Auction Partners | "
+            f"FALCO Operator Review Brief | Confidential - For Licensed/Execution Partners | "
             f"Template {_TEMPLATE_VERSION} | Run {run_id} | Generated {gen_date}"
         )
         c.drawString(ML, fy - 11, footer_left)
@@ -226,7 +226,7 @@ class _Doc:
         self._draw_logo_chip(ML, PAGE_H - bh + 7, 18)
         c.setFont("Helvetica", 7.5)
         c.setFillColor(colors.HexColor("#CFCFCF"))
-        c.drawString(ML + 26, PAGE_H - bh + 24, "FALCO AUCTION BRIEF")
+        c.drawString(ML + 26, PAGE_H - bh + 24, "FALCO OPERATOR REVIEW BRIEF")
         c.setFont("Helvetica-Bold", 14)
         c.setFillColor(_WHITE)
         c.drawString(ML + 26, PAGE_H - bh + 9, title)
@@ -237,7 +237,7 @@ class _Doc:
         self.y = PAGE_H - bh - 14
 
     def cover_header(self, address: str, location: str) -> None:
-        """Page-1 header band: address + county/state + 'Auction Opportunity Brief' badge."""
+        """Page-1 header band: address + county/state + operator review badge."""
         c  = self.c
         bh = 64
         c.setFillColor(_NAVY)
@@ -248,7 +248,7 @@ class _Doc:
         c.setFillColor(colors.HexColor("#CFCFCF"))
         c.drawString(ML + 32, PAGE_H - 19, "FALCO")
         c.setFont("Helvetica-Bold", 8)
-        c.drawRightString(PAGE_W - MR, PAGE_H - 18, "Confidential Auction Opportunity Brief")
+        c.drawRightString(PAGE_W - MR, PAGE_H - 18, "Confidential Operator Review Brief")
         # Address — main title
         addr_display = address[:72]
         c.setFont("Helvetica-Bold", 16)
@@ -796,7 +796,7 @@ def _deterministic_narratives(fields: Dict[str, Any]) -> Dict[str, str]:
             f"AVM spread of {_fmt_pct(spread_pct)} exceeds 18% — low valuation confidence"
         )
     if readiness not in ("GREEN",):
-        risk_items.append(f"auction readiness is {_readiness_label(readiness)} — diamond criteria not yet met")
+        risk_items.append(f"screening status is {_readiness_label(readiness)} - priority criteria not yet met")
     if low is not None and float(low) < 150_000:
         risk_items.append("estimated value below $150k — verify market depth and institutional buyer pool")
     if not risk_items:
@@ -820,7 +820,7 @@ def _ai_narratives(fields: Dict[str, Any], api_key: str, model: str) -> Dict[str
     ctx = "\n".join([
         f"Property: {fields.get('address')}, {fields.get('county')} County, {fields.get('state')}",
         f"Days to Sale: {fields.get('dts_days')}",
-        f"Auction Readiness: {fields.get('auction_readiness')}",
+        f"Screening Status: {fields.get('auction_readiness')}",
         f"Falco Score (0-100): {fields.get('falco_score_internal')}",
         f"Equity Band: {fields.get('equity_band')}",
         f"AVM Low: {_fmt_cur(fields.get('value_anchor_low'))}",
@@ -1761,6 +1761,11 @@ def _page1_executive(
     if _execution_note:
         _execution_color = _AMBER if "not" in _execution_note.lower() or "thin" in _execution_note.lower() else _SLATE
         doc.body(_execution_note, size=8.5, color=_execution_color)
+    doc.body(
+        "Partner validation required: final execution viability, control path, and auction fit must be confirmed by a licensed/operator counterparty.",
+        size=8.5,
+        color=_SLATE,
+    )
     doc.gap(6)
 
     # 6) Risk Flags
@@ -3109,21 +3114,21 @@ def _page5_scoring_appendix(
     fields: Dict[str, Any],
     img_embedded: bool = False,
 ) -> None:
-    doc.page_header("Qualification Appendix")
+    doc.page_header("Screening Appendix")
 
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
 
     doc.section("Scoring Summary")
     doc.kv("FALCO Score", _val(fields.get("falco_score_internal")), bold_v=True)
-    doc.kv("Auction Readiness",      _readiness_label(readiness), vc=rc, bold_v=True)
+    doc.kv("Screening Status",       _readiness_label(readiness), vc=rc, bold_v=True)
     doc.kv("Equity Band",            _val(fields.get("equity_band")))
     doc.kv("Days Until Scheduled Sale", _val(fields.get("dts_days")))
     doc.kv("Enrichment Status",      _val(fields.get("attom_status")))
     doc.kv("AVM Confidence",         _val(fields.get("confidence")))
     doc.gap(10)
 
-    doc.section("QUALIFICATION CHECKLIST")
+    doc.section("SCREENING CHECKLIST")
     low        = fields.get("value_anchor_low")
     dts        = fields.get("dts_days")
     spread_pct = fields.get("spread_pct")
@@ -3143,15 +3148,15 @@ def _page5_scoring_appendix(
     diamond_pass = all(g for _, g in gates)
     if diamond_pass:
         doc.kv(
-            "Full Qualification",
-            "QUALIFIED — All criteria met.",
+            "Screening Result",
+            "QUALIFIED - All screening criteria met.",
             vc=_GREEN,
             bold_v=True,
         )
     else:
         doc.kv(
-            "Full Qualification",
-            "NOT FULLY QUALIFIED — One or more criteria not met. See checklist above.",
+            "Screening Result",
+            "NOT FULLY QUALIFIED - One or more screening criteria not met. See checklist above.",
             vc=_AMBER,
             bold_v=True,
         )
@@ -3165,7 +3170,7 @@ def _page5_scoring_appendix(
         doc.bullet("Property records (if available)")
     else:
         doc.bullet("Property records — not available for this address")
-    doc.bullet("FALCO scoring and qualification")
+    doc.bullet("FALCO scoring and screening")
     doc.bullet("Lead records (address, county, timeline)")
     if img_embedded:
         doc.bullet("Image Source: Google Street View (static)")
@@ -3180,7 +3185,7 @@ def _page5_scoring_appendix(
 
     doc.body(
         "This brief is produced from published property data, automated valuation models, and rule-based scoring. "
-        "Qualification results reflect fixed thresholds, not personal opinion.",
+        "Screening results reflect fixed thresholds, not personal opinion. Final execution viability remains subject to licensed/operator validation.",
         size=9,
         leading=13,
     )
@@ -3196,9 +3201,9 @@ def _page5_scoring_appendix(
 
     doc.gap(12)
 
-    doc.section("Full Qualification Criteria")
+    doc.section("Screening Criteria")
     doc.bullet("Property data must be enriched")
-    doc.bullet("Auction readiness must be GREEN")
+    doc.bullet("Screening status must be GREEN")
     doc.bullet("Days-to-sale must be 21 to 60 days")
     doc.bullet("Value Low must be at least $300,000")
     doc.bullet("Value spread must be 18 percent or less")
