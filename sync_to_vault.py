@@ -155,11 +155,10 @@ def masked_title(county: str, distress_type: str) -> str:
 
 def build_summary(county: str, distress_type: str, dts_days, readiness: str, falco_score, contact_ready: bool) -> str:
     dts_txt = f"{int(dts_days)} days" if dts_days is not None else "unknown timing"
-    score_txt = f"FALCO score {int(falco_score)}" if falco_score is not None else "score pending"
     contact_txt = "contact ready" if contact_ready else "contact pending"
     return (
         f"{distress_type or 'Distress'} opportunity in {county or 'target market'} with "
-        f"{readiness or 'unknown'} readiness, {score_txt}, {contact_txt}, and auction timing of {dts_txt}."
+        f"{readiness or 'unknown'} readiness, {contact_txt}, and auction timing of {dts_txt}."
     )
 
 
@@ -168,8 +167,6 @@ def build_teaser(county: str, readiness: str, falco_score, dts_days) -> str:
         f"County: {county or 'Unknown'}",
         f"Readiness: {readiness or 'Unknown'}",
     ]
-    if falco_score is not None:
-        parts.append(f"FALCO Score: {int(falco_score)}")
     if dts_days is not None:
         parts.append(f"Auction In: {int(dts_days)} days")
     return " • ".join(parts)
