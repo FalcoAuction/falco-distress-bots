@@ -31,6 +31,7 @@ _OWNERSHIP_FIELDS = {
     "owner_mail": "Owner mailing address missing",
     "last_sale_date": "Last transfer date missing",
     "mortgage_lender": "Mortgage lender missing",
+    "mortgage_amount": "Original loan amount missing",
 }
 
 _OUTREACH_FIELDS = {
@@ -43,6 +44,7 @@ _EXECUTION_REQUIRED_FIELDS = {
     "owner_mail": "Owner mailing address missing",
     "last_sale_date": "Last transfer date missing",
     "mortgage_lender": "Mortgage lender missing",
+    "mortgage_amount": "Original loan amount missing",
 }
 
 _BATCHDATA_TARGET_FIELDS = frozenset({
@@ -50,6 +52,7 @@ _BATCHDATA_TARGET_FIELDS = frozenset({
     "owner_mail",
     "last_sale_date",
     "mortgage_lender",
+    "mortgage_amount",
     "property_identifier",
     "year_built",
     "building_area_sqft",
@@ -87,6 +90,7 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
         "owner_mail": None,
         "last_sale_date": None,
         "mortgage_lender": None,
+        "mortgage_amount": None,
     }
 
     owner_blob = blob.get("owner")
@@ -120,6 +124,22 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
         lender = mortgage_blob.get("lender") or {}
         if isinstance(lender, dict):
             out["mortgage_lender"] = lender.get("name") or None
+
+        mortgage = mortgage_blob.get("mortgage") or {}
+        if isinstance(mortgage, dict):
+            out["mortgage_amount"] = (
+                mortgage.get("amount")
+                or mortgage.get("loanAmount")
+                or mortgage.get("originationAmount")
+                or None
+            )
+        if not out["mortgage_amount"]:
+            out["mortgage_amount"] = (
+                mortgage_blob.get("amount")
+                or mortgage_blob.get("loanAmount")
+                or mortgage_blob.get("originationAmount")
+                or None
+            )
 
     return out
 
@@ -187,7 +207,11 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("notice_phone", "trustee_phone_public")
     )
     owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
-    debt_context = _present(enriched.get("mortgage_lender")) and _present(enriched.get("last_sale_date"))
+    debt_context = (
+        _present(enriched.get("mortgage_lender"))
+        and _present(enriched.get("mortgage_amount"))
+        and _present(enriched.get("last_sale_date"))
+    )
     value_context = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
     dts_days = _int_or_none(enriched.get("dts_days"))
 
@@ -428,6 +452,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
                 "owner_mail",
                 "last_sale_date",
                 "mortgage_lender",
+                "mortgage_amount",
                 "property_identifier",
                 "year_built",
                 "building_area_sqft",
@@ -444,6 +469,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
             "owner_mail": enriched.get("owner_mail"),
             "last_sale_date": enriched.get("last_sale_date"),
             "mortgage_lender": enriched.get("mortgage_lender"),
+            "mortgage_amount": enriched.get("mortgage_amount"),
             "year_built": enriched.get("year_built"),
             "building_area_sqft": enriched.get("building_area_sqft"),
             "beds": enriched.get("beds"),

@@ -22,6 +22,7 @@ _TARGET_FIELDS = (
     "owner_mail",
     "last_sale_date",
     "mortgage_lender",
+    "mortgage_amount",
     "property_identifier",
     "year_built",
     "building_area_sqft",
@@ -80,6 +81,21 @@ def _extract_attom_fields(raw_json: Any) -> Dict[str, Any]:
         lender = mortgage_blob.get("lender") or {}
         if isinstance(lender, dict):
             out["mortgage_lender"] = lender.get("name") or None
+        mortgage = mortgage_blob.get("mortgage") or {}
+        if isinstance(mortgage, dict):
+            out["mortgage_amount"] = (
+                mortgage.get("amount")
+                or mortgage.get("loanAmount")
+                or mortgage.get("originationAmount")
+                or None
+            )
+        if not out.get("mortgage_amount"):
+            out["mortgage_amount"] = (
+                mortgage_blob.get("amount")
+                or mortgage_blob.get("loanAmount")
+                or mortgage_blob.get("originationAmount")
+                or None
+            )
 
     detail = blob.get("detail") if isinstance(blob.get("detail"), dict) else blob
     if isinstance(detail, dict):
@@ -262,6 +278,18 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or _dig(item, "sale", "lastSale", "mortgages", 0, "lenderName")
         or _dig(item, "sale", "lastTransfer", "mortgages", 0, "lenderName")
     )
+    mortgage_amount = (
+        _dig(item, "mortgage", "amount")
+        or _dig(item, "mortgage", "loanAmount")
+        or _dig(item, "mortgage", "originationAmount")
+        or _dig(item, "openMortgage", "loanAmount")
+        or _dig(item, "openMortgage", "amount")
+        or _dig(item, "openLien", "mortgages", "loanAmount")
+        or _dig(item, "openLien", "mortgages", 0, "loanAmount")
+        or _dig(item, "openLien", "mortgages", 0, "amount")
+        or _dig(item, "sale", "lastSale", "mortgages", 0, "loanAmount")
+        or _dig(item, "sale", "lastTransfer", "mortgages", 0, "loanAmount")
+    )
     property_identifier = (
         _dig(item, "parcel", "apn")
         or _dig(item, "ids", "apn")
@@ -306,6 +334,9 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         fields["last_sale_date"] = _coerce_date(last_sale_date)
     if _truthy(mortgage_lender):
         fields["mortgage_lender"] = str(mortgage_lender).strip()
+    mortgage_amount_num = _coerce_num(mortgage_amount)
+    if mortgage_amount_num is not None:
+        fields["mortgage_amount"] = mortgage_amount_num
     if _truthy(property_identifier):
         fields["property_identifier"] = str(property_identifier).strip()
 
