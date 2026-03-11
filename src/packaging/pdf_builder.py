@@ -445,11 +445,14 @@ def _draw_kpi_tiles(doc: _Doc, fields: Dict[str, Any]) -> None:
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
     tiles = [
         ("Falco Score",  _val(fields.get("falco_score_internal"), "—"), _SLATE),
-        ("Days to Sale", _val(fields.get("dts_days"), "—"),             _SLATE),
+        ("Days Until Scheduled Sale", _val(fields.get("dts_days"), "—"), _SLATE),
         ("Readiness",    _readiness_label(readiness),                   rc),
         ("AVM Low",      _fmt_cur(fields.get("value_anchor_low")),      _SLATE),
         ("Diamond",      "PASS" if diamond else "FAIL",                 _GREEN if diamond else _RED),
     ]
+    # Clarify that this is the scheduled foreclosure sale countdown.
+    if len(tiles) > 1:
+        tiles[1] = ("Days Until Scheduled Sale", tiles[1][1], tiles[1][2])
     n       = len(tiles)
     gap_pts = 6
     tw      = (CW - gap_pts * (n - 1)) / n
@@ -1576,8 +1579,8 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     _snap_kv(_cy, "County", _county, "Distress Type", _dist)
     _cy -= _ROW_H
 
-    # Row 3: Auction in | Market Value
-    _snap_kv(_cy, "Auction in", _dts_str, "Market Value", _val_str, bold1=True)
+    # Row 3: Scheduled sale timing | Market Value
+    _snap_kv(_cy, "Sched. Sale In", _dts_str, "Market Value", _val_str, bold1=True)
     _cy -= _ROW_H
 
     # Row 4: Target Bid | Occupancy
@@ -1661,10 +1664,10 @@ def _page1_executive(
     # 2) Why This Property Is in Distress
     doc.section("Auction Trigger")
     doc.kv("Distress Type",     _distress_label(fields))
-    doc.kv("Sale Date",         _val(fields.get("sale_date_iso") or fields.get("sale_date")))
-    doc.kv("Sale Time",         _val(fields.get("sale_time")))
+    doc.kv("Scheduled Sale Date", _val(fields.get("sale_date_iso") or fields.get("sale_date")))
+    doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
     _dts_raw = fields.get("dts_days")
-    doc.kv("Auction in",        f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
+    doc.kv("Scheduled Sale In", f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
     doc.kv("Enrichment Status", _val(fields.get("attom_status")))
     doc.gap(6)
 
@@ -1917,9 +1920,9 @@ def _page1_executive(
         # Phone priority: notice-native > trustee firm table (T2)
         _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
         if _ph_clean:
-            _contact_pairs.append(("Phone", _ph_clean))
+            _contact_pairs.append(("Sale Status Phone", _ph_clean))
         elif _t2_phone:
-            _contact_pairs.append(("Trustee Phone", _t2_phone))
+            _contact_pairs.append(("Sale Status Phone", _t2_phone))
         # Owner phone (T3) — always shown when present, separate row
         if _t3_phone:
             _contact_pairs.append(("Owner Contact", _t3_phone))
@@ -1930,7 +1933,7 @@ def _page1_executive(
         if _nc.get("notice_trustee_address"):
             _contact_pairs.append(("Trustee Address", _nc["notice_trustee_address"]))
         if _nc_sale_time:
-            _contact_pairs.append(("Sale Time", _nc_sale_time))
+            _contact_pairs.append(("Scheduled Sale Time", _nc_sale_time))
         if _nc_sale_location:
             _contact_pairs.append(("Sale Location", _nc_sale_location))
         doc.two_col(_contact_pairs, lw=82)
@@ -2469,9 +2472,9 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
 
     _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
     if _ph_clean:
-        _contact_pairs.append(("Phone", _ph_clean))
+        _contact_pairs.append(("Sale Status Phone", _ph_clean))
     elif _t2_phone:
-        _contact_pairs.append(("Trustee Phone", _t2_phone))
+        _contact_pairs.append(("Sale Status Phone", _t2_phone))
     if _t3_phone:
         _contact_pairs.append(("Owner Contact", _t3_phone))
     if _t3_phone_2 and _t3_phone_2 != _t3_phone:
@@ -2481,7 +2484,7 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     if _nc.get("notice_trustee_address"):
         _contact_pairs.append(("Trustee Address", _nc["notice_trustee_address"]))
     if _nc_sale_time:
-        _contact_pairs.append(("Sale Time", _nc_sale_time))
+        _contact_pairs.append(("Scheduled Sale Time", _nc_sale_time))
     if _nc_sale_location:
         _contact_pairs.append(("Sale Location", _nc_sale_location))
 
@@ -2545,6 +2548,13 @@ def _page_property_snapshot(
     if _contact_pairs:
         for _label, _value in _contact_pairs:
             doc.kv(_label, _value, lw=110)
+        doc.body(
+            "Trustee contact is included for sale-status, postponement, and file-confirmation checks. "
+            "Execution path may still run borrower-side, lender-side, trustee-side, or through auction channel depending on the file.",
+            size=7.5,
+            color=_GRAY,
+            leading=11,
+        )
     else:
         doc.bullet("No contact found in notice artifacts yet.")
 
@@ -2621,9 +2631,12 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
     doc.page_header("Timing, Value & Underwriting")
 
     doc.section("Sale Timeline")
-    doc.kv("Sale Date",         _val(fields.get("sale_date_iso") or fields.get("sale_date")), bold_v=True)
-    doc.kv("Sale Time",         _val(fields.get("sale_time")))
-    doc.kv("Days to Sale",      _val(fields.get("dts_days")))
+    doc.kv("Scheduled Sale Date", _val(fields.get("sale_date_iso") or fields.get("sale_date")), bold_v=True)
+    doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
+    _dts_display = _val(fields.get("dts_days"))
+    if _dts_display not in {"â€”", "Unknown"}:
+        _dts_display = f"{_dts_display} days"
+    doc.kv("Days Until Scheduled Sale", _dts_display)
     doc.kv("Sale Location",     _val(fields.get("sale_location")), lw=110)
     doc.kv("Sale Type",         _val(fields.get("sale_type")))
     doc.kv("Enriched At",       _val(fields.get("enriched_at")))
@@ -3079,7 +3092,7 @@ def _page5_scoring_appendix(
     doc.kv("FALCO Score", _val(fields.get("falco_score_internal")), bold_v=True)
     doc.kv("Auction Readiness",      _readiness_label(readiness), vc=rc, bold_v=True)
     doc.kv("Equity Band",            _val(fields.get("equity_band")))
-    doc.kv("Days to Sale",           _val(fields.get("dts_days")))
+    doc.kv("Days Until Scheduled Sale", _val(fields.get("dts_days")))
     doc.kv("Enrichment Status",      _val(fields.get("attom_status")))
     doc.kv("AVM Confidence",         _val(fields.get("confidence")))
     doc.gap(10)
@@ -3152,7 +3165,7 @@ def _page5_scoring_appendix(
     doc.bullet("AVM Spread Percent = (AVM High minus AVM Low) divided by AVM Low")
     doc.bullet("Spread Classification: Tight (<=12), Normal (<=18), Wide (>18)")
     doc.bullet("Bid Cap Guidance = Value Low x 0.85")
-    doc.bullet("Target Bid Window = 21 to 60 days to sale")
+    doc.bullet("Target bid window = 21 to 60 days before the scheduled sale")
     doc.bullet("Minimum Value Threshold = $300,000")
 
     doc.gap(12)
