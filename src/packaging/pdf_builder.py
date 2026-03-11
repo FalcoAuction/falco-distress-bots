@@ -1608,6 +1608,22 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     doc.gap(10)
 
 
+def _execution_reality_rows(fields: Dict[str, Any]) -> Tuple[List[Tuple[str, str]], Optional[str]]:
+    packet_quality = fields.get("packet_quality") if isinstance(fields.get("packet_quality"), dict) else {}
+    execution = packet_quality.get("execution_reality") if isinstance(packet_quality.get("execution_reality"), dict) else {}
+    notes = packet_quality.get("execution_notes") if isinstance(packet_quality.get("execution_notes"), list) else []
+
+    rows: List[Tuple[str, str]] = [
+        ("Contact Path", _val(execution.get("contact_path_quality"), "Unknown")),
+        ("Likely Control", _val(execution.get("control_party"), "Unclear")),
+        ("Execution Posture", _val(execution.get("execution_posture"), "Needs More Control Clarity")),
+        ("Workability", _val(execution.get("workability_band"), "Limited")),
+    ]
+
+    note = notes[0] if notes else None
+    return rows, note
+
+
 def _page1_executive(
     doc: _Doc,
     fields: Dict[str, Any],
@@ -1737,7 +1753,17 @@ def _page1_executive(
             )
     doc.gap(6)
 
-    # 5) Risk Flags
+    # 5) Execution Reality
+    doc.section("Execution Reality")
+    _execution_rows, _execution_note = _execution_reality_rows(fields)
+    for _label, _value in _execution_rows:
+        doc.kv(_label, _value, bold_v=True)
+    if _execution_note:
+        _execution_color = _AMBER if "not" in _execution_note.lower() or "thin" in _execution_note.lower() else _SLATE
+        doc.body(_execution_note, size=8.5, color=_execution_color)
+    doc.gap(6)
+
+    # 6) Risk Flags
     doc.section("Risk Flags")
     flags = _risk_flags(fields)
     if not flags:
@@ -1758,7 +1784,7 @@ def _page1_executive(
         doc.kv("Condition", _cond_status, bold_v=True)
     doc.gap(6)
 
-    # 6) Bid Guidance
+    # 7) Bid Guidance
     doc.section("Bid Guidance")
     if low is not None:
         try:
@@ -1778,7 +1804,7 @@ def _page1_executive(
         doc.body("Value data unavailable — bid cap cannot be computed.", size=8.5, color=_AMBER)
     doc.gap(8)
 
-    # 7) Bid Range
+    # 8) Bid Range
     try:
         _bs_target: Optional[float] = None
         # Prefer UW max bid (numeric); fall back to AVM low * 0.85
@@ -1834,7 +1860,7 @@ def _page1_executive(
     except Exception:
         pass
 
-    # 8) Contact & Routing moved to page 2
+    # 9) Contact & Routing moved to page 2
     _lead_key = fields.get("lead_key") or ""
     _nc = _fetch_notice_contact(_lead_key)
     _ft = _fetch_prov_fields(

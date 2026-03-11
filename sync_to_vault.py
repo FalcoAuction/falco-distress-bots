@@ -70,7 +70,16 @@ def packet_for_lead(lead_key: str) -> Path | None:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+
+    # Prefer explicit repack artifacts when present so vault sync does not drift
+    # back to an older packet variant from a previous run folder.
+    repack_candidates = [p for p in candidates if "unknown_run" in p.parts]
+    if repack_candidates:
+        return repack_candidates[0]
+
+    return candidates[0]
 
 
 def latest_prov_text(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> str | None:
@@ -315,9 +324,13 @@ def main() -> None:
             "buildingAreaSqft": enriched_fields.get("building_area_sqft"),
             "beds": enriched_fields.get("beds"),
             "baths": enriched_fields.get("baths"),
+            "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
+            "controlParty": quality["execution_reality"]["control_party"],
+            "executionPosture": quality["execution_reality"]["execution_posture"],
+            "workabilityBand": quality["execution_reality"]["workability_band"],
             "topTierReady": bool(quality["top_tier_ready"]),
             "vaultPublishReady": bool(quality["vault_publish_ready"]),
-            "dataNotes": quality["vault_publish_blockers"][:4],
+            "dataNotes": (quality["vault_publish_blockers"] + quality["execution_notes"])[:4],
         }
         out_rows.append(row)
 

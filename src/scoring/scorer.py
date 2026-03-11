@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone, date
 from typing import Optional
 
+from ..packaging.data_quality import assess_packet_data
+
 DB_PATH_DEFAULT = os.path.join("data", "falco.db")
 
 def utc_now_iso() -> str:
@@ -203,6 +205,35 @@ def score_leads_for_run(run_id: str):
             if prov_value is not None:
                 property_detail[key] = prov_value
 
+        quality = assess_packet_data({
+            "address": r["address"],
+            "county": r["county"],
+            "dts_days": dts,
+            "attom_raw_json": r["attom_raw_json"],
+            "value_anchor_low": r["avm_low"],
+            "value_anchor_high": r["avm_high"],
+            "auction_readiness": None,
+            "equity_band": equity_band,
+            "contact_ready": contact_ready,
+            "property_identifier": property_detail.get("property_identifier"),
+            "property_type": property_detail.get("property_type"),
+            "city": property_detail.get("city"),
+            "zip": property_detail.get("zip"),
+            "owner_name": owner_mortgage.get("owner_name"),
+            "owner_mail": owner_mortgage.get("owner_mail"),
+            "last_sale_date": owner_mortgage.get("last_sale_date"),
+            "mortgage_lender": owner_mortgage.get("mortgage_lender"),
+            "year_built": property_detail.get("year_built"),
+            "building_area_sqft": property_detail.get("building_area_sqft"),
+            "beds": property_detail.get("beds"),
+            "baths": property_detail.get("baths"),
+            "notice_phone": _latest_prov_text(conn, r["lead_key"], "notice_phone"),
+            "trustee_phone_public": _latest_prov_text(conn, r["lead_key"], "trustee_phone_public"),
+            "owner_phone_primary": _latest_prov_text(conn, r["lead_key"], "owner_phone_primary"),
+            "owner_phone_secondary": _latest_prov_text(conn, r["lead_key"], "owner_phone_secondary"),
+        })
+        execution_reality = quality["execution_reality"]
+
         completeness_score = 8 if r["address"] and r["county"] else 0
         property_score = 12 if (
             property_detail.get("property_type")
@@ -233,7 +264,17 @@ def score_leads_for_run(run_id: str):
             or property_detail.get("beds") is not None
             or property_detail.get("baths") is not None
         ) else 0
-        contact_score = 10 if contact_ready else 0
+        contact_score = (
+            12 if execution_reality["contact_path_quality"] == "STRONG"
+            else 6 if execution_reality["contact_path_quality"] == "PARTIAL"
+            else 0
+        )
+        control_score = 6 if execution_reality["control_party"] != "UNCLEAR" else 0
+        execution_score = (
+            12 if execution_reality["workability_band"] == "STRONG"
+            else 6 if execution_reality["workability_band"] == "MODERATE"
+            else 0
+        )
 
         raw_score = (
             dts_score
@@ -244,6 +285,8 @@ def score_leads_for_run(run_id: str):
             + ownership_score
             + debt_history_score
             + contact_score
+            + control_score
+            + execution_score
         )
         total_score = max(0, min(100, raw_score))
 
@@ -252,9 +295,23 @@ def score_leads_for_run(run_id: str):
         has_debt_pair = bool(owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date"))
         inside_green_window = 21 <= dts <= 60
 
-        if total_score >= 80 and has_valuation and has_owner_pair and has_debt_pair and contact_ready and inside_green_window:
+        if (
+            total_score >= 80
+            and has_valuation
+            and has_owner_pair
+            and has_debt_pair
+            and execution_reality["contact_path_quality"] != "THIN"
+            and inside_green_window
+            and execution_reality["workability_band"] == "STRONG"
+            and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
+        ):
             readiness = "GREEN"
-        elif total_score >= 55 and has_valuation and dts <= 75:
+        elif (
+            total_score >= 55
+            and has_valuation
+            and dts <= 75
+            and execution_reality["workability_band"] != "LIMITED"
+        ):
             readiness = "YELLOW"
         else:
             readiness = "RED"
@@ -287,6 +344,10 @@ def score_leads_for_run(run_id: str):
                 (r["lead_key"], "falco_score_internal", "derived", None,        float(total_score), None, None,   None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "equity_band",          "derived", equity_band, None,               None, None,   None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "auction_readiness",    "derived", readiness,   None,               None, None,   None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "contact_path_quality", "derived", execution_reality["contact_path_quality"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "control_party",        "derived", execution_reality["control_party"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "execution_posture",    "derived", execution_reality["execution_posture"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "workability_band",     "derived", execution_reality["workability_band"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
             ]
             conn.executemany("""
                 INSERT INTO lead_field_provenance

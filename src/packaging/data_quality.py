@@ -168,6 +168,95 @@ def _has_actionable_outreach(enriched: Dict[str, Any]) -> bool:
     )
 
 
+def _int_or_none(value: Any) -> Optional[int]:
+    try:
+        if value is None or value == "":
+            return None
+        return int(float(value))
+    except Exception:
+        return None
+
+
+def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
+    owner_contact = any(
+        _present(enriched.get(key))
+        for key in ("owner_phone_primary", "owner_phone_secondary")
+    )
+    sale_status_contact = any(
+        _present(enriched.get(key))
+        for key in ("notice_phone", "trustee_phone_public")
+    )
+    owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
+    debt_context = _present(enriched.get("mortgage_lender")) and _present(enriched.get("last_sale_date"))
+    value_context = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
+    dts_days = _int_or_none(enriched.get("dts_days"))
+
+    if owner_contact and sale_status_contact:
+        contact_path_quality = "STRONG"
+    elif owner_contact or sale_status_contact or owner_profile:
+        contact_path_quality = "PARTIAL"
+    else:
+        contact_path_quality = "THIN"
+
+    if owner_contact and sale_status_contact:
+        control_party = "MIXED"
+    elif owner_contact and owner_profile and (dts_days is None or dts_days > 14):
+        control_party = "OWNER"
+    elif sale_status_contact:
+        control_party = "LENDER / TRUSTEE"
+    elif owner_contact:
+        control_party = "OWNER"
+    else:
+        control_party = "UNCLEAR"
+
+    if control_party == "OWNER" and owner_contact and owner_profile and (dts_days is None or dts_days > 14):
+        execution_posture = "BORROWER OUTREACH"
+    elif control_party == "LENDER / TRUSTEE" and sale_status_contact and (dts_days is None or dts_days <= 45):
+        execution_posture = "AUCTION EXECUTION"
+    elif control_party == "MIXED" and (owner_contact or sale_status_contact):
+        execution_posture = "MIXED / OPERATOR REVIEW"
+    else:
+        execution_posture = "NEEDS MORE CONTROL CLARITY"
+
+    if (
+        value_context
+        and owner_profile
+        and debt_context
+        and (owner_contact or sale_status_contact)
+        and dts_days is not None
+        and 0 <= dts_days <= 60
+    ):
+        workability_band = "STRONG"
+    elif value_context and owner_profile and (owner_contact or sale_status_contact):
+        workability_band = "MODERATE"
+    else:
+        workability_band = "LIMITED"
+
+    notes: List[str] = []
+    if control_party == "LENDER / TRUSTEE":
+        notes.append("Owner may not control the outcome at this stage")
+    elif control_party == "MIXED":
+        notes.append("Owner contact exists, but sale-status control still appears shared")
+
+    if execution_posture == "NEEDS MORE CONTROL CLARITY":
+        notes.append("Control path still needs clarification before execution")
+
+    if workability_band == "MODERATE":
+        notes.append("Execution path is credible but not yet fully turn-key")
+    elif workability_band == "LIMITED":
+        notes.append("Execution path remains thin relative to timing and debt context")
+
+    return {
+        "owner_contact_available": owner_contact,
+        "sale_status_contact_available": sale_status_contact,
+        "contact_path_quality": contact_path_quality,
+        "control_party": control_party,
+        "execution_posture": execution_posture,
+        "workability_band": workability_band,
+        "notes": notes,
+    }
+
+
 def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     enriched = dict(fields)
     for key, value in _extract_property_detail(fields.get("attom_raw_json")).items():
@@ -216,6 +305,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         key for key in _BATCHDATA_TARGET_FIELDS
         if not _present(enriched.get(key))
     ]
+    execution_reality = _derive_execution_reality(enriched)
 
     total_checks = (
         len(_PACKET_CRITICAL_FIELDS)
@@ -237,6 +327,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         len(vault_blockers) == 0
         and str(enriched.get("auction_readiness") or "").upper() == "GREEN"
         and _has_actionable_outreach(enriched)
+        and execution_reality["contact_path_quality"] != "THIN"
+        and execution_reality["control_party"] != "UNCLEAR"
+        and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
+        and execution_reality["workability_band"] == "STRONG"
         and not any(
             not _present(enriched.get(key))
             for key in (
@@ -269,6 +363,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "vault_publish_ready": len(vault_blockers) == 0,
         "vault_publish_blockers": vault_blockers,
         "execution_blockers": execution_blockers,
+        "execution_reality": execution_reality,
+        "execution_notes": execution_reality["notes"],
         "top_tier_ready": top_tier_ready,
         "critical_missing": critical_missing,
         "vault_signal_missing": vault_signal_missing,
