@@ -257,6 +257,95 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _degrade_confidence(confidence: str) -> str:
+    if confidence == "HIGH":
+        return "MEDIUM"
+    if confidence == "MEDIUM":
+        return "LOW"
+    return "LOW"
+
+
+def _derive_lane_suggestion(
+    enriched: Dict[str, Any],
+    execution_reality: Dict[str, Any],
+) -> Dict[str, Any]:
+    owner_contact = bool(execution_reality.get("owner_contact_available"))
+    sale_status_contact = bool(execution_reality.get("sale_status_contact_available"))
+    control_party = str(execution_reality.get("control_party") or "UNCLEAR")
+    workability_band = str(execution_reality.get("workability_band") or "LIMITED")
+    owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
+    debt_context = _present(enriched.get("mortgage_lender")) and _present(enriched.get("last_sale_date"))
+    dts_days = _int_or_none(enriched.get("dts_days"))
+
+    lane = "unclear"
+    confidence = "LOW"
+    reasons: List[str] = []
+
+    if owner_contact and sale_status_contact:
+        lane = "mixed"
+        confidence = "MEDIUM"
+        reasons.append("Owner and sale-status contact paths are both present")
+        if dts_days is not None and dts_days > 14:
+            reasons.append("There is still time to test borrower-side control before sale")
+        elif dts_days is not None:
+            reasons.append("Timing is tight enough that sale mechanics still matter")
+    elif owner_contact and owner_profile and control_party == "OWNER":
+        lane = "borrower_side"
+        confidence = "MEDIUM"
+        reasons.append("Owner contact path exists and control currently appears owner-side")
+        if dts_days is None or dts_days > 21:
+            confidence = "HIGH"
+            reasons.append("Timing leaves room for borrower-side intervention")
+    elif sale_status_contact and control_party == "LENDER / TRUSTEE":
+        lane = "lender_trustee"
+        confidence = "MEDIUM"
+        reasons.append("Sale-status contact is stronger than owner-side control")
+        if dts_days is not None and dts_days <= 21:
+            confidence = "HIGH"
+            reasons.append("Sale is close enough that lender/trustee dynamics likely dominate")
+    elif sale_status_contact and not owner_contact:
+        lane = "auction_only"
+        confidence = "MEDIUM"
+        reasons.append("No owner contact path is present, but sale-status contact is available")
+        if dts_days is not None and dts_days <= 14:
+            confidence = "HIGH"
+            reasons.append("Very tight timing suggests auction execution is the most realistic lane")
+    elif owner_contact:
+        lane = "borrower_side"
+        confidence = "LOW"
+        reasons.append("Owner contact exists, but sale-status control is still unclear")
+    elif sale_status_contact:
+        lane = "lender_trustee"
+        confidence = "LOW"
+        reasons.append("Sale-status contact exists, but owner control remains unclear")
+    else:
+        reasons.append("No clear owner or sale-status contact path is present yet")
+
+    if not owner_profile and lane in {"borrower_side", "mixed"}:
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Owner identity or mailing profile is still incomplete")
+
+    if not debt_context and lane in {"lender_trustee", "mixed", "auction_only"}:
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Debt context is still incomplete")
+
+    if workability_band == "LIMITED":
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Overall workability remains limited")
+    elif workability_band == "STRONG":
+        reasons.append("Underlying workability profile is strong")
+
+    if control_party == "UNCLEAR":
+        confidence = _degrade_confidence(confidence)
+        reasons.append("True control party still needs operator confirmation")
+
+    return {
+        "suggested_execution_lane": lane,
+        "confidence": confidence,
+        "reasons": reasons[:4],
+    }
+
+
 def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     enriched = dict(fields)
     for key, value in _extract_property_detail(fields.get("attom_raw_json")).items():
@@ -306,6 +395,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         if not _present(enriched.get(key))
     ]
     execution_reality = _derive_execution_reality(enriched)
+    lane_suggestion = _derive_lane_suggestion(enriched, execution_reality)
 
     total_checks = (
         len(_PACKET_CRITICAL_FIELDS)
@@ -364,6 +454,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "vault_publish_blockers": vault_blockers,
         "execution_blockers": execution_blockers,
         "execution_reality": execution_reality,
+        "lane_suggestion": lane_suggestion,
         "execution_notes": execution_reality["notes"],
         "top_tier_ready": top_tier_ready,
         "critical_missing": critical_missing,
