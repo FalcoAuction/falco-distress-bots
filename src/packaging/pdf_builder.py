@@ -1831,8 +1831,7 @@ def _page1_executive(
     except Exception:
         pass
 
-    # 8) Contact & Routing
-    doc.section("Contact & Routing")
+    # 8) Contact & Routing moved to page 2
     _lead_key = fields.get("lead_key") or ""
     _nc = _fetch_notice_contact(_lead_key)
     _ft = _fetch_prov_fields(
@@ -1901,7 +1900,7 @@ def _page1_executive(
             )
         )
     )
-    if _nc_has_any:
+    if False and _nc_has_any:
         _contact_pairs: List[Tuple[str, str]] = []
         if _owner_mort.get("owner_name"):
             _contact_pairs.append(("Owner Name", _owner_mort["owner_name"]))
@@ -1938,8 +1937,7 @@ def _page1_executive(
             _contact_pairs.append(("Sale Location", _nc_sale_location))
         doc.two_col(_contact_pairs, lw=82)
     else:
-        doc.bullet("No contact found in notice artifacts yet.")
-    doc.gap(6)
+        pass
 
     # 7) Auctioneer Notes — exit strategy + system notes from underwriting
     _es_p1 = str(_uw.get("exit_strategy") or "").strip()
@@ -2430,6 +2428,90 @@ def _draw_ownership_section(doc: _Doc, fields: Dict[str, Any]) -> None:
 
 # ─── Property Snapshot page ────────────────────────────────────────────────────
 
+def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
+    _lead_key = fields.get("lead_key") or ""
+    _nc = _fetch_notice_contact(_lead_key)
+    _ft = _fetch_prov_fields(
+        _lead_key,
+        ["ft_trustee_firm", "ft_trustee_person", "ft_trustee_name_raw"],
+    )
+
+    _lp = _extract_lp_contact(_lead_key)
+    if _lp.get("phone") and not _nc.get("notice_phone"):
+        _nc["notice_phone"] = _lp["phone"]
+    if _lp.get("email") and not _nc.get("notice_email"):
+        _nc["notice_email"] = _lp["email"]
+    if _lp.get("law_firm") and not _nc.get("notice_law_firm"):
+        _nc["notice_law_firm"] = _lp["law_firm"]
+    if _lp.get("address") and not _nc.get("notice_trustee_address"):
+        _nc["notice_trustee_address"] = _lp["address"]
+    _nc_sale_time = _lp.get("sale_time")
+    _nc_sale_location = _lp.get("sale_location")
+
+    _trustee_display: Optional[str] = None
+    _ft_firm = _sanitize_trustee(_ft.get("ft_trustee_firm"))
+    _ft_person = _sanitize_trustee(_ft.get("ft_trustee_person"))
+    if _ft_firm:
+        _trustee_display = (_ft_firm + " / " + _ft_person) if _ft_person else _ft_firm
+    if not _trustee_display:
+        _trustee_display = _sanitize_trustee(_nc.get("notice_trustee_firm"))
+    if not _trustee_display:
+        _trustee_display = _sanitize_trustee(_nc.get("notice_trustee_name_raw"))
+    if not _trustee_display:
+        _trustee_display = _sanitize_trustee(_lp.get("trustee"))
+
+    _enrich_prov = _fetch_prov_fields(
+        _lead_key,
+        [
+            "trustee_phone_public",
+            "trustee_phone_source",
+            "owner_phone_primary",
+            "owner_phone_secondary",
+            "owner_phone_source",
+        ],
+    )
+    _t2_phone = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
+    _t3_phone = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
+    _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
+    _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
+    _owner_mort = _extract_owner_mortgage(fields)
+
+    _contact_pairs: List[Tuple[str, str]] = []
+    if _owner_mort.get("owner_name"):
+        _contact_pairs.append(("Owner Name", _owner_mort["owner_name"]))
+    if _owner_mort.get("owner_mail"):
+        _contact_pairs.append(("Owner Mailing", _owner_mort["owner_mail"]))
+    if fields.get("property_identifier"):
+        _contact_pairs.append(("Parcel / APN", _val(fields.get("property_identifier"))))
+    if _owner_mort.get("mortgage_lender"):
+        _contact_pairs.append(("Mortgage Lender", _owner_mort["mortgage_lender"]))
+    if _trustee_display:
+        _contact_pairs.append(("Trustee / Firm", _trustee_display))
+    if _nc.get("notice_law_firm") and _nc["notice_law_firm"] != _trustee_display:
+        _contact_pairs.append(("Law Firm", _nc["notice_law_firm"]))
+
+    _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
+    if _ph_clean:
+        _contact_pairs.append(("Phone", _ph_clean))
+    elif _t2_phone:
+        _contact_pairs.append(("Trustee Phone", _t2_phone))
+    if _t3_phone:
+        _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
+        _contact_pairs.append((_t3_lbl, _t3_phone))
+    if _t3_phone_2 and _t3_phone_2 != _t3_phone:
+        _contact_pairs.append(("Owner Phone 2", _t3_phone_2))
+    if _nc.get("notice_email"):
+        _contact_pairs.append(("Notice Email", _nc["notice_email"]))
+    if _nc.get("notice_trustee_address"):
+        _contact_pairs.append(("Trustee Address", _nc["notice_trustee_address"]))
+    if _nc_sale_time:
+        _contact_pairs.append(("Sale Time", _nc_sale_time))
+    if _nc_sale_location:
+        _contact_pairs.append(("Sale Location", _nc_sale_location))
+
+    return _contact_pairs
+
+
 def _page_property_snapshot(
     doc: _Doc,
     fields: Dict[str, Any],
@@ -2481,6 +2563,13 @@ def _page_property_snapshot(
 
     if pairs:
         doc.two_col(pairs)
+
+    _contact_pairs = _contact_routing_pairs(fields)
+    doc.section("Contact & Routing")
+    if _contact_pairs:
+        doc.two_col(_contact_pairs, lw=82)
+    else:
+        doc.bullet("No contact found in notice artifacts yet.")
 
     # ── Partial-data note — only when ATTOM detail is absent ───────────────────
     if not fields.get("attom_detail"):
