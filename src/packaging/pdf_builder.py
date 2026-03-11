@@ -444,7 +444,6 @@ def _draw_kpi_tiles(doc: _Doc, fields: Dict[str, Any]) -> None:
     diamond   = bool(fields.get("diamond_proxy"))
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
     tiles = [
-        ("Falco Score",  _val(fields.get("falco_score_internal"), "—"), _SLATE),
         ("Days Until Scheduled Sale", _val(fields.get("dts_days"), "—"), _SLATE),
         ("Readiness",    _readiness_label(readiness),                   rc),
         ("AVM Low",      _fmt_cur(fields.get("value_anchor_low")),      _SLATE),
@@ -736,8 +735,6 @@ def _risk_flags(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     st = (fields.get("attom_status") or "").lower()
     if "partial" in st:
         flags.append((f"Enrichment status '{st}' — one data-source endpoint returned no data.", "MED"))
-    if fields.get("falco_score_internal") is None:
-        flags.append(("Internal Falco score absent — lead not yet scored.", "LOW"))
     return flags
 
 
@@ -3119,8 +3116,7 @@ def _page5_scoring_appendix(
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
 
-    doc.section("Scoring Summary")
-    doc.kv("FALCO Score", _val(fields.get("falco_score_internal")), bold_v=True)
+    doc.section("Screening Summary")
     doc.kv("Screening Status",       _readiness_label(readiness), vc=rc, bold_v=True)
     doc.kv("Equity Band",            _val(fields.get("equity_band")))
     doc.kv("Days Until Scheduled Sale", _val(fields.get("dts_days")))
