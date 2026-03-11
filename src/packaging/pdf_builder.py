@@ -1880,7 +1880,6 @@ def _page1_executive(
     _t2_phone  = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
     _t3_phone  = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
     _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
-    _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
     _owner_mort = _extract_owner_mortgage(fields)
 
     _nc_has_any = (
@@ -1923,10 +1922,9 @@ def _page1_executive(
             _contact_pairs.append(("Trustee Phone", _t2_phone))
         # Owner phone (T3) — always shown when present, separate row
         if _t3_phone:
-            _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
-            _contact_pairs.append((_t3_lbl, _t3_phone))
+            _contact_pairs.append(("Owner Contact", _t3_phone))
         if _t3_phone_2 and _t3_phone_2 != _t3_phone:
-            _contact_pairs.append(("Owner Phone 2", _t3_phone_2))
+            _contact_pairs.append(("Owner Contact 2", _t3_phone_2))
         if _nc.get("notice_email"):
             _contact_pairs.append(("Notice Email", _nc["notice_email"]))
         if _nc.get("notice_trustee_address"):
@@ -1939,27 +1937,7 @@ def _page1_executive(
     else:
         pass
 
-    # 7) Auctioneer Notes — exit strategy + system notes from underwriting
-    _es_p1 = str(_uw.get("exit_strategy") or "").strip()
-    _ignore_notes = {
-        "initial uw shell for testing",
-        "initial uw shell",
-    }
-    _show_notes = _uw_notes and _uw_notes.strip().lower() not in _ignore_notes
-    if _es_p1 or _show_notes:
-        doc.section("Execution Notes")
-        if _es_p1:
-            _STRAT_P1 = {
-                "auction_retail": "Auction / Retail",
-                "wholesale":      "Wholesale",
-                "fix_flip":       "Fix & Flip",
-                "buy_hold":       "Buy & Hold",
-                "assign":         "Assignment",
-            }
-            doc.kv("Exit Strategy", _STRAT_P1.get(_es_p1.lower().replace(" ", "_"), _es_p1), bold_v=True)
-        if _show_notes:
-            doc.body(_uw_notes[:200], size=8.5, color=_SLATE, leading=12)
-        doc.gap(6)
+    # Execution notes moved to page 2 to keep page 1 readable.
 
 def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: Any) -> None:
     """
@@ -2473,7 +2451,6 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     _t2_phone = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
     _t3_phone = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
     _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
-    _t3_source = (_enrich_prov.get("owner_phone_source") or "").strip()
     _owner_mort = _extract_owner_mortgage(fields)
 
     _contact_pairs: List[Tuple[str, str]] = []
@@ -2496,10 +2473,9 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     elif _t2_phone:
         _contact_pairs.append(("Trustee Phone", _t2_phone))
     if _t3_phone:
-        _t3_lbl = "Owner Phone" + (f" ({_t3_source})" if _t3_source else "")
-        _contact_pairs.append((_t3_lbl, _t3_phone))
+        _contact_pairs.append(("Owner Contact", _t3_phone))
     if _t3_phone_2 and _t3_phone_2 != _t3_phone:
-        _contact_pairs.append(("Owner Phone 2", _t3_phone_2))
+        _contact_pairs.append(("Owner Contact 2", _t3_phone_2))
     if _nc.get("notice_email"):
         _contact_pairs.append(("Notice Email", _nc["notice_email"]))
     if _nc.get("notice_trustee_address"):
@@ -2567,7 +2543,8 @@ def _page_property_snapshot(
     _contact_pairs = _contact_routing_pairs(fields)
     doc.section("Contact & Routing")
     if _contact_pairs:
-        doc.two_col(_contact_pairs, lw=82)
+        for _label, _value in _contact_pairs:
+            doc.kv(_label, _value, lw=110)
     else:
         doc.bullet("No contact found in notice artifacts yet.")
 
