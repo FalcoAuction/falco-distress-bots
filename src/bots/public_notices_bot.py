@@ -404,8 +404,11 @@ def run():
 
         combined = _norm_ws(body_text + "\n" + full_text)
 
+        lane = _detect_upstream_lane(combined)
+        is_upstream_lane = lane in {"LIS_PENDENS", "SUBSTITUTION_OF_TRUSTEE"}
+
         sale_date_iso, dts, candidates = _pick_best_sale_date_iso(combined)
-        if not sale_date_iso:
+        if not sale_date_iso and not is_upstream_lane:
             # We DID attempt context + fallback and still found nothing in-window
             if candidates:
                 skipped_outside_window += 1
@@ -415,10 +418,10 @@ def run():
                 skipped_no_sale += 1
             continue
 
-        if dts is None:
+        if sale_date_iso and dts is None:
             skipped_no_sale += 1
             continue
-        if dts < 0:
+        if sale_date_iso and dts is not None and dts < 0:
             skipped_expired += 1
             continue
 
@@ -426,7 +429,7 @@ def run():
         if not county:
             skipped_county_missing += 1
             if len(sample_county_missing) < 5:
-                sample_county_missing.append(f"url={url} sale={sale_date_iso}")
+                sample_county_missing.append(f"url={url} sale={sale_date_iso or '[upstream]'}")
             continue
 
         county = normalize_county_full(county) or county
@@ -461,20 +464,20 @@ def run():
             skipped_out_of_geo += 1
             continue
 
-        lead_key = make_lead_key("PUBLIC_NOTICES", url, county_full, sale_date_iso, address or "")
+        lead_key = make_lead_key("PUBLIC_NOTICES", url, county_full, address or "")
 
         if lead_key in seen_in_run:
             skipped_dup_in_run += 1
             continue
         seen_in_run.add(lead_key)
 
-        lane = _detect_upstream_lane(combined)
         if lane == "LIS_PENDENS":
             upstream_lp_count += 1
         elif lane == "SUBSTITUTION_OF_TRUSTEE":
             upstream_sot_count += 1
 
-        if _store.upsert_lead(lead_key, {"address": address or "", "state": "TN"}, county_full, distress_type="FORECLOSURE"):
+        distress_type = lane or "FORECLOSURE"
+        if _store.upsert_lead(lead_key, {"address": address or "", "state": "TN"}, county_full, distress_type=distress_type):
             stored_leads += 1
         if _store.insert_ingest_event(lead_key, lane or "PublicNotices", url, sale_date_iso, None):
             stored_ingests += 1
@@ -482,18 +485,18 @@ def run():
         snippet = _build_snippet(sale_date_iso, county_full, trustee, address, body_text)
 
         payload = {
-            "title": address or "Foreclosure Notice",
+            "title": address or ("Upstream Distress Notice" if is_upstream_lane else "Foreclosure Notice"),
             "source": "PublicNotices",
             "county": county_full,
-            "distress_type": "Foreclosure",
+            "distress_type": "Lis Pendens" if lane == "LIS_PENDENS" else "Substitution of Trustee" if lane == "SUBSTITUTION_OF_TRUSTEE" else "Foreclosure",
             "address": address or "",
-            "sale_date_iso": sale_date_iso,
+            "sale_date_iso": sale_date_iso or "",
             "trustee_attorney": trustee or "",
             "contact_info": trustee or "",
             "raw_snippet": snippet,
             "url": url,
             "lead_key": lead_key,
-            "days_to_sale": dts,
+            "days_to_sale": dts if dts is not None else "",
         }
         payload = apply_convertibility_gate(payload)
         props = build_properties(payload)

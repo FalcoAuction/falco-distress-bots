@@ -2,7 +2,7 @@
 #
 # Upstream Lis Pendens ingestion — no sale_date required.
 # Stores leads with distress_type="LIS_PENDENS" for later enrichment/scoring.
-# Enable with: FALCO_ENABLE_LIS_PENDENS=1
+# Enabled by default. Set FALCO_ENABLE_LIS_PENDENS=0 to disable.
 #
 # Seeds: tnlegalpub.com LP category pages (same crawl pattern as public_notices_bot).
 # Env controls:
@@ -298,7 +298,7 @@ def _parse_notice_fields(text: str) -> dict:
 # ============================================================
 
 def run() -> dict:
-    if os.environ.get("FALCO_ENABLE_LIS_PENDENS", "").strip() != "1":
+    if os.environ.get("FALCO_ENABLE_LIS_PENDENS", "1").strip() == "0":
         print("[LisPendensBot] disabled (set FALCO_ENABLE_LIS_PENDENS=1 to enable)")
         return {"status": "disabled"}
 

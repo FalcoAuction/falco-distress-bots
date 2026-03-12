@@ -1,6 +1,6 @@
 # src/bots/substitution_of_trustee_bot.py
 # Substitution of Trustee ingestion bot.
-# Enable with: FALCO_ENABLE_SOT=1
+# Enabled by default. Set FALCO_ENABLE_SOT=0 to disable.
 
 import os
 import sqlite3
@@ -8,7 +8,7 @@ from typing import Dict
 
 
 def run() -> Dict[str, int]:
-    if os.environ.get("FALCO_ENABLE_SOT", "").strip() != "1":
+    if os.environ.get("FALCO_ENABLE_SOT", "1").strip() == "0":
         print("[SubstitutionOfTrusteeBot] disabled (set FALCO_ENABLE_SOT=1 to enable)")
         return {"status": "disabled"}
 

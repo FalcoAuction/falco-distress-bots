@@ -26,6 +26,7 @@ from .automation import (
     write_agent_reports,
     write_run_summary,
 )
+from .automation import foreclosure_lifecycle
 from .automation.site_snapshots import write_site_snapshots
 from .core.run_metadata import store_run_metadata
 from .telemetry import run_logger
@@ -88,6 +89,7 @@ def main():
 
         stage_results.append(run_bot("Stage1_NoticeExtractor", notice_extractor.run))
         stage_results.append(run_bot("Stage1_NoticePDFExtractor", notice_pdf_extractor.run))
+        stage_results.append(run_bot("Stage1_ForeclosureLifecycle", foreclosure_lifecycle.run))
 
         # ---------------- Stage 2: Enrichment + Comps ----------------
         def _run_attom_enrichment():

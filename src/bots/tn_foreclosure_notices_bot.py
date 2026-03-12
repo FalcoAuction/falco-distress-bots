@@ -1,3 +1,4 @@
+import json
 import re
 import hashlib
 from datetime import datetime
@@ -54,6 +55,39 @@ HEADERS = {
 }
 
 _DTS_MIN, _DTS_MAX = get_dts_window("TN_FORECLOSURE_NOTICES")
+
+
+# Phone pattern: formatted US numbers (no separators needed, but must look like
+# NXX-NXX-XXXX, (NXX) NXX-XXXX, NXX.NXX.XXXX, or ten raw digits near "phone"/"tel")
+_PHONE_FMT_RX = re.compile(
+    r"(?:\+?1[\s\-\.])?(?:\(\d{3}\)|\d{3})[\s\-\.]?\d{3}[\s\-\.]\d{4}"
+)
+
+
+def _find_phone(text: str) -> str | None:
+    """
+    Return the first plausible US phone number from text, normalized to NXX-NXX-XXXX,
+    or None if not found.  Rejects year-like sequences and all-same-digit runs.
+    """
+    for m in _PHONE_FMT_RX.finditer(text):
+        raw = m.group(0).strip()
+        digits = re.sub(r"\D", "", raw)
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) != 10:
+            continue
+        # Reject year-like prefixes (date/id noise common in notice text)
+        if digits.startswith("19") or digits.startswith("20"):
+            continue
+        if digits[-4:] == "0000":
+            continue
+        area, exch = digits[:3], digits[3:6]
+        if area[0] in ("0", "1") or exch[0] in ("0", "1"):
+            continue
+        if len(set(digits)) == 1:  # all same digit
+            continue
+        return f"{area}-{exch}-{digits[6:]}"
+    return None
 
 
 def _slugify_county(name: str) -> str:
@@ -141,13 +175,20 @@ def _triage(dts: int):
     return "GREEN", 65
 
 
-def _make_lead_key(distress_type: str, county: str, sale_date: str, address: str, trustee: str | None, notice_url: str):
+def _make_lead_key(
+    distress_type: str,
+    county: str,
+    address: str,
+    trustee: str | None,
+    notice_id: str | None,
+    notice_url: str,
+):
     parts = [
         (distress_type or "").strip().lower(),
         (county or "").strip().lower(),
-        (sale_date or "").strip().lower(),
         (address or "").strip().lower(),
         (trustee or "").strip().lower(),
+        (notice_id or "").strip().lower(),
         (notice_url or "").strip().lower(),
     ]
     raw = "|".join(parts)
@@ -179,6 +220,14 @@ def _parse_notice_container_text(container_text: str):
 
     sale_date_iso = _pick_sale_date_iso(container_text)
 
+    sale_location = _extract_field(
+        container_text,
+        "Sale Location:",
+        end_labels=["Sale Time:", "Auction Vendor:", "County:", "Firm:", "Notice:", "Original Sale Date:", "Current Sale Date:", "PP Sale Date:"],
+    )
+
+    phone = _find_phone(container_text)
+
     if not county or not address or not sale_date_iso:
         return None
 
@@ -188,6 +237,8 @@ def _parse_notice_container_text(container_text: str):
         "sale_date_iso": sale_date_iso,
         "address_raw": address.strip(),
         "trustee_attorney": trustee_attorney.strip() if trustee_attorney else None,
+        "sale_location": sale_location.strip() if sale_location else None,
+        "phone": phone,
         "raw_text": container_text.strip(),
     }
 
@@ -320,9 +371,9 @@ def run():
             lead_key = _make_lead_key(
                 distress_type="Foreclosure",
                 county=county_full,
-                sale_date=lead["sale_date_iso"],
                 address=address,
                 trustee=lead.get("trustee_attorney"),
+                notice_id=lead.get("notice_id"),
                 notice_url=notice_url,
             )
 
@@ -333,7 +384,18 @@ def run():
 
             if _store.upsert_lead(lead_key, {"address": address, "state": "TN"}, county_full, distress_type="FORECLOSURE"):
                 stored_leads += 1
-            if _store.insert_ingest_event(lead_key, "TNForeclosureNotices", notice_url, lead["sale_date_iso"], None):
+            _tn_raw = {k: v for k, v in {
+                "trustee_attorney": lead.get("trustee_attorney"),
+                "sale_location":    lead.get("sale_location"),
+                "phone":            lead.get("phone"),
+            }.items() if v}
+            if _store.insert_ingest_event(
+                lead_key,
+                "TNForeclosureNotices",
+                notice_url,
+                lead["sale_date_iso"],
+                json.dumps(_tn_raw, ensure_ascii=False) if _tn_raw else None,
+            ):
                 stored_ingests += 1
 
             payload = {

@@ -144,17 +144,21 @@ def score_leads_for_run(run_id: str):
 
     rows = conn.execute("""
         SELECT l.lead_key, l.address, l.county,
-               ie.sale_date,
+               COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
                ae.avm_low, ae.avm_high, ae.attom_raw_json,
                cp.field_value_text AS contact_ready
         FROM leads l
         JOIN (
-            SELECT lead_key, MAX(id) AS max_ie_id
+            SELECT DISTINCT lead_key
             FROM ingest_events
             WHERE run_id = ?
+        ) touched ON touched.lead_key = l.lead_key
+        LEFT JOIN (
+            SELECT lead_key, MAX(id) AS max_ie_id
+            FROM ingest_events
             GROUP BY lead_key
         ) latest_ie ON latest_ie.lead_key = l.lead_key
-        JOIN ingest_events ie ON ie.id = latest_ie.max_ie_id
+        LEFT JOIN ingest_events ie ON ie.id = latest_ie.max_ie_id
         LEFT JOIN (
             SELECT lead_key, MAX(id) AS max_ae_id
             FROM attom_enrichments
@@ -173,7 +177,7 @@ def score_leads_for_run(run_id: str):
             )
             WHERE rn = 1
         ) cp ON cp.lead_key = l.lead_key
-        WHERE ie.sale_date IS NOT NULL
+        WHERE COALESCE(l.current_sale_date, ie.sale_date) IS NOT NULL
     """, (run_id,)).fetchall()
 
     print(f"[SCORING] run_id={run_id} scoring_rows={len(rows)}")

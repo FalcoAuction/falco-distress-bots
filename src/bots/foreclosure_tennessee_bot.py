@@ -195,7 +195,6 @@ def run():
             "FORECLOSURE_TN",
             listing_url,
             county_full,
-            sale_date_iso,
             address_full,
         )
 

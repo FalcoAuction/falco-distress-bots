@@ -97,7 +97,12 @@ def init_db() -> None:
                 last_seen_at        TEXT NOT NULL,
                 -- fields used by scoring/packaging (may be populated by other stages)
                 dts_days            INTEGER,
+                current_sale_date   TEXT,
+                original_sale_date  TEXT,
+                sale_status         TEXT,
+                sale_date_updated_at TEXT,
                 falco_score_internal REAL,
+                score_updated_at    TEXT,
                 auction_readiness   TEXT,
                 equity_band         TEXT
             );
@@ -220,7 +225,12 @@ def init_db() -> None:
         # leads: columns required by packager / candidate loader
         for col, typ in (
             ("dts_days", "INTEGER"),
+            ("current_sale_date", "TEXT"),
+            ("original_sale_date", "TEXT"),
+            ("sale_status", "TEXT"),
+            ("sale_date_updated_at", "TEXT"),
             ("falco_score_internal", "REAL"),
+            ("score_updated_at", "TEXT"),
             ("auction_readiness", "TEXT"),
             ("equity_band", "TEXT"),
             ("distress_type", "TEXT"),
