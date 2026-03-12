@@ -47,6 +47,15 @@ _EXECUTION_REQUIRED_FIELDS = {
     "mortgage_amount": "Original loan amount missing",
 }
 
+_PRE_FORECLOSURE_REQUIRED_FIELDS = {
+    "owner_name": "Owner name missing",
+    "owner_mail": "Owner mailing address missing",
+    "last_sale_date": "Last transfer date missing",
+    "mortgage_lender": "Mortgage lender missing",
+    "mortgage_amount": "Original loan amount missing",
+    "property_identifier": "Parcel / APN missing",
+}
+
 _BATCHDATA_TARGET_FIELDS = frozenset({
     "owner_name",
     "owner_mail",
@@ -198,6 +207,7 @@ def _int_or_none(value: Any) -> Optional[int]:
 
 
 def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
+    is_pre_foreclosure = str(enriched.get("sale_status") or "").strip().lower() == "pre_foreclosure"
     owner_contact = any(
         _present(enriched.get(key))
         for key in ("owner_phone_primary", "owner_phone_secondary")
@@ -252,6 +262,8 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     ):
         workability_band = "STRONG"
     elif value_context and owner_profile and (owner_contact or sale_status_contact):
+        workability_band = "MODERATE"
+    elif is_pre_foreclosure and owner_profile and debt_context and owner_contact:
         workability_band = "MODERATE"
     else:
         workability_band = "LIMITED"
@@ -379,6 +391,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         if not _present(enriched.get(key)) and _present(value):
             enriched[key] = value
 
+    sale_status = str(enriched.get("sale_status") or "").lower().strip()
+    distress_type = str(enriched.get("distress_type") or "").upper().strip()
+    is_pre_foreclosure = sale_status == "pre_foreclosure" or distress_type in {"LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE"}
+
     critical_missing: List[str] = []
     for key, label in _PACKET_CRITICAL_FIELDS.items():
         if key == "sale_date" and (_present(enriched.get("sale_date")) or _present(enriched.get("sale_date_iso"))):
@@ -386,10 +402,16 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         if not _present(enriched.get(key)):
             critical_missing.append(label)
 
-    if not (_present(enriched.get("dts_days")) or _present(enriched.get("sale_date")) or _present(enriched.get("sale_date_iso"))):
+    if (
+        not is_pre_foreclosure
+        and not (
+            _present(enriched.get("dts_days"))
+            or _present(enriched.get("sale_date"))
+            or _present(enriched.get("sale_date_iso"))
+        )
+    ):
         critical_missing.append("Sale timing missing")
 
-    distress_type = str(enriched.get("distress_type") or "").upper().strip()
     if distress_type != "LIS_PENDENS" and not any(_present(enriched.get(key)) for key in _VALUE_FIELDS):
         critical_missing.append("Valuation anchors missing")
 
@@ -409,10 +431,15 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         label for key, label in _EXECUTION_REQUIRED_FIELDS.items() if not _present(enriched.get(key))
     ]
 
-    distress_type = str(enriched.get("distress_type") or "").upper().strip()
     if distress_type in ("LIS_PENDENS", "FORECLOSURE", "FORECLOSURE_TN", "SOT", "SUBSTITUTION_OF_TRUSTEE"):
         if not _has_actionable_outreach(enriched):
             execution_blockers.append("Actionable outreach path missing")
+
+    pre_foreclosure_blockers = [
+        label for key, label in _PRE_FORECLOSURE_REQUIRED_FIELDS.items() if not _present(enriched.get(key))
+    ]
+    if distress_type in ("LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE") and not _has_actionable_outreach(enriched):
+        pre_foreclosure_blockers.append("Actionable outreach path missing")
 
     batchdata_targets = [
         key for key in _BATCHDATA_TARGET_FIELDS
@@ -462,6 +489,16 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         )
     )
 
+    pre_foreclosure_review_ready = (
+        is_pre_foreclosure
+        and len(pre_foreclosure_blockers) == 0
+        and execution_reality["contact_path_quality"] != "THIN"
+        and execution_reality["control_party"] != "UNCLEAR"
+        and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
+        and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
+        and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "YELLOW", "PARTIAL"}
+    )
+
     return {
         "enriched_fields": {
             "property_identifier": enriched.get("property_identifier"),
@@ -478,6 +515,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "packet_completeness_pct": completeness,
         "vault_publish_ready": len(vault_blockers) == 0,
         "vault_publish_blockers": vault_blockers,
+        "pre_foreclosure_review_ready": pre_foreclosure_review_ready,
+        "pre_foreclosure_review_blockers": pre_foreclosure_blockers,
         "execution_blockers": execution_blockers,
         "execution_reality": execution_reality,
         "lane_suggestion": lane_suggestion,

@@ -330,10 +330,6 @@ def _already_enriched_recently(cur, lead_key: str) -> tuple[bool, str | None]:
 # =========================================================
 
 _DEFAULT_INSTITUTIONAL_TRUSTEE_KEYWORDS: List[str] = [
-    "mackie wolf zientz & mann",
-    "mackie, wolf, zientz & mann",
-    "western progressive",
-    "winchester sellers foster & steele",
     "kizer bonds hughes & bowen",
     "kizer, bonds, hughes & bowen",
     "crawford & von keller",
@@ -455,6 +451,7 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
         rows = con.execute(
             """
             SELECT l.lead_key, l.address, l.county, l.state,
+                   l.sale_status, l.current_sale_date,
                    ie.sale_date, ie.source_url, ie.source,
                    latest_ae.status AS ae_status,
                    latest_ae.enriched_at AS ae_enriched_at,
@@ -464,7 +461,7 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
             INNER JOIN (
                 SELECT lead_key, MAX(id) AS max_id
                 FROM ingest_events
-                WHERE sale_date IS NOT NULL
+                WHERE sale_date IS NOT NULL OR source IN ('LIS_PENDENS','SUBSTITUTION_OF_TRUSTEE')
                 GROUP BY lead_key
             ) latest ON latest.lead_key = l.lead_key
             INNER JOIN ingest_events ie ON ie.id = latest.max_id
@@ -589,15 +586,20 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
         if row["source"] == "API_TAX":
             _write_gate(row["lead_key"], "skipped", "TAX_SOURCE", {"source": row["source"]})
             continue
-        try:
-            sale_date = datetime.fromisoformat(row["sale_date"]).date()
-        except (ValueError, TypeError):
-            _write_gate(row["lead_key"], "skipped", "INVALID_SALE_DATE", {"sale_date": row["sale_date"]})
-            continue
-        dts = (sale_date - today).days
-        if not (dts_min <= dts <= dts_max):
-            _write_gate(row["lead_key"], "skipped", "OUTSIDE_DTS_WINDOW", {"dts": dts, "dts_min": dts_min, "dts_max": dts_max})
-            continue
+        sale_status = (row["sale_status"] or "").strip().lower() if "sale_status" in _row_keys_cache else ""
+        sale_date_raw = row["current_sale_date"] or row["sale_date"]
+        dts = None
+        if sale_date_raw:
+            try:
+                sale_date = datetime.fromisoformat(sale_date_raw).date()
+                dts = (sale_date - today).days
+            except (ValueError, TypeError):
+                _write_gate(row["lead_key"], "skipped", "INVALID_SALE_DATE", {"sale_date": sale_date_raw})
+                continue
+        if sale_status != "pre_foreclosure":
+            if dts is None or not (dts_min <= dts <= dts_max):
+                _write_gate(row["lead_key"], "skipped", "OUTSIDE_DTS_WINDOW", {"dts": dts, "dts_min": dts_min, "dts_max": dts_max})
+                continue
         county = row["county"] or ""
         if county and (not is_allowed_county(county) or not within_target_counties(county)):
             _write_gate(row["lead_key"], "skipped", "OUT_OF_GEO", {"county": county})
@@ -610,6 +612,7 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
             "county": county,
             "state": row["state"] or "TN",
             "sale_date_iso": row["sale_date"],
+            "sale_status": sale_status,
             "url": row["source_url"],
             # Pass-through TTL fields for budget ordering
             "ae_status": ae_status,

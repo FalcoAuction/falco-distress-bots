@@ -93,8 +93,13 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         "last_sale_date",
         "mortgage_lender",
         "property_identifier",
+        "owner_phone_primary",
+        "owner_phone_secondary",
+        "notice_phone",
+        "trustee_phone_public",
     )
     want_num = (
+        "mortgage_amount",
         "year_built",
         "building_area_sqft",
         "beds",
@@ -321,6 +326,8 @@ _LEAD_COLS = """
           l.county,
           l.state,
           l.distress_type,
+          l.sale_status,
+          l.current_sale_date,
           l.falco_score_internal,
           l.auction_readiness,
           l.equity_band,
@@ -395,17 +402,30 @@ def run() -> Dict[str, int]:
             }
     else:
         where_clause = """
-        WHERE l.dts_days IS NOT NULL
-          AND l.dts_days >= ?
-          AND l.dts_days <= ?
+        WHERE (
+          (l.dts_days IS NOT NULL
+           AND l.dts_days >= ?
+           AND l.dts_days <= ?)
+          OR l.sale_status = 'pre_foreclosure'
+        )
         """
 
         rows = cur.execute(
             _LEAD_COLS + where_clause + """
-        ORDER BY l.dts_days ASC, le.avm_value DESC, l.lead_key ASC
+        ORDER BY
+            CASE WHEN l.sale_status = 'pre_foreclosure' THEN 0 ELSE 1 END ASC,
+            CASE COALESCE(l.auction_readiness, '')
+                WHEN 'GREEN' THEN 1
+                WHEN 'YELLOW' THEN 2
+                WHEN 'PARTIAL' THEN 3
+                ELSE 4
+            END,
+            COALESCE(l.falco_score_internal, 0) DESC,
+            COALESCE(l.dts_days, 9999) ASC,
+            l.lead_key ASC
         LIMIT ?
             """,
-            (dts_min, dts_max, max_packets * 5),
+            (dts_min, dts_max, max_packets * 8),
         ).fetchall()
 
     for r in rows:
@@ -524,12 +544,17 @@ def run() -> Dict[str, int]:
         except Exception as _ce_exc:
             print(f"[CONTACT][WARN] enrich_contact_data failed lead_key={lead_key!r}: {_ce_exc}")
 
+        _is_pre_foreclosure = str(fields.get("sale_status") or "").strip().lower() == "pre_foreclosure"
+
         # UW gate — attempt auto-underwriting when uw_ready is missing.
         # Manual UW in manual_underwriting table is authoritative and is not overwritten.
         # In repack mode: auto-UW is still attempted so the packet gets UW data;
         #   if it fails, repack proceeds anyway (sparse UW section).
         _uw_ready_raw = int(fields.get("uw_ready") or 0)
-        if _uw_ready_raw != 1:
+        if _is_pre_foreclosure:
+            fields.setdefault("uw_json", "")
+            fields["uw_ready"] = 1
+        elif _uw_ready_raw != 1:
             _auto_uw = auto_underwrite(fields)
             if _auto_uw["uw_ready"] == 1:
                 fields["uw_json"]  = json.dumps(
@@ -572,12 +597,17 @@ def run() -> Dict[str, int]:
         # required inputs
         _is_lp   = (fields.get("distress_type") or "").upper() == "LIS_PENDENS"
         _has_avm = fields.get("avm_low") is not None and fields.get("avm_high") is not None
-        if not fields.get("address") or (not _is_lp and not _has_avm):
+        if not fields.get("address") or (not _is_lp and not _is_pre_foreclosure and not _has_avm):
             skipped_missing += 1
             continue
         # LP leads without AVM proceed but default to YELLOW readiness pending enrichment
         if _is_lp and not _has_avm:
             fields.setdefault("auction_readiness", "YELLOW")
+        if _is_pre_foreclosure:
+            if str(fields.get("auction_readiness") or "").upper() == "RED":
+                fields["auction_readiness"] = "PARTIAL"
+            else:
+                fields.setdefault("auction_readiness", "PARTIAL")
 
         # HARD GEO GATE (WAR-PLAN)
         _county_gate = (fields.get("county") or "").strip()
@@ -630,10 +660,11 @@ def run() -> Dict[str, int]:
         fields["packet_quality"] = quality
         fields["packet_completeness_pct"] = quality["packet_completeness_pct"]
         fields["vault_publish_ready"] = quality["vault_publish_ready"]
+        fields["pre_foreclosure_review_ready"] = quality.get("pre_foreclosure_review_ready", False)
         fields["vault_publish_blockers"] = quality["vault_publish_blockers"]
         fields["batchdata_fallback_targets"] = quality["batchdata_fallback_targets"]
 
-        if quality["vault_publish_ready"]:
+        if quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"):
             vault_ready += 1
         if quality["batchdata_fallback_targets"]:
             batchdata_candidate_leads += 1

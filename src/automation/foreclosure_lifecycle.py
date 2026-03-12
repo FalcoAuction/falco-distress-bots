@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -50,6 +51,45 @@ def _derive_status(
 
 def _norm_address(value: str | None) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _clean_prefc_address(value: str | None) -> str | None:
+    text = " ".join(str(value or "").strip().split())
+    if not text:
+        return None
+
+    patterns = (
+        r"(?i)^0+\s+",
+        r"(?i)^0+\s+commonly\s+property\s+address:\s*",
+        r"(?i)^0+\s+common\s+property\s+address:\s*",
+        r"(?i)^common(?:ly)?\s+property\s+address:\s*",
+        r"(?i)^common\s+address:\s*",
+        r"(?i)^the\s+street\s+address\s+of\s+the\s+above-described\s+property\s+is\s+believed\s+to\s+be\s*",
+        r"(?i)^the\s+street\s+address\s+of\s+the\s+property\s+is\s+believed\s+to\s+be\s*",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "", text).strip()
+
+    if " at " in text.lower() and "," in text:
+        at_idx = text.lower().rfind(" at ")
+        tail = text[at_idx + 4 :].strip()
+        if re.search(r"\d", tail):
+            text = tail
+
+    if " is believed to be " in text.lower():
+        text = text.split(" is believed to be ", 1)[1].strip()
+
+    text = re.sub(r"(?i)^00\s+", "", text).strip(" ,.")
+    text = re.sub(r"\b(\d{5})(\d{4})\b", r"\1-\2", text)
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r"\s{2,}", " ", text)
+
+    lower = text.lower()
+    if "city county building" in lower and "main street" in lower:
+        return None
+    if not re.search(r"\d", text):
+        return None
+    return text or None
 
 
 def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
@@ -179,6 +219,12 @@ def run() -> dict[str, int]:
         summary["leads_updated"] += cur.rowcount
         if sale_status in summary:
             summary[sale_status] += 1
+
+        if sale_status == "pre_foreclosure":
+            row = cur.execute("SELECT address FROM leads WHERE lead_key=?", (lead_key,)).fetchone()
+            cleaned = _clean_prefc_address(row[0] if row else None)
+            if cleaned and cleaned != (row[0] if row else None):
+                cur.execute("UPDATE leads SET address=? WHERE lead_key=?", (cleaned, lead_key))
 
     summary["merged_duplicates"] = _merge_duplicate_leads(cur)
     con.commit()

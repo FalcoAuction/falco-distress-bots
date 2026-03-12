@@ -154,7 +154,7 @@ def masked_title(county: str, distress_type: str) -> str:
 
 
 def build_summary(county: str, distress_type: str, dts_days, readiness: str, falco_score, contact_ready: bool) -> str:
-    dts_txt = f"{int(dts_days)} days" if dts_days is not None else "unknown timing"
+    dts_txt = f"{int(dts_days)} days" if dts_days is not None else "early-stage timing"
     contact_txt = "contact ready" if contact_ready else "contact pending"
     return (
         f"{distress_type or 'Distress'} opportunity in {county or 'target market'} with "
@@ -189,11 +189,14 @@ def main() -> None:
             auction_readiness,
             dts_days,
             distress_type,
+            sale_status,
             falco_score_internal,
             equity_band
         FROM leads
         WHERE COALESCE(auction_readiness, '') IN ('GREEN', 'YELLOW', 'PARTIAL')
+           OR sale_status = 'pre_foreclosure'
         ORDER BY
+            CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
             CASE auction_readiness
                 WHEN 'GREEN' THEN 1
                 WHEN 'YELLOW' THEN 2
@@ -219,6 +222,7 @@ def main() -> None:
         readiness,
         dts_days,
         distress_type,
+        sale_status,
         falco_score,
         equity_band,
     ) in rows:
@@ -229,7 +233,8 @@ def main() -> None:
 
         contact_ready = latest_contact_ready(cur, lead_key) == "1"
         attom = latest_attom_snapshot(cur, lead_key)
-        title = masked_title(county or "", distress_type or "")
+        display_distress_type = "Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "")
+        title = masked_title(county or "", display_distress_type or distress_type or "")
         slug = f"{slugify(title)}-{lead_key[:8]}"
         base = existing.get(slug, {})
 
@@ -242,6 +247,7 @@ def main() -> None:
                 "auction_readiness": readiness,
                 "equity_band": equity_band,
                 "dts_days": dts_days,
+                "sale_status": sale_status,
                 "contact_ready": contact_ready,
                 "attom_raw_json": attom["attom_raw_json"],
                 "value_anchor_mid": attom["value_anchor_mid"],
@@ -263,12 +269,15 @@ def main() -> None:
                 "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
             }
         )
-        if not quality["vault_publish_ready"] and not base:
+        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        if not publish_ready and not base:
             continue
         enriched_fields = quality.get("enriched_fields", {})
         published_readiness = readiness
         if readiness == "GREEN" and not quality["top_tier_ready"]:
             published_readiness = "YELLOW"
+        if sale_status == "pre_foreclosure" and published_readiness not in {"GREEN", "YELLOW", "PARTIAL"}:
+            published_readiness = "PARTIAL"
 
         packet_file_name = f"{slug}.pdf"
         site_packet_path = SITE_PACKET_DIR / packet_file_name
@@ -277,7 +286,7 @@ def main() -> None:
 
         status = derive_status(base, dts_days)
         market = f"{county or 'Unknown County'}, {state or 'TN'}"
-        auction_window = f"{int(dts_days)} Days" if dts_days is not None else "Confidential"
+        auction_window = "Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{int(dts_days)} Days" if dts_days is not None else "Confidential")
 
         created_at = base.get("createdAt")
         if not created_at:
@@ -289,11 +298,11 @@ def main() -> None:
             "market": market,
             "county": county or "",
             "status": status,
-            "distressType": distress_type or "Distress Opportunity",
+            "distressType": display_distress_type or distress_type or "Distress Opportunity",
             "auctionWindow": auction_window,
             "summary": build_summary(
                 county or "",
-                distress_type or "Distress",
+                display_distress_type or distress_type or "Distress",
                 dts_days,
                 published_readiness or "",
                 falco_score,
@@ -301,7 +310,7 @@ def main() -> None:
             ),
             "publicTeaser": build_teaser(county or "", published_readiness or "", falco_score, dts_days),
             "packetUrl": f"/api/vault/packet?slug={slug}",
-            "packetLabel": "Auction Opportunity Brief",
+            "packetLabel": "Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief",
             "packetFileName": packet_file_name,
             "sourceLeadKey": lead_key,
             "createdAt": created_at,
@@ -331,8 +340,10 @@ def main() -> None:
             "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
             "suggestedLaneReasons": quality["lane_suggestion"]["reasons"],
             "topTierReady": bool(quality["top_tier_ready"]),
-            "vaultPublishReady": bool(quality["vault_publish_ready"]),
-            "dataNotes": (quality["vault_publish_blockers"] + quality["execution_notes"])[:4],
+            "vaultPublishReady": publish_ready,
+            "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+            "saleStatus": sale_status or "",
+            "dataNotes": ((quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"]) + quality["execution_notes"])[:4],
         }
         out_rows.append(row)
 

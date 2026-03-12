@@ -70,6 +70,7 @@ def _extract_owner_mortgage(raw_json: Optional[str]) -> dict:
         "owner_mail": None,
         "last_sale_date": None,
         "mortgage_lender": None,
+        "mortgage_amount": None,
     }
 
     owner_blob = blob.get("owner")
@@ -99,6 +100,21 @@ def _extract_owner_mortgage(raw_json: Optional[str]) -> dict:
         lender = mortgage_blob.get("lender") or {}
         if isinstance(lender, dict):
             out["mortgage_lender"] = lender.get("name") or None
+        mortgage = mortgage_blob.get("mortgage") or {}
+        if isinstance(mortgage, dict):
+            out["mortgage_amount"] = (
+                mortgage.get("amount")
+                or mortgage.get("loanAmount")
+                or mortgage.get("originationAmount")
+                or None
+            )
+        if not out["mortgage_amount"]:
+            out["mortgage_amount"] = (
+                mortgage_blob.get("amount")
+                or mortgage_blob.get("loanAmount")
+                or mortgage_blob.get("originationAmount")
+                or None
+            )
 
     return out
 
@@ -143,7 +159,7 @@ def score_leads_for_run(run_id: str):
     conn.row_factory = sqlite3.Row
 
     rows = conn.execute("""
-        SELECT l.lead_key, l.address, l.county,
+        SELECT l.lead_key, l.address, l.county, l.distress_type, l.sale_status,
                COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
                ae.avm_low, ae.avm_high, ae.attom_raw_json,
                cp.field_value_text AS contact_ready
@@ -177,7 +193,6 @@ def score_leads_for_run(run_id: str):
             )
             WHERE rn = 1
         ) cp ON cp.lead_key = l.lead_key
-        WHERE COALESCE(l.current_sale_date, ie.sale_date) IS NOT NULL
     """, (run_id,)).fetchall()
 
     print(f"[SCORING] run_id={run_id} scoring_rows={len(rows)}")
@@ -185,10 +200,13 @@ def score_leads_for_run(run_id: str):
     today = date.today()
 
     for r in rows:
-        sale_date = date.fromisoformat(r["sale_date"])
-        dts = (sale_date - today).days
+        sale_date_raw = r["sale_date"]
+        dts = None
+        if sale_date_raw:
+            sale_date = date.fromisoformat(sale_date_raw)
+            dts = (sale_date - today).days
 
-        dts_score = score_dts(dts)
+        dts_score = score_dts(dts) if dts is not None else 8
         equity_score, equity_band = score_equity(r["avm_low"], r["avm_high"])
         property_detail = _extract_property_detail(r["attom_raw_json"])
         owner_mortgage = _extract_owner_mortgage(r["attom_raw_json"])
@@ -198,6 +216,9 @@ def score_leads_for_run(run_id: str):
             prov_value = _latest_prov_text(conn, r["lead_key"], key)
             if prov_value:
                 owner_mortgage[key] = prov_value
+        prov_amount = _latest_prov_num(conn, r["lead_key"], "mortgage_amount")
+        if prov_amount is not None:
+            owner_mortgage["mortgage_amount"] = prov_amount
 
         for key in ("property_identifier",):
             prov_value = _latest_prov_text(conn, r["lead_key"], key)
@@ -212,6 +233,8 @@ def score_leads_for_run(run_id: str):
         quality = assess_packet_data({
             "address": r["address"],
             "county": r["county"],
+            "distress_type": r["distress_type"],
+            "sale_status": r["sale_status"],
             "dts_days": dts,
             "attom_raw_json": r["attom_raw_json"],
             "value_anchor_low": r["avm_low"],
@@ -227,6 +250,7 @@ def score_leads_for_run(run_id: str):
             "owner_mail": owner_mortgage.get("owner_mail"),
             "last_sale_date": owner_mortgage.get("last_sale_date"),
             "mortgage_lender": owner_mortgage.get("mortgage_lender"),
+            "mortgage_amount": owner_mortgage.get("mortgage_amount"),
             "year_built": property_detail.get("year_built"),
             "building_area_sqft": property_detail.get("building_area_sqft"),
             "beds": property_detail.get("beds"),
@@ -296,8 +320,13 @@ def score_leads_for_run(run_id: str):
 
         has_valuation = bool(r["avm_low"] and r["avm_high"])
         has_owner_pair = bool(owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail"))
-        has_debt_pair = bool(owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date"))
-        inside_green_window = 21 <= dts <= 60
+        has_debt_pair = bool(
+            owner_mortgage.get("mortgage_lender")
+            and owner_mortgage.get("last_sale_date")
+            and owner_mortgage.get("mortgage_amount") is not None
+        )
+        inside_green_window = dts is not None and 21 <= dts <= 60
+        is_pre_foreclosure = str(r["sale_status"] or "").strip().lower() == "pre_foreclosure"
 
         if (
             total_score >= 80
@@ -313,10 +342,21 @@ def score_leads_for_run(run_id: str):
         elif (
             total_score >= 55
             and has_valuation
+            and dts is not None
             and dts <= 75
             and execution_reality["workability_band"] != "LIMITED"
         ):
             readiness = "YELLOW"
+        elif (
+            is_pre_foreclosure
+            and total_score >= 60
+            and has_owner_pair
+            and has_debt_pair
+            and execution_reality["contact_path_quality"] != "THIN"
+            and execution_reality["control_party"] != "UNCLEAR"
+            and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
+        ):
+            readiness = "PARTIAL"
         else:
             readiness = "RED"
 

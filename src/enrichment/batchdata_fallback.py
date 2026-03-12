@@ -31,6 +31,33 @@ _TARGET_FIELDS = (
 )
 
 
+def _normalize_lookup_address(raw: str) -> str:
+    text = " ".join((raw or "").strip().split()).strip(" ,.")
+    if not text:
+        return ""
+    patterns = (
+        r"(?i)^0+\s+",
+        r"(?i)^0+\s+commonly\s+property\s+address:\s*",
+        r"(?i)^0+\s+common\s+property\s+address:\s*",
+        r"(?i)^common(?:ly)?\s+property\s+address:\s*",
+        r"(?i)^common\s+address:\s*",
+        r"(?i)^the\s+street\s+address\s+of\s+the\s+above-described\s+property\s+is\s+believed\s+to\s+be\s*",
+        r"(?i)^the\s+street\s+address\s+of\s+the\s+property\s+is\s+believed\s+to\s+be\s*",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, "", text).strip()
+    if " is believed to be " in text.lower():
+        text = text.split(" is believed to be ", 1)[1].strip()
+    if " at " in text.lower() and "," in text:
+        at_idx = text.lower().rfind(" at ")
+        tail = text[at_idx + 4 :].strip()
+        if re.search(r"\d", tail):
+            text = tail
+    text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" ,.")
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -445,7 +472,7 @@ def _call_batchdata(address: str, county: str, state: str) -> Dict[str, Any]:
     if not api_key:
         raise RuntimeError("Missing FALCO_BATCHDATA_API_KEY")
 
-    parts = _split_address(address, state)
+    parts = _split_address(_normalize_lookup_address(address), state)
     if not parts.get("street"):
         raise RuntimeError("Missing structured street for BatchData lookup")
 
@@ -500,6 +527,7 @@ def run() -> Dict[str, int]:
 
     db_path = os.environ.get("FALCO_SQLITE_PATH", "data/falco.db")
     limit = int(os.environ.get("FALCO_MAX_BATCHDATA_ENRICH_PER_RUN", "6"))
+    pre_foreclosure_limit = int(os.environ.get("FALCO_MAX_BATCHDATA_PREFC_PER_RUN", "12"))
     dts_min = int(os.environ.get("FALCO_DTS_MIN", "21"))
     dts_max = int(os.environ.get("FALCO_DTS_MAX", "90"))
     con = sqlite3.connect(db_path)
@@ -524,6 +552,7 @@ def run() -> Dict[str, int]:
           l.county,
           l.state,
           l.distress_type,
+          l.sale_status,
           l.falco_score_internal,
           l.auction_readiness,
           l.equity_band,
@@ -535,19 +564,23 @@ def run() -> Dict[str, int]:
         FROM leads l
         LEFT JOIN latest_attom la
           ON la.lead_key = l.lead_key AND la.rn = 1
-        WHERE l.dts_days IS NOT NULL
-          AND l.dts_days BETWEEN ? AND ?
+        WHERE (
+            (l.dts_days IS NOT NULL AND l.dts_days BETWEEN ? AND ?)
+            OR l.sale_status = 'pre_foreclosure'
+          )
         ORDER BY
+          CASE WHEN l.sale_status = 'pre_foreclosure' THEN 0 ELSE 1 END,
           CASE COALESCE(l.auction_readiness, '')
             WHEN 'GREEN' THEN 1
             WHEN 'YELLOW' THEN 2
+            WHEN 'PARTIAL' THEN 3
             ELSE 3
           END,
           COALESCE(l.falco_score_internal, 0) DESC,
-          l.dts_days ASC
+          COALESCE(l.dts_days, 9999) ASC
         LIMIT ?
         """,
-        (dts_min, dts_max, limit * 4),
+        (dts_min, dts_max, max(limit * 4, pre_foreclosure_limit * 4)),
     ).fetchall()
 
     summary = {
@@ -561,12 +594,12 @@ def run() -> Dict[str, int]:
         "enabled": 1,
     }
 
+    pre_foreclosure_requested = 0
+
     for row in rows:
-        if summary["requested"] >= limit:
-            break
 
         lead_key = str(row["lead_key"] or "").strip()
-        address = str(row["address"] or "").strip()
+        address = _normalize_lookup_address(str(row["address"] or "").strip())
         county = str(row["county"] or "").strip()
         state = str(row["state"] or "TN").strip() or "TN"
         if not address:
@@ -578,7 +611,14 @@ def run() -> Dict[str, int]:
 
         score = float(row["falco_score_internal"] or 0)
         readiness = str(row["auction_readiness"] or "").upper()
-        if readiness not in {"GREEN", "YELLOW"} and score < 70:
+        sale_status = str(row["sale_status"] or "").strip().lower()
+        is_pre_foreclosure = sale_status == "pre_foreclosure"
+        if is_pre_foreclosure:
+            if pre_foreclosure_requested >= pre_foreclosure_limit:
+                continue
+        elif summary["requested"] >= limit:
+            break
+        if readiness not in {"GREEN", "YELLOW", "PARTIAL"} and score < 70 and sale_status != "pre_foreclosure":
             summary["skipped_not_worth_it"] += 1
             continue
 
@@ -600,6 +640,8 @@ def run() -> Dict[str, int]:
 
             if targets:
                 summary["requested"] += 1
+                if is_pre_foreclosure:
+                    pre_foreclosure_requested += 1
                 payload = _call_batchdata(address, county, state)
                 artifact_ok, artifact_id = _store.insert_raw_artifact(
                     lead_key=lead_key,
