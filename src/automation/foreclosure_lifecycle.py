@@ -56,6 +56,15 @@ def _norm_address(value: str | None) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
 
+def _canonical_property_key(county: str | None, address: str | None) -> str | None:
+    county_norm = " ".join(str(county or "").strip().lower().split())
+    address_norm = _norm_address(address)
+    if not county_norm or not address_norm:
+        return None
+    raw = f"{county_norm}|{address_norm}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
 def _build_event_key(
     lead_key: str,
     source: str,
@@ -133,7 +142,7 @@ def _clean_prefc_address(value: str | None) -> str | None:
 def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
     lead_rows = cur.execute(
         """
-        SELECT lead_key, address, county, current_sale_date, sale_status, last_seen_at
+        SELECT lead_key, address, county, current_sale_date, sale_status, last_seen_at, canonical_property_key
         FROM leads
         WHERE COALESCE(current_sale_date, '') <> ''
            OR sale_status = 'pre_foreclosure'
@@ -141,15 +150,15 @@ def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
     ).fetchall()
 
     groups: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
-    for lead_key, address, county, current_sale_date, sale_status, last_seen_at in lead_rows:
+    for lead_key, address, county, current_sale_date, sale_status, last_seen_at, canonical_property_key in lead_rows:
         norm_address = _norm_address(address)
         if not norm_address or not county:
             continue
 
         if current_sale_date:
-            group_key = (county, norm_address, current_sale_date)
+            group_key = (county, canonical_property_key or norm_address, current_sale_date)
         elif str(sale_status or "").strip().lower() == "pre_foreclosure":
-            group_key = (county, norm_address, "pre_foreclosure")
+            group_key = (county, canonical_property_key or norm_address, "pre_foreclosure")
         else:
             continue
 
@@ -248,6 +257,30 @@ def run() -> dict[str, int]:
             has_foreclosure=has_foreclosure,
         )
 
+        lead_row = cur.execute(
+            "SELECT address, county FROM leads WHERE lead_key=?",
+            (lead_key,),
+        ).fetchone()
+        current_address = lead_row[0] if lead_row else None
+        current_county = lead_row[1] if lead_row else None
+
+        if sale_status == "pre_foreclosure":
+            cleaned = _clean_prefc_address(current_address)
+            if cleaned and cleaned != current_address:
+                current_address = cleaned
+                cur.execute("UPDATE leads SET address=? WHERE lead_key=?", (cleaned, lead_key))
+            elif not cleaned and current_address:
+                cur.execute("DELETE FROM ingest_events WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM attom_enrichments WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM raw_artifacts WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM lead_field_provenance WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM packets WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM leads WHERE lead_key=?", (lead_key,))
+                summary["invalid_prefc_removed"] += 1
+                continue
+
+        canonical_property_key = _canonical_property_key(current_county, current_address)
+
         cur.execute(
             """
             UPDATE leads
@@ -255,7 +288,8 @@ def run() -> dict[str, int]:
                 original_sale_date=?,
                 sale_status=?,
                 dts_days=?,
-                sale_date_updated_at=?
+                sale_date_updated_at=?,
+                canonical_property_key=?
             WHERE lead_key=?
             """,
             (
@@ -264,6 +298,7 @@ def run() -> dict[str, int]:
                 sale_status,
                 dts_days,
                 now,
+                canonical_property_key,
                 lead_key,
             ),
         )
@@ -278,6 +313,7 @@ def run() -> dict[str, int]:
                 INSERT OR IGNORE INTO foreclosure_events (
                     event_key,
                     lead_key,
+                    canonical_property_key,
                     source,
                     source_url,
                     event_type,
@@ -287,11 +323,12 @@ def run() -> dict[str, int]:
                     recorded_at,
                     details_json
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_key,
                     lead_key,
+                    canonical_property_key,
                     source,
                     source_url,
                     _event_type_for(source, sale_date),
@@ -301,6 +338,7 @@ def run() -> dict[str, int]:
                     now,
                     json.dumps(
                         {
+                            "canonical_property_key": canonical_property_key,
                             "current_sale_date": current_sale_date,
                             "original_sale_date": original_sale_date,
                         }
@@ -308,20 +346,6 @@ def run() -> dict[str, int]:
                 ),
             )
             summary["lifecycle_events_recorded"] += cur.rowcount
-
-        if sale_status == "pre_foreclosure":
-            row = cur.execute("SELECT address FROM leads WHERE lead_key=?", (lead_key,)).fetchone()
-            cleaned = _clean_prefc_address(row[0] if row else None)
-            if cleaned and cleaned != (row[0] if row else None):
-                cur.execute("UPDATE leads SET address=? WHERE lead_key=?", (cleaned, lead_key))
-            elif not cleaned and row and row[0]:
-                cur.execute("DELETE FROM ingest_events WHERE lead_key=?", (lead_key,))
-                cur.execute("DELETE FROM attom_enrichments WHERE lead_key=?", (lead_key,))
-                cur.execute("DELETE FROM raw_artifacts WHERE lead_key=?", (lead_key,))
-                cur.execute("DELETE FROM lead_field_provenance WHERE lead_key=?", (lead_key,))
-                cur.execute("DELETE FROM packets WHERE lead_key=?", (lead_key,))
-                cur.execute("DELETE FROM leads WHERE lead_key=?", (lead_key,))
-                summary["invalid_prefc_removed"] += 1
 
     summary["merged_duplicates"] = _merge_duplicate_leads(cur)
     con.commit()

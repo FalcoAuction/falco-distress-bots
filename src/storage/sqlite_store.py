@@ -93,6 +93,7 @@ def init_db() -> None:
                 address             TEXT,
                 county              TEXT,
                 state               TEXT,
+                canonical_property_key TEXT,
                 first_seen_at       TEXT NOT NULL,
                 last_seen_at        TEXT NOT NULL,
                 -- fields used by scoring/packaging (may be populated by other stages)
@@ -156,6 +157,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS foreclosure_events (
                 event_key      TEXT PRIMARY KEY,
                 lead_key       TEXT NOT NULL,
+                canonical_property_key TEXT,
                 source         TEXT,
                 source_url     TEXT,
                 event_type     TEXT NOT NULL,
@@ -242,6 +244,7 @@ def init_db() -> None:
 
         # leads: columns required by packager / candidate loader
         for col, typ in (
+            ("canonical_property_key", "TEXT"),
             ("dts_days", "INTEGER"),
             ("current_sale_date", "TEXT"),
             ("original_sale_date", "TEXT"),
@@ -261,6 +264,7 @@ def init_db() -> None:
                 pass
 
         for col, typ in (
+            ("canonical_property_key", "TEXT"),
             ("source_url", "TEXT"),
             ("details_json", "TEXT"),
         ):
@@ -268,6 +272,20 @@ def init_db() -> None:
                 _ensure_column(con, "foreclosure_events", col, typ)
             except Exception:
                 pass
+
+        try:
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_leads_canonical_property ON leads (canonical_property_key)"
+            )
+        except Exception:
+            pass
+
+        try:
+            con.execute(
+                "CREATE INDEX IF NOT EXISTS idx_foreclosure_events_canonical ON foreclosure_events (canonical_property_key, event_at DESC)"
+            )
+        except Exception:
+            pass
 
     _INITIALIZED = True
 

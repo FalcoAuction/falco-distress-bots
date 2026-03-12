@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..packaging.data_quality import assess_packet_data
+from ..storage.sqlite_store import init_db
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE_REPO = ROOT.parent / "falco-site"
@@ -15,8 +17,10 @@ SITE_DATA_DIR = SITE_REPO / "data"
 SITE_OPERATOR_DIR = SITE_DATA_DIR / "operator"
 SITE_OUTREACH_DIR = SITE_DATA_DIR / "outreach"
 SITE_VAULT_LISTINGS = SITE_DATA_DIR / "vault_listings.ndjson"
+SITE_PRIVATE_PACKET_DIR = SITE_REPO / "private" / "vault" / "packets"
 OUTREACH_DIR = ROOT / "out" / "outreach"
 REPORTS_DIR = ROOT / "out" / "reports"
+PACKETS_ROOT = ROOT / "out" / "packets"
 
 
 def _db_path() -> Path:
@@ -24,6 +28,7 @@ def _db_path() -> Path:
 
 
 def _connect() -> sqlite3.Connection:
+    init_db()
     con = sqlite3.connect(_db_path())
     con.row_factory = sqlite3.Row
     return con
@@ -58,6 +63,69 @@ def _load_live_slugs() -> list[str]:
 
 def _lead_key_prefix(lead_key: str) -> str:
     return (lead_key or "")[:8].lower()
+
+
+def _slugify(text: str) -> str:
+    value = (text or "").lower().strip()
+    out: list[str] = []
+    prev_dash = False
+    for ch in value:
+        if ch.isalnum():
+            out.append(ch)
+            prev_dash = False
+        else:
+            if not prev_dash:
+                out.append("-")
+                prev_dash = True
+    slug = "".join(out).strip("-")
+    return slug or "listing"
+
+
+def _packet_for_lead(lead_key: str) -> Path | None:
+    candidates = sorted(
+        PACKETS_ROOT.rglob(f"{lead_key}.pdf"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        return None
+
+    repack_candidates = [p for p in candidates if "unknown_run" in p.parts]
+    if repack_candidates:
+        return repack_candidates[0]
+
+    return candidates[0]
+
+
+def _masked_title(county: str, distress_type: str) -> str:
+    county_text = county or "Target County"
+    distress_text = distress_type or "Distress Opportunity"
+    return f"{county_text} {distress_text}"
+
+
+def _build_summary(
+    county: str,
+    distress_type: str,
+    dts_days: int | None,
+    readiness: str,
+    contact_ready: bool,
+) -> str:
+    dts_text = f"{int(dts_days)} days" if dts_days is not None else "early-stage timing"
+    contact_text = "contact ready" if contact_ready else "contact pending"
+    return (
+        f"{distress_type or 'Distress'} opportunity in {county or 'target market'} with "
+        f"{readiness or 'unknown'} readiness, {contact_text}, and auction timing of {dts_text}."
+    )
+
+
+def _build_teaser(county: str, readiness: str, dts_days: int | None) -> str:
+    parts = [
+        f"County: {county or 'Unknown'}",
+        f"Readiness: {readiness or 'Unknown'}",
+    ]
+    if dts_days is not None:
+        parts.append(f"Auction In: {int(dts_days)} days")
+    return " • ".join(parts)
 
 
 def _attach_vault_state(rows: list[dict[str, Any]], live_slugs: list[str]) -> list[dict[str, Any]]:
@@ -286,6 +354,199 @@ def _hydrate_quality_fields(
     return fields
 
 
+def _build_candidate_listing_payload(
+    lead: sqlite3.Row | dict[str, Any],
+    quality: dict[str, Any],
+    packet_file_name: str,
+) -> dict[str, Any]:
+    lead_data = dict(lead)
+    sale_status = str(lead_data.get("sale_status") or "")
+    county = str(lead_data.get("county") or "")
+    state = "TN"
+    distress_type = str(lead_data.get("distress_type") or "")
+    display_distress_type = (
+        "Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "Distress Opportunity")
+    )
+    title = _masked_title(county, display_distress_type)
+    slug = f"{_slugify(title)}-{str(lead['lead_key'] or '')[:8]}"
+    enriched_fields = quality.get("enriched_fields", {})
+    readiness = str(lead["auction_readiness"] or "")
+    if readiness == "GREEN" and not quality["top_tier_ready"]:
+        readiness = "YELLOW"
+    if sale_status == "pre_foreclosure" and readiness not in {"GREEN", "YELLOW", "PARTIAL"}:
+        readiness = "PARTIAL"
+    dts_days = int(lead_data["dts_days"]) if lead_data.get("dts_days") is not None else None
+    contact_ready = bool(quality.get("contact_ready"))
+    created_at = str(lead_data.get("score_updated_at") or lead_data.get("last_seen_at") or lead_data.get("first_seen_at") or _utc_now())
+
+    return {
+        "slug": slug,
+        "title": title,
+        "market": f"{county or 'Unknown County'}, {state}",
+        "county": county,
+        "state": state,
+        "status": "active",
+        "distressType": display_distress_type,
+        "auctionWindow": "Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{dts_days} Days" if dts_days is not None else "Confidential"),
+        "summary": _build_summary(county, display_distress_type, dts_days, readiness, contact_ready),
+        "publicTeaser": _build_teaser(county, readiness, dts_days),
+        "packetUrl": f"/api/vault/packet?slug={slug}",
+        "packetLabel": "Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief",
+        "packetFileName": packet_file_name,
+        "sourceLeadKey": lead_data["lead_key"],
+        "createdAt": created_at,
+        "expiresAt": "",
+        "claimedAt": "",
+        "claimedBy": "",
+        "falcoScore": float(lead_data["falco_score_internal"]) if lead_data.get("falco_score_internal") is not None else None,
+        "auctionReadiness": readiness,
+        "equityBand": lead_data.get("equity_band") or "",
+        "dtsDays": dts_days,
+        "contactReady": contact_ready,
+        "propertyIdentifier": enriched_fields.get("property_identifier"),
+        "ownerName": enriched_fields.get("owner_name"),
+        "ownerMail": enriched_fields.get("owner_mail"),
+        "lastSaleDate": enriched_fields.get("last_sale_date"),
+        "mortgageLender": enriched_fields.get("mortgage_lender"),
+        "mortgageAmount": enriched_fields.get("mortgage_amount"),
+        "yearBuilt": enriched_fields.get("year_built"),
+        "buildingAreaSqft": enriched_fields.get("building_area_sqft"),
+        "beds": enriched_fields.get("beds"),
+        "baths": enriched_fields.get("baths"),
+        "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
+        "controlParty": quality["execution_reality"]["control_party"],
+        "executionPosture": quality["execution_reality"]["execution_posture"],
+        "workabilityBand": quality["execution_reality"]["workability_band"],
+        "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
+        "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
+        "suggestedLaneReasons": quality["lane_suggestion"]["reasons"],
+        "topTierReady": bool(quality["top_tier_ready"]),
+        "vaultPublishReady": bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready")),
+        "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+        "saleStatus": sale_status,
+        "dataNotes": (
+            (quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"])
+            + quality["execution_notes"]
+        )[:4],
+    }
+
+
+def _build_publish_candidates(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 24,
+) -> list[dict[str, Any]]:
+    SITE_PRIVATE_PACKET_DIR.mkdir(parents=True, exist_ok=True)
+    attom_map: dict[str, dict[str, Any]] = {}
+    for row in con.execute(
+        """
+        WITH latest_attom AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+        FROM latest_attom
+        WHERE rn = 1
+        """
+    ).fetchall():
+        attom_map[row["lead_key"]] = dict(row)
+
+    candidates: list[dict[str, Any]] = []
+    lead_rows = con.execute(
+        """
+        SELECT
+          lead_key,
+          address,
+          county,
+          distress_type,
+          sale_status,
+          falco_score_internal,
+          auction_readiness,
+          equity_band,
+          dts_days,
+          COALESCE(uw_ready, 0) AS uw_ready,
+          canonical_property_key,
+          first_seen_at,
+          last_seen_at,
+          score_updated_at,
+          current_sale_date,
+          original_sale_date
+        FROM leads
+        WHERE COALESCE(dts_days, 9999) <= 90
+           OR sale_status = 'pre_foreclosure'
+        ORDER BY
+          CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
+          COALESCE(dts_days, 9999) ASC,
+          COALESCE(falco_score_internal, 0) DESC
+        LIMIT 120
+        """
+    ).fetchall()
+
+    for lead in lead_rows:
+        lead_key = str(lead["lead_key"] or "")
+        prefix = _lead_key_prefix(lead_key)
+        matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
+        if matched:
+            continue
+
+        hydrated = _hydrate_quality_fields(con, lead, attom_map)
+        quality = assess_packet_data(hydrated)
+        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        if not publish_ready:
+            continue
+
+        packet_path = _packet_for_lead(lead_key)
+        if not packet_path:
+            continue
+
+        packet_file_name = f"{_slugify(_masked_title(str(lead['county'] or ''), 'Pre-Foreclosure Review' if str(lead['sale_status'] or '') == 'pre_foreclosure' else str(lead['distress_type'] or 'Distress Opportunity')))}-{lead_key[:8]}.pdf"
+        staged_packet_path = SITE_PRIVATE_PACKET_DIR / packet_file_name
+        shutil.copy2(packet_path, staged_packet_path)
+
+        listing_payload = _build_candidate_listing_payload(lead, quality, packet_file_name)
+        candidates.append(
+            {
+                "leadKey": lead_key,
+                "address": lead["address"],
+                "county": lead["county"],
+                "distressType": lead["distress_type"],
+                "saleStatus": lead["sale_status"],
+                "canonicalPropertyKey": lead["canonical_property_key"],
+                "slug": listing_payload["slug"],
+                "packetFileName": packet_file_name,
+                "listingPayload": listing_payload,
+                "supabaseRow": {
+                    "slug": listing_payload["slug"],
+                    "title": listing_payload["title"],
+                    "county": listing_payload["county"] or None,
+                    "state": listing_payload["state"] or "TN",
+                    "falco_score": listing_payload["falcoScore"],
+                    "auction_readiness": listing_payload["auctionReadiness"] or None,
+                    "equity_band": listing_payload["equityBand"] or None,
+                    "dts_days": listing_payload["dtsDays"],
+                    "packet_path": packet_file_name,
+                    "is_active": True,
+                },
+            }
+        )
+
+    candidates.sort(
+        key=lambda row: (
+            0 if row["listingPayload"].get("topTierReady") else 1,
+            0 if str(row["listingPayload"].get("auctionReadiness") or "").upper() == "GREEN" else 1,
+            -(row["listingPayload"].get("falcoScore") or 0),
+            row["listingPayload"].get("dtsDays") or 9999,
+        )
+    )
+    return candidates[:limit]
+
+
 def _build_pre_foreclosure_promotion(
     con: sqlite3.Connection,
     live_slugs: list[str],
@@ -399,6 +660,7 @@ def _build_lifecycle_events(
         SELECT
           e.event_key,
           e.lead_key,
+          e.canonical_property_key,
           e.source,
           e.source_url,
           e.event_type,
@@ -678,13 +940,33 @@ def _refresh_outreach_snapshots() -> dict[str, str | None]:
 def write_site_snapshots() -> dict[str, Any]:
     SITE_OPERATOR_DIR.mkdir(parents=True, exist_ok=True)
     operator_path = SITE_OPERATOR_DIR / "report.json"
+    candidates_path = SITE_OPERATOR_DIR / "vault_candidates.json"
     operator_payload = _operator_snapshot()
     operator_payload["analyst"] = _load_latest_analyst_snapshot()
     _write_json(operator_path, operator_payload)
+    with _connect() as con:
+        candidate_payload = {
+            "generatedAt": _utc_now(),
+            "count": 0,
+            "candidates": [],
+        }
+        try:
+            live_slugs = _load_live_slugs()
+            publish_candidates = _build_publish_candidates(con, live_slugs)
+            candidate_payload = {
+                "generatedAt": _utc_now(),
+                "count": len(publish_candidates),
+                "candidates": publish_candidates,
+            }
+        finally:
+            _write_json(candidates_path, candidate_payload)
+    operator_payload["overview"]["vaultQueue"] = int(candidate_payload.get("count") or 0)
     outreach_paths = _refresh_outreach_snapshots()
+    _write_json(operator_path, operator_payload)
 
     return {
         "ok": True,
         "operator": str(operator_path),
+        "vaultCandidates": str(candidates_path),
         "outreach": outreach_paths,
     }
