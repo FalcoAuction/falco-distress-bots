@@ -70,6 +70,10 @@ def _clean_prefc_address(value: str | None) -> str | None:
     for pattern in patterns:
         text = re.sub(pattern, "", text).strip()
 
+    text = re.sub(r"(?i)^\d{2,}\s+\d{3,}\s+", "", text).strip()
+    text = re.sub(r"(?i)^common(?:ly)?\s+property\s+address:\s*", "", text).strip()
+    text = re.sub(r"(?i)^common\s+address:\s*", "", text).strip()
+
     if " at " in text.lower() and "," in text:
         at_idx = text.lower().rfind(" at ")
         tail = text[at_idx + 4 :].strip()
@@ -82,6 +86,7 @@ def _clean_prefc_address(value: str | None) -> str | None:
     text = re.sub(r"(?i)^00\s+", "", text).strip(" ,.")
     text = re.sub(r"\b(\d{5})(\d{4})\b", r"\1-\2", text)
     text = re.sub(r"\s+,", ",", text)
+    text = re.sub(r",\s*([A-Z][a-z]+)\.\s*([A-Z]{2}\b)", r", \1, \2", text)
     text = re.sub(r"\s{2,}", " ", text)
 
     lower = text.lower()
@@ -95,18 +100,27 @@ def _clean_prefc_address(value: str | None) -> str | None:
 def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
     lead_rows = cur.execute(
         """
-        SELECT lead_key, address, county, current_sale_date, last_seen_at
+        SELECT lead_key, address, county, current_sale_date, sale_status, last_seen_at
         FROM leads
         WHERE COALESCE(current_sale_date, '') <> ''
+           OR sale_status = 'pre_foreclosure'
         """
     ).fetchall()
 
     groups: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
-    for lead_key, address, county, current_sale_date, last_seen_at in lead_rows:
+    for lead_key, address, county, current_sale_date, sale_status, last_seen_at in lead_rows:
         norm_address = _norm_address(address)
-        if not norm_address or not county or not current_sale_date:
+        if not norm_address or not county:
             continue
-        groups.setdefault((county, norm_address, current_sale_date), []).append(
+
+        if current_sale_date:
+            group_key = (county, norm_address, current_sale_date)
+        elif str(sale_status or "").strip().lower() == "pre_foreclosure":
+            group_key = (county, norm_address, "pre_foreclosure")
+        else:
+            continue
+
+        groups.setdefault(group_key, []).append(
             (lead_key, last_seen_at or "")
         )
 
@@ -176,6 +190,7 @@ def run() -> dict[str, int]:
         "rescheduled": 0,
         "pre_foreclosure": 0,
         "expired": 0,
+        "invalid_prefc_removed": 0,
         "merged_duplicates": 0,
     }
 
@@ -225,6 +240,14 @@ def run() -> dict[str, int]:
             cleaned = _clean_prefc_address(row[0] if row else None)
             if cleaned and cleaned != (row[0] if row else None):
                 cur.execute("UPDATE leads SET address=? WHERE lead_key=?", (cleaned, lead_key))
+            elif not cleaned and row and row[0]:
+                cur.execute("DELETE FROM ingest_events WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM attom_enrichments WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM raw_artifacts WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM lead_field_provenance WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM packets WHERE lead_key=?", (lead_key,))
+                cur.execute("DELETE FROM leads WHERE lead_key=?", (lead_key,))
+                summary["invalid_prefc_removed"] += 1
 
     summary["merged_duplicates"] = _merge_duplicate_leads(cur)
     con.commit()
