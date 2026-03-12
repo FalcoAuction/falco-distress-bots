@@ -262,7 +262,10 @@ def _operator_snapshot() -> dict[str, Any]:
                   COALESCE(uw_ready, 0) AS uw_ready,
                   first_seen_at,
                   last_seen_at,
-                  score_updated_at
+                  score_updated_at,
+                  current_sale_date,
+                  original_sale_date,
+                  sale_status
                 FROM leads
                 ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
                 LIMIT 12
@@ -325,6 +328,75 @@ def _operator_snapshot() -> dict[str, Any]:
         ]
         live_slugs = _load_live_slugs()
         vault_candidates = _build_vault_candidates(con, live_slugs)
+
+        foreclosure_overview = dict(
+            cur.execute(
+                """
+                SELECT
+                  SUM(CASE WHEN sale_status='pre_foreclosure' THEN 1 ELSE 0 END) AS pre_foreclosure_count,
+                  SUM(CASE WHEN sale_status='scheduled' THEN 1 ELSE 0 END) AS scheduled_count,
+                  SUM(CASE WHEN sale_status='rescheduled' THEN 1 ELSE 0 END) AS rescheduled_count,
+                  SUM(CASE WHEN sale_status='expired' THEN 1 ELSE 0 END) AS expired_count
+                FROM leads
+                """
+            ).fetchone()
+        )
+
+        pre_foreclosure = [
+            dict(row)
+            for row in cur.execute(
+                """
+                SELECT
+                  lead_key,
+                  address,
+                  county,
+                  distress_type,
+                  falco_score_internal,
+                  auction_readiness,
+                  equity_band,
+                  dts_days,
+                  COALESCE(uw_ready, 0) AS uw_ready,
+                  first_seen_at,
+                  last_seen_at,
+                  score_updated_at,
+                  current_sale_date,
+                  original_sale_date,
+                  sale_status
+                FROM leads
+                WHERE sale_status='pre_foreclosure'
+                ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
+                LIMIT 10
+                """
+            ).fetchall()
+        ]
+
+        status_changes = [
+            dict(row)
+            for row in cur.execute(
+                """
+                SELECT
+                  lead_key,
+                  address,
+                  county,
+                  distress_type,
+                  falco_score_internal,
+                  auction_readiness,
+                  equity_band,
+                  dts_days,
+                  COALESCE(uw_ready, 0) AS uw_ready,
+                  first_seen_at,
+                  last_seen_at,
+                  score_updated_at,
+                  current_sale_date,
+                  original_sale_date,
+                  sale_status
+                FROM leads
+                WHERE sale_status IN ('scheduled', 'rescheduled', 'expired')
+                ORDER BY COALESCE(sale_date_updated_at, score_updated_at, last_seen_at, first_seen_at) DESC
+                LIMIT 12
+                """
+            ).fetchall()
+        ]
     finally:
         con.close()
 
@@ -347,6 +419,14 @@ def _operator_snapshot() -> dict[str, Any]:
         "topCandidates": _attach_vault_state(top_candidates, live_slugs),
         "recentPackets": _attach_vault_state(recent_packets, live_slugs),
         "vaultCandidates": vault_candidates,
+        "foreclosureIntake": {
+            "preForeclosureCount": int(foreclosure_overview.get("pre_foreclosure_count") or 0),
+            "scheduledCount": int(foreclosure_overview.get("scheduled_count") or 0),
+            "rescheduledCount": int(foreclosure_overview.get("rescheduled_count") or 0),
+            "expiredCount": int(foreclosure_overview.get("expired_count") or 0),
+            "preForeclosure": _attach_vault_state(pre_foreclosure, live_slugs),
+            "statusChanges": _attach_vault_state(status_changes, live_slugs),
+        },
     }
 
 
