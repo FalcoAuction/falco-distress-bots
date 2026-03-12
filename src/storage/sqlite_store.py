@@ -153,6 +153,24 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_packets_lead_key
                 ON packets (lead_key);
 
+            CREATE TABLE IF NOT EXISTS foreclosure_events (
+                event_key      TEXT PRIMARY KEY,
+                lead_key       TEXT NOT NULL,
+                source         TEXT,
+                source_url     TEXT,
+                event_type     TEXT NOT NULL,
+                sale_date      TEXT,
+                derived_status TEXT,
+                event_at       TEXT,
+                recorded_at    TEXT NOT NULL,
+                details_json   TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_foreclosure_events_lead
+                ON foreclosure_events (lead_key, event_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_foreclosure_events_status
+                ON foreclosure_events (derived_status, event_at DESC);
+
             -- Provenance tables (20260303_01_add_field_provenance)
             CREATE TABLE IF NOT EXISTS raw_artifacts (
                 artifact_id    TEXT PRIMARY KEY,
@@ -239,6 +257,15 @@ def init_db() -> None:
         ):
             try:
                 _ensure_column(con, "leads", col, typ)
+            except Exception:
+                pass
+
+        for col, typ in (
+            ("source_url", "TEXT"),
+            ("details_json", "TEXT"),
+        ):
+            try:
+                _ensure_column(con, "foreclosure_events", col, typ)
             except Exception:
                 pass
 

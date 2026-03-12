@@ -1,9 +1,12 @@
+import hashlib
+import json
 import os
 import re
 import sqlite3
 from datetime import UTC, datetime
 
 from ..scoring.days_to_sale import days_to_sale
+from ..storage.sqlite_store import init_db
 
 
 FORECLOSURE_SOURCES = {
@@ -51,6 +54,36 @@ def _derive_status(
 
 def _norm_address(value: str | None) -> str:
     return " ".join(str(value or "").strip().lower().split())
+
+
+def _build_event_key(
+    lead_key: str,
+    source: str,
+    source_url: str | None,
+    sale_date: str | None,
+    ingested_at: str | None,
+) -> str:
+    raw = "|".join(
+        [
+            str(lead_key or "").strip(),
+            str(source or "").strip(),
+            str(source_url or "").strip(),
+            str(sale_date or "").strip(),
+            str(ingested_at or "").strip(),
+        ]
+    )
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _event_type_for(source: str, sale_date: str | None) -> str:
+    normalized = str(source or "").strip().upper()
+    if normalized == "LIS_PENDENS":
+        return "lis_pendens"
+    if normalized == "SUBSTITUTION_OF_TRUSTEE":
+        return "substitution_of_trustee"
+    if sale_date:
+        return "sale_notice"
+    return "foreclosure_signal"
 
 
 def _clean_prefc_address(value: str | None) -> str | None:
@@ -153,6 +186,7 @@ def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
 
 
 def run() -> dict[str, int]:
+    init_db()
     con = sqlite3.connect(_db_path())
     cur = con.cursor()
 
@@ -161,6 +195,7 @@ def run() -> dict[str, int]:
         SELECT
             lead_key,
             source,
+            source_url,
             sale_date,
             ingested_at
         FROM ingest_events
@@ -180,8 +215,8 @@ def run() -> dict[str, int]:
         }
 
     grouped: dict[str, list[tuple[str, str | None, str | None]]] = {}
-    for lead_key, source, sale_date, ingested_at in rows:
-        grouped.setdefault(lead_key, []).append((source or "", sale_date, ingested_at))
+    for lead_key, source, source_url, sale_date, ingested_at in rows:
+        grouped.setdefault(lead_key, []).append((source or "", source_url, sale_date, ingested_at))
 
     summary = {
         "lead_rows_seen": len(grouped),
@@ -192,14 +227,15 @@ def run() -> dict[str, int]:
         "expired": 0,
         "invalid_prefc_removed": 0,
         "merged_duplicates": 0,
+        "lifecycle_events_recorded": 0,
     }
 
     now = _now()
 
     for lead_key, events in grouped.items():
-        sale_events = [(sale_date, ingested_at) for _, sale_date, ingested_at in events if sale_date]
-        has_upstream = any(source in UPSTREAM_SOURCES for source, _, _ in events)
-        has_foreclosure = any(source in FORECLOSURE_SOURCES for source, _, _ in events)
+        sale_events = [(sale_date, ingested_at) for _, _, sale_date, ingested_at in events if sale_date]
+        has_upstream = any(source in UPSTREAM_SOURCES for source, _, _, _ in events)
+        has_foreclosure = any(source in FORECLOSURE_SOURCES for source, _, _, _ in events)
 
         original_sale_date = sale_events[0][0] if sale_events else None
         current_sale_date = sale_events[-1][0] if sale_events else None
@@ -234,6 +270,44 @@ def run() -> dict[str, int]:
         summary["leads_updated"] += cur.rowcount
         if sale_status in summary:
             summary[sale_status] += 1
+
+        for source, source_url, sale_date, ingested_at in events:
+            event_key = _build_event_key(lead_key, source, source_url, sale_date, ingested_at)
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO foreclosure_events (
+                    event_key,
+                    lead_key,
+                    source,
+                    source_url,
+                    event_type,
+                    sale_date,
+                    derived_status,
+                    event_at,
+                    recorded_at,
+                    details_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_key,
+                    lead_key,
+                    source,
+                    source_url,
+                    _event_type_for(source, sale_date),
+                    sale_date,
+                    sale_status,
+                    ingested_at,
+                    now,
+                    json.dumps(
+                        {
+                            "current_sale_date": current_sale_date,
+                            "original_sale_date": original_sale_date,
+                        }
+                    ),
+                ),
+            )
+            summary["lifecycle_events_recorded"] += cur.rowcount
 
         if sale_status == "pre_foreclosure":
             row = cur.execute("SELECT address FROM leads WHERE lead_key=?", (lead_key,)).fetchone()

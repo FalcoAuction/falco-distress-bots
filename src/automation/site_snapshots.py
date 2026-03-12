@@ -108,6 +108,7 @@ def _build_vault_candidates(
           address,
           county,
           distress_type,
+          sale_status,
           falco_score_internal,
           auction_readiness,
           equity_band,
@@ -167,7 +168,7 @@ def _build_vault_candidates(
             ).fetchone()
             if row and row[0]:
                 fields[field_name] = row[0]
-        for field_name in ("year_built", "building_area_sqft", "beds", "baths"):
+        for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount"):
             row = con.execute(
                 """
                 SELECT field_value_num
@@ -183,7 +184,8 @@ def _build_vault_candidates(
 
         quality = assess_packet_data(fields)
         readiness = str(lead["auction_readiness"] or "").upper()
-        if not quality["vault_publish_ready"]:
+        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        if not publish_ready:
             continue
 
         candidates.append(
@@ -192,6 +194,7 @@ def _build_vault_candidates(
                 "address": lead["address"],
                 "county": lead["county"],
                 "distress_type": lead["distress_type"],
+                "sale_status": lead["sale_status"],
                 "falco_score_internal": lead["falco_score_internal"],
                 "auction_readiness": lead["auction_readiness"],
                 "equity_band": lead["equity_band"],
@@ -199,7 +202,8 @@ def _build_vault_candidates(
                 "uw_ready": lead["uw_ready"],
                 "vaultLive": False,
                 "vaultSlug": None,
-                "vaultPublishReady": bool(quality["vault_publish_ready"]),
+                "vaultPublishReady": publish_ready,
+                "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
                 "topTierReady": bool(quality["top_tier_ready"]),
                 "packetCompletenessPct": quality["packet_completeness_pct"],
                 "executionBlockers": quality["execution_blockers"],
@@ -215,6 +219,207 @@ def _build_vault_candidates(
         )
     )
     return candidates[:limit]
+
+
+def _hydrate_quality_fields(
+    con: sqlite3.Connection,
+    lead_row: sqlite3.Row | dict[str, Any],
+    attom_map: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    lead_key = str(lead_row["lead_key"] or "")
+    fields: dict[str, Any] = dict(lead_row)
+    fields["contact_ready"] = _fetch_scalar(
+        con.cursor(),
+        """
+        SELECT COUNT(*)
+        FROM lead_field_provenance
+        WHERE lead_key=?
+          AND field_name='contact_ready'
+          AND field_value_text='1'
+        """,
+        (lead_key,),
+    ) > 0
+    attom = attom_map.get(lead_key) or {}
+    fields["attom_raw_json"] = attom.get("attom_raw_json")
+    fields["value_anchor_mid"] = attom.get("avm_value")
+    fields["value_anchor_low"] = attom.get("avm_low")
+    fields["value_anchor_high"] = attom.get("avm_high")
+
+    for field_name in (
+        "trustee_phone_public",
+        "owner_phone_primary",
+        "owner_phone_secondary",
+        "notice_phone",
+        "owner_name",
+        "owner_mail",
+        "last_sale_date",
+        "mortgage_lender",
+        "property_identifier",
+    ):
+        row = con.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key, field_name),
+        ).fetchone()
+        if row and row[0]:
+            fields[field_name] = row[0]
+
+    for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount"):
+        row = con.execute(
+            """
+            SELECT field_value_num
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_num IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key, field_name),
+        ).fetchone()
+        if row and row[0] is not None:
+            fields[field_name] = float(row[0])
+
+    return fields
+
+
+def _build_pre_foreclosure_promotion(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 12,
+) -> dict[str, Any]:
+    attom_map: dict[str, dict[str, Any]] = {}
+    for row in con.execute(
+        """
+        WITH latest_attom AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+        FROM latest_attom
+        WHERE rn = 1
+        """
+    ).fetchall():
+        attom_map[row["lead_key"]] = dict(row)
+
+    ready_for_review: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    blocker_counts: dict[str, int] = {}
+
+    lead_rows = con.execute(
+        """
+        SELECT
+          lead_key,
+          address,
+          county,
+          distress_type,
+          sale_status,
+          falco_score_internal,
+          auction_readiness,
+          equity_band,
+          dts_days,
+          COALESCE(uw_ready, 0) AS uw_ready,
+          first_seen_at,
+          last_seen_at,
+          score_updated_at,
+          current_sale_date,
+          original_sale_date
+        FROM leads
+        WHERE sale_status='pre_foreclosure'
+        ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
+        LIMIT 30
+        """
+    ).fetchall()
+
+    for lead in lead_rows:
+        hydrated = _hydrate_quality_fields(con, lead, attom_map)
+        quality = assess_packet_data(hydrated)
+        prefix = _lead_key_prefix(str(lead["lead_key"] or ""))
+        matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
+        row = {
+            **dict(lead),
+            "vaultLive": bool(matched),
+            "vaultSlug": matched,
+            "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+            "vaultPublishReady": bool(quality["vault_publish_ready"]),
+            "topTierReady": bool(quality["top_tier_ready"]),
+            "packetCompletenessPct": quality["packet_completeness_pct"],
+            "executionBlockers": quality["execution_blockers"],
+        }
+
+        if row["preForeclosureReviewReady"] and not row["vaultLive"]:
+            ready_for_review.append(row)
+        else:
+            blocked.append(row)
+            for blocker in row["executionBlockers"]:
+                blocker_counts[blocker] = blocker_counts.get(blocker, 0) + 1
+
+    blocked.sort(
+        key=lambda row: (
+            len(row.get("executionBlockers") or []),
+            -(row.get("falco_score_internal") or 0),
+            row.get("dts_days") or 9999,
+        )
+    )
+    ready_for_review.sort(
+        key=lambda row: (
+            -(row.get("falco_score_internal") or 0),
+            row.get("dts_days") or 9999,
+        )
+    )
+
+    return {
+        "readyCount": len(ready_for_review),
+        "blockedCount": len(blocked),
+        "readyForReview": ready_for_review[:limit],
+        "blocked": blocked[:limit],
+        "blockerCounts": [
+            {"label": label, "count": count}
+            for label, count in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))
+        ][:8],
+    }
+
+
+def _build_lifecycle_events(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 16,
+) -> list[dict[str, Any]]:
+    rows = con.execute(
+        """
+        SELECT
+          e.event_key,
+          e.lead_key,
+          e.source,
+          e.source_url,
+          e.event_type,
+          e.sale_date,
+          e.derived_status,
+          e.event_at,
+          l.address,
+          l.county,
+          l.distress_type,
+          l.current_sale_date,
+          l.original_sale_date,
+          l.sale_status
+        FROM foreclosure_events e
+        LEFT JOIN leads l ON l.lead_key = e.lead_key
+        ORDER BY COALESCE(e.event_at, e.recorded_at) DESC, e.event_key DESC
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+
+    return _attach_vault_state([dict(row) for row in rows], live_slugs)
 
 
 def _fetch_scalar(cur: sqlite3.Cursor, sql: str, params: tuple[Any, ...] = ()) -> int:
@@ -329,6 +534,8 @@ def _operator_snapshot() -> dict[str, Any]:
         ]
         live_slugs = _load_live_slugs()
         vault_candidates = _build_vault_candidates(con, live_slugs)
+        pre_foreclosure_promotion = _build_pre_foreclosure_promotion(con, live_slugs)
+        lifecycle_events = _build_lifecycle_events(con, live_slugs)
 
         foreclosure_overview = dict(
             cur.execute(
@@ -427,6 +634,10 @@ def _operator_snapshot() -> dict[str, Any]:
             "expiredCount": int(foreclosure_overview.get("expired_count") or 0),
             "preForeclosure": _attach_vault_state(pre_foreclosure, live_slugs),
             "statusChanges": _attach_vault_state(status_changes, live_slugs),
+            "recentEvents": lifecycle_events,
+        },
+        "preForeclosurePromotion": {
+            **pre_foreclosure_promotion,
         },
     }
 
