@@ -16,6 +16,7 @@ SITE_OPERATOR_DIR = SITE_DATA_DIR / "operator"
 SITE_OUTREACH_DIR = SITE_DATA_DIR / "outreach"
 SITE_VAULT_LISTINGS = SITE_DATA_DIR / "vault_listings.ndjson"
 OUTREACH_DIR = ROOT / "out" / "outreach"
+REPORTS_DIR = ROOT / "out" / "reports"
 
 
 def _db_path() -> Path:
@@ -435,6 +436,17 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _load_latest_analyst_snapshot() -> dict[str, Any] | None:
+    path = REPORTS_DIR / "latest_falco_analyst.json"
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _refresh_outreach_snapshots() -> dict[str, str | None]:
     SITE_OUTREACH_DIR.mkdir(parents=True, exist_ok=True)
     results: dict[str, str | None] = {}
@@ -456,6 +468,7 @@ def write_site_snapshots() -> dict[str, Any]:
     SITE_OPERATOR_DIR.mkdir(parents=True, exist_ok=True)
     operator_path = SITE_OPERATOR_DIR / "report.json"
     operator_payload = _operator_snapshot()
+    operator_payload["analyst"] = _load_latest_analyst_snapshot()
     _write_json(operator_path, operator_payload)
     outreach_paths = _refresh_outreach_snapshots()
 
