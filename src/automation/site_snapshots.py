@@ -143,6 +143,40 @@ def _attach_vault_state(rows: list[dict[str, Any]], live_slugs: list[str]) -> li
     return attached
 
 
+def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str) -> bool:
+    lane = str((quality.get("lane_suggestion") or {}).get("suggested_execution_lane") or "unclear")
+    confidence = str((quality.get("lane_suggestion") or {}).get("confidence") or "LOW").upper()
+    execution_reality = quality.get("execution_reality") or {}
+    contact_path_quality = str(execution_reality.get("contact_path_quality") or "THIN").upper()
+    control_party = str(execution_reality.get("control_party") or "UNCLEAR").upper()
+    execution_posture = str(execution_reality.get("execution_posture") or "NEEDS MORE CONTROL CLARITY").upper()
+    workability_band = str(execution_reality.get("workability_band") or "LIMITED").upper()
+    blockers = quality.get("execution_blockers") or []
+    normalized_status = str(sale_status or "").strip().lower()
+
+    if lane == "unclear" or confidence == "LOW":
+        return False
+    if contact_path_quality == "THIN":
+        return False
+    if control_party == "UNCLEAR":
+        return False
+    if execution_posture == "NEEDS MORE CONTROL CLARITY":
+        return False
+
+    if normalized_status == "pre_foreclosure":
+        return bool(
+            quality.get("pre_foreclosure_review_ready")
+            and workability_band in {"STRONG", "MODERATE"}
+            and len(blockers) <= 2
+        )
+
+    return bool(
+        quality.get("top_tier_ready")
+        and quality.get("vault_publish_ready")
+        and workability_band == "STRONG"
+    )
+
+
 def _build_vault_candidates(
     con: sqlite3.Connection,
     live_slugs: list[str],
@@ -255,6 +289,8 @@ def _build_vault_candidates(
         publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
         if not publish_ready:
             continue
+        if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):
+            continue
 
         candidates.append(
             {
@@ -275,12 +311,19 @@ def _build_vault_candidates(
                 "topTierReady": bool(quality["top_tier_ready"]),
                 "packetCompletenessPct": quality["packet_completeness_pct"],
                 "executionBlockers": quality["execution_blockers"],
+                "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
+                "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
+                "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
+                "controlParty": quality["execution_reality"]["control_party"],
+                "executionPosture": quality["execution_reality"]["execution_posture"],
+                "workabilityBand": quality["execution_reality"]["workability_band"],
             }
         )
 
     candidates.sort(
         key=lambda row: (
             0 if row["vaultPublishReady"] else 1,
+            0 if str(row.get("suggestedLaneConfidence") or "").upper() == "HIGH" else 1,
             0 if str(row.get("auction_readiness") or "").upper() == "GREEN" else 1,
             -(row.get("falco_score_internal") or 0),
             row.get("dts_days") or 9999,
@@ -500,6 +543,8 @@ def _build_publish_candidates(
         publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
         if not publish_ready:
             continue
+        if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):
+            continue
 
         packet_path = _packet_for_lead(lead_key)
         if not packet_path:
@@ -617,7 +662,18 @@ def _build_pre_foreclosure_promotion(
             "executionBlockers": quality["execution_blockers"],
         }
 
-        if row["preForeclosureReviewReady"] and not row["vaultLive"]:
+        row.update(
+            {
+                "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
+                "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
+                "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
+                "controlParty": quality["execution_reality"]["control_party"],
+                "executionPosture": quality["execution_reality"]["execution_posture"],
+                "workabilityBand": quality["execution_reality"]["workability_band"],
+            }
+        )
+
+        if row["preForeclosureReviewReady"] and not row["vaultLive"] and _meets_high_confidence_review_bar(quality, "pre_foreclosure"):
             ready_for_review.append(row)
         else:
             blocked.append(row)
@@ -633,6 +689,7 @@ def _build_pre_foreclosure_promotion(
     )
     ready_for_review.sort(
         key=lambda row: (
+            0 if str(row.get("suggestedLaneConfidence") or "").upper() == "HIGH" else 1,
             -(row.get("falco_score_internal") or 0),
             row.get("dts_days") or 9999,
         )

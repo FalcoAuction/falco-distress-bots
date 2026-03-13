@@ -215,14 +215,46 @@ def _recommended_action(fields: Dict[str, Any], quality: Dict[str, Any]) -> str:
     return "Monitor and do not escalate yet"
 
 
+def _is_high_confidence_operator_candidate(fields: Dict[str, Any], quality: Dict[str, Any]) -> bool:
+    sale_status = str(fields.get("sale_status") or "").strip().lower()
+    lane = str(quality["lane_suggestion"]["suggested_execution_lane"] or "unclear")
+    confidence = str(quality["lane_suggestion"]["confidence"] or "LOW").upper()
+    execution_reality = quality["execution_reality"]
+    blockers = quality.get("execution_blockers") or []
+
+    if lane == "unclear" or confidence == "LOW":
+        return False
+    if str(execution_reality.get("contact_path_quality") or "THIN").upper() == "THIN":
+        return False
+    if str(execution_reality.get("control_party") or "UNCLEAR").upper() == "UNCLEAR":
+        return False
+    if str(execution_reality.get("execution_posture") or "NEEDS MORE CONTROL CLARITY").upper() == "NEEDS MORE CONTROL CLARITY":
+        return False
+
+    if sale_status == "pre_foreclosure":
+        return bool(
+            quality.get("pre_foreclosure_review_ready")
+            and str(execution_reality.get("workability_band") or "LIMITED").upper() in {"STRONG", "MODERATE"}
+            and len(blockers) <= 2
+        )
+
+    return bool(
+        quality.get("vault_publish_ready")
+        and quality.get("top_tier_ready")
+        and str(execution_reality.get("workability_band") or "LIMITED").upper() == "STRONG"
+    )
+
+
 def _analysis_bucket(fields: Dict[str, Any], quality: Dict[str, Any]) -> str:
     sale_status = str(fields.get("sale_status") or "").lower()
-    if quality.get("top_tier_ready"):
-        return "priority_review"
-    if quality.get("vault_publish_ready"):
-        return "operator_review_candidate"
     if sale_status == "pre_foreclosure":
+        if _is_high_confidence_operator_candidate(fields, quality):
+            return "operator_review_candidate"
         return "watch_and_enrich"
+    if quality.get("top_tier_ready") and _is_high_confidence_operator_candidate(fields, quality):
+        return "priority_review"
+    if quality.get("vault_publish_ready") and _is_high_confidence_operator_candidate(fields, quality):
+        return "operator_review_candidate"
     blockers = quality.get("execution_blockers") or []
     if blockers:
         return "repair_and_retry"
@@ -233,6 +265,8 @@ def _confidence(quality: Dict[str, Any], bucket: str) -> str:
     confidence = str(quality["lane_suggestion"]["confidence"] or "LOW").upper()
     if bucket == "priority_review":
         return "HIGH"
+    if bucket == "operator_review_candidate" and confidence == "HIGH":
+        return "MEDIUM"
     if bucket == "watch_and_enrich" and confidence == "LOW":
         return "MEDIUM"
     return confidence
