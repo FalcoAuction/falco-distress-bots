@@ -628,8 +628,25 @@ def run() -> Dict[str, int]:
         _hydrate_contact_fields(cur, lead_key, fields)
         quality = assess_packet_data(fields)
         targets = quality["batchdata_fallback_targets"]
+        execution_reality = quality.get("execution_reality") or {}
+        contact_path_quality = str(execution_reality.get("contact_path_quality") or "THIN").upper()
+        owner_contact_available = bool(execution_reality.get("owner_contact_available"))
+        owner_agency = str(execution_reality.get("owner_agency") or "LOW").upper()
+        intervention_window = str(execution_reality.get("intervention_window") or "COMPRESSED").upper()
+        lender_control = str(execution_reality.get("lender_control_intensity") or "HIGH").upper()
+
         needs_contact = "Actionable outreach path missing" in quality["execution_blockers"]
-        if not targets and not needs_contact:
+        prefc_needs_contact_upgrade = (
+            is_pre_foreclosure
+            and (
+                not owner_contact_available
+                or contact_path_quality not in {"STRONG", "GOOD"}
+            )
+            and owner_agency != "LOW"
+            and intervention_window != "COMPRESSED"
+            and lender_control != "HIGH"
+        )
+        if not targets and not needs_contact and not prefc_needs_contact_upgrade:
             summary["skipped_already_complete"] += 1
             continue
 
@@ -665,7 +682,7 @@ def run() -> Dict[str, int]:
                         fields[field_name] = value
 
             contact_written = False
-            if needs_contact:
+            if needs_contact or prefc_needs_contact_upgrade:
                 contact_summary = enrich_contact_data(lead_key, fields, cur)
                 if contact_summary.get("t2_written") or contact_summary.get("t3_written"):
                     contact_written = True

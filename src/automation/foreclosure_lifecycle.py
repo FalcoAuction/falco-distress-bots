@@ -132,7 +132,15 @@ def _clean_prefc_address(value: str | None) -> str | None:
     text = re.sub(r"\s{2,}", " ", text)
 
     lower = text.lower()
-    if "city county building" in lower and "main street" in lower:
+    invalid_markers = (
+        "city county building",
+        "courthouse",
+        "justice center",
+        "clerk and master",
+        "clerk & master",
+        "judicial building",
+    )
+    if any(marker in lower for marker in invalid_markers) and ("main street" in lower or "court" in lower):
         return None
     if not re.search(r"\d", text):
         return None
@@ -173,16 +181,24 @@ def _merge_duplicate_leads(cur: sqlite3.Cursor) -> int:
 
         scored_members = []
         for lead_key, last_seen_at in members:
+            packet_count = cur.execute(
+                "SELECT COUNT(*) FROM packets WHERE lead_key=?",
+                (lead_key,),
+            ).fetchone()[0]
+            provenance_count = cur.execute(
+                "SELECT COUNT(*) FROM lead_field_provenance WHERE lead_key=?",
+                (lead_key,),
+            ).fetchone()[0]
             ingest_count = cur.execute(
                 "SELECT COUNT(*) FROM ingest_events WHERE lead_key=?",
                 (lead_key,),
             ).fetchone()[0]
-            scored_members.append((lead_key, ingest_count, last_seen_at))
+            scored_members.append((lead_key, packet_count, provenance_count, ingest_count, last_seen_at))
 
-        scored_members.sort(key=lambda row: (row[1], row[2], row[0]), reverse=True)
+        scored_members.sort(key=lambda row: (row[1], row[2], row[3], row[4], row[0]), reverse=True)
         canonical = scored_members[0][0]
 
-        for duplicate, _, _ in scored_members[1:]:
+        for duplicate, *_ in scored_members[1:]:
             cur.execute("UPDATE ingest_events SET lead_key=? WHERE lead_key=?", (canonical, duplicate))
             cur.execute("UPDATE attom_enrichments SET lead_key=? WHERE lead_key=?", (canonical, duplicate))
             cur.execute("UPDATE raw_artifacts SET lead_key=? WHERE lead_key=?", (canonical, duplicate))

@@ -227,10 +227,23 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
 
     if owner_contact and sale_status_contact:
         contact_path_quality = "STRONG"
+    elif owner_contact and owner_profile:
+        contact_path_quality = "GOOD"
     elif owner_contact or sale_status_contact or owner_profile:
         contact_path_quality = "PARTIAL"
     else:
         contact_path_quality = "THIN"
+
+    if dts_days is None:
+        intervention_window = "WIDE" if is_pre_foreclosure else "MODERATE"
+    elif dts_days > 45:
+        intervention_window = "WIDE"
+    elif dts_days >= 21:
+        intervention_window = "MODERATE"
+    elif dts_days >= 7:
+        intervention_window = "TIGHT"
+    else:
+        intervention_window = "COMPRESSED"
 
     if owner_contact and sale_status_contact:
         control_party = "MIXED"
@@ -243,9 +256,31 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     else:
         control_party = "UNCLEAR"
 
-    if control_party == "OWNER" and owner_contact and owner_profile and (dts_days is None or dts_days > 14):
-        execution_posture = "BORROWER OUTREACH"
-    elif control_party == "LENDER / TRUSTEE" and sale_status_contact and (dts_days is None or dts_days <= 45):
+    if control_party == "LENDER / TRUSTEE" and sale_status_contact and intervention_window in {"TIGHT", "COMPRESSED"}:
+        lender_control_intensity = "HIGH"
+    elif control_party in {"LENDER / TRUSTEE", "MIXED"} or sale_status_contact:
+        lender_control_intensity = "MEDIUM"
+    else:
+        lender_control_intensity = "LOW"
+
+    if (
+        owner_contact
+        and owner_profile
+        and control_party in {"OWNER", "MIXED"}
+        and intervention_window in {"WIDE", "MODERATE"}
+        and lender_control_intensity != "HIGH"
+    ):
+        owner_agency = "HIGH"
+    elif owner_contact or (owner_profile and control_party != "LENDER / TRUSTEE"):
+        owner_agency = "MEDIUM"
+    else:
+        owner_agency = "LOW"
+
+    if owner_agency == "HIGH" and intervention_window in {"WIDE", "MODERATE"}:
+        execution_posture = "OWNER ACTIONABLE"
+    elif control_party == "LENDER / TRUSTEE" and lender_control_intensity == "HIGH":
+        execution_posture = "LATE-STAGE / LENDER-CONTROLLED"
+    elif control_party == "LENDER / TRUSTEE" and sale_status_contact:
         execution_posture = "AUCTION EXECUTION"
     elif control_party == "MIXED" and (owner_contact or sale_status_contact):
         execution_posture = "MIXED / OPERATOR REVIEW"
@@ -257,18 +292,64 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         and owner_profile
         and debt_context
         and (owner_contact or sale_status_contact)
+        and owner_agency in {"HIGH", "MEDIUM"}
+        and intervention_window in {"WIDE", "MODERATE"}
+        and lender_control_intensity != "HIGH"
         and dts_days is not None
         and 0 <= dts_days <= 60
     ):
         workability_band = "STRONG"
-    elif value_context and owner_profile and (owner_contact or sale_status_contact):
+    elif (
+        value_context
+        and owner_profile
+        and debt_context
+        and (owner_contact or sale_status_contact)
+        and intervention_window != "COMPRESSED"
+    ):
         workability_band = "MODERATE"
     elif is_pre_foreclosure and owner_profile and debt_context and owner_contact:
         workability_band = "MODERATE"
     else:
         workability_band = "LIMITED"
 
+    if (
+        owner_agency == "HIGH"
+        and intervention_window in {"WIDE", "MODERATE"}
+        and lender_control_intensity != "HIGH"
+        and workability_band in {"STRONG", "MODERATE"}
+    ):
+        influenceability = "HIGH"
+    elif (
+        owner_agency in {"HIGH", "MEDIUM"}
+        and intervention_window != "COMPRESSED"
+        and workability_band != "LIMITED"
+    ):
+        influenceability = "MEDIUM"
+    else:
+        influenceability = "LOW"
+
     notes: List[str] = []
+    if owner_agency == "HIGH":
+        notes.append("Owner still appears to have enough flexibility to influence the outcome")
+    elif owner_agency == "MEDIUM":
+        notes.append("Owner may still have some room to act, but the file needs operator confirmation")
+    else:
+        notes.append("Owner agency appears limited at the current stage")
+
+    if lender_control_intensity == "HIGH":
+        notes.append("Lender or trustee posture appears to be dictating the file")
+    elif lender_control_intensity == "MEDIUM":
+        notes.append("Lender or trustee involvement is meaningful, but may not fully control the file yet")
+
+    if intervention_window == "WIDE":
+        notes.append("There is still meaningful time to shape outcome before hard sale pressure")
+    elif intervention_window == "MODERATE":
+        notes.append("There is still some intervention runway, but timing should be taken seriously")
+    elif intervention_window == "TIGHT":
+        notes.append("Timing is tightening and operator room is narrowing")
+    else:
+        notes.append("The intervention window is highly compressed")
+
     if control_party == "LENDER / TRUSTEE":
         notes.append("Owner may not control the outcome at this stage")
     elif control_party == "MIXED":
@@ -287,6 +368,10 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         "sale_status_contact_available": sale_status_contact,
         "contact_path_quality": contact_path_quality,
         "control_party": control_party,
+        "owner_agency": owner_agency,
+        "intervention_window": intervention_window,
+        "lender_control_intensity": lender_control_intensity,
+        "influenceability": influenceability,
         "execution_posture": execution_posture,
         "workability_band": workability_band,
         "notes": notes,
@@ -309,6 +394,10 @@ def _derive_lane_suggestion(
     sale_status_contact = bool(execution_reality.get("sale_status_contact_available"))
     control_party = str(execution_reality.get("control_party") or "UNCLEAR")
     workability_band = str(execution_reality.get("workability_band") or "LIMITED")
+    owner_agency = str(execution_reality.get("owner_agency") or "LOW")
+    intervention_window = str(execution_reality.get("intervention_window") or "COMPRESSED")
+    lender_control_intensity = str(execution_reality.get("lender_control_intensity") or "HIGH")
+    influenceability = str(execution_reality.get("influenceability") or "LOW")
     owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
     debt_context = _present(enriched.get("mortgage_lender")) and _present(enriched.get("last_sale_date"))
     dts_days = _int_or_none(enriched.get("dts_days"))
@@ -317,7 +406,13 @@ def _derive_lane_suggestion(
     confidence = "LOW"
     reasons: List[str] = []
 
-    if owner_contact and sale_status_contact:
+    if influenceability == "HIGH" and owner_agency == "HIGH":
+        lane = "borrower_side"
+        confidence = "HIGH" if intervention_window in {"WIDE", "MODERATE"} else "MEDIUM"
+        reasons.append("Owner still appears reachable, influenceable, and able to shape the file")
+        if intervention_window in {"WIDE", "MODERATE"}:
+            reasons.append("There is enough runway for operator help before lender control hardens")
+    elif owner_contact and sale_status_contact:
         lane = "mixed"
         confidence = "MEDIUM"
         reasons.append("Owner and sale-status contact paths are both present")
@@ -365,11 +460,29 @@ def _derive_lane_suggestion(
         confidence = _degrade_confidence(confidence)
         reasons.append("Debt context is still incomplete")
 
+    if owner_agency == "LOW" and lane in {"borrower_side", "mixed"}:
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Owner agency currently appears limited")
+
+    if intervention_window in {"TIGHT", "COMPRESSED"} and lane in {"borrower_side", "mixed"}:
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Timing is late enough that borrower-side influence may be limited")
+
+    if lender_control_intensity == "HIGH" and lane in {"borrower_side", "mixed"}:
+        confidence = _degrade_confidence(confidence)
+        reasons.append("Lender control intensity appears high at this stage")
+
     if workability_band == "LIMITED":
         confidence = _degrade_confidence(confidence)
         reasons.append("Overall workability remains limited")
     elif workability_band == "STRONG":
         reasons.append("Underlying workability profile is strong")
+
+    if influenceability == "HIGH":
+        reasons.append("The file still appears influenceable rather than fully controlled")
+    elif influenceability == "LOW":
+        confidence = _degrade_confidence(confidence)
+        reasons.append("The file currently looks real but not very influenceable")
 
     if control_party == "UNCLEAR":
         confidence = _degrade_confidence(confidence)
@@ -470,6 +583,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         and _has_actionable_outreach(enriched)
         and execution_reality["contact_path_quality"] != "THIN"
         and execution_reality["control_party"] != "UNCLEAR"
+        and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
+        and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
+        and execution_reality["lender_control_intensity"] != "HIGH"
+        and execution_reality["influenceability"] == "HIGH"
         and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
         and execution_reality["workability_band"] == "STRONG"
         and not any(
@@ -492,9 +609,14 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     pre_foreclosure_review_ready = (
         is_pre_foreclosure
         and len(pre_foreclosure_blockers) == 0
-        and execution_reality["contact_path_quality"] != "THIN"
-        and execution_reality["control_party"] != "UNCLEAR"
-        and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
+        and execution_reality["owner_contact_available"]
+        and execution_reality["contact_path_quality"] in {"STRONG", "GOOD"}
+        and execution_reality["control_party"] in {"OWNER", "MIXED"}
+        and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
+        and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
+        and execution_reality["lender_control_intensity"] == "LOW"
+        and execution_reality["influenceability"] == "HIGH"
+        and execution_reality["execution_posture"] in {"OWNER ACTIONABLE", "MIXED / OPERATOR REVIEW"}
         and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
         and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "YELLOW", "PARTIAL"}
     )
