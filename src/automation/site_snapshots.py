@@ -7,6 +7,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 from ..packaging.data_quality import assess_packet_data
 from ..storage.sqlite_store import init_db
@@ -21,6 +24,7 @@ SITE_PRIVATE_PACKET_DIR = SITE_REPO / "private" / "vault" / "packets"
 OUTREACH_DIR = ROOT / "out" / "outreach"
 REPORTS_DIR = ROOT / "out" / "reports"
 PACKETS_ROOT = ROOT / "out" / "packets"
+SYSTEM_STATE_COMPANY = "__falco_system_state__"
 
 
 def _db_path() -> Path:
@@ -149,6 +153,10 @@ def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str)
     execution_reality = quality.get("execution_reality") or {}
     contact_path_quality = str(execution_reality.get("contact_path_quality") or "THIN").upper()
     control_party = str(execution_reality.get("control_party") or "UNCLEAR").upper()
+    owner_agency = str(execution_reality.get("owner_agency") or "LOW").upper()
+    intervention_window = str(execution_reality.get("intervention_window") or "COMPRESSED").upper()
+    lender_control_intensity = str(execution_reality.get("lender_control_intensity") or "HIGH").upper()
+    influenceability = str(execution_reality.get("influenceability") or "LOW").upper()
     execution_posture = str(execution_reality.get("execution_posture") or "NEEDS MORE CONTROL CLARITY").upper()
     workability_band = str(execution_reality.get("workability_band") or "LIMITED").upper()
     blockers = quality.get("execution_blockers") or []
@@ -159,6 +167,14 @@ def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str)
     if contact_path_quality == "THIN":
         return False
     if control_party == "UNCLEAR":
+        return False
+    if owner_agency == "LOW":
+        return False
+    if intervention_window == "COMPRESSED":
+        return False
+    if lender_control_intensity == "HIGH":
+        return False
+    if influenceability == "LOW":
         return False
     if execution_posture == "NEEDS MORE CONTROL CLARITY":
         return False
@@ -315,6 +331,10 @@ def _build_vault_candidates(
                 "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
                 "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
                 "controlParty": quality["execution_reality"]["control_party"],
+                "ownerAgency": quality["execution_reality"]["owner_agency"],
+                "interventionWindow": quality["execution_reality"]["intervention_window"],
+                "lenderControlIntensity": quality["execution_reality"]["lender_control_intensity"],
+                "influenceability": quality["execution_reality"]["influenceability"],
                 "executionPosture": quality["execution_reality"]["execution_posture"],
                 "workabilityBand": quality["execution_reality"]["workability_band"],
             }
@@ -449,6 +469,10 @@ def _build_candidate_listing_payload(
         "propertyIdentifier": enriched_fields.get("property_identifier"),
         "ownerName": enriched_fields.get("owner_name"),
         "ownerMail": enriched_fields.get("owner_mail"),
+        "ownerPhonePrimary": enriched_fields.get("owner_phone_primary"),
+        "ownerPhoneSecondary": enriched_fields.get("owner_phone_secondary"),
+        "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
+        "noticePhone": enriched_fields.get("notice_phone"),
         "lastSaleDate": enriched_fields.get("last_sale_date"),
         "mortgageLender": enriched_fields.get("mortgage_lender"),
         "mortgageAmount": enriched_fields.get("mortgage_amount"),
@@ -458,6 +482,10 @@ def _build_candidate_listing_payload(
         "baths": enriched_fields.get("baths"),
         "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
         "controlParty": quality["execution_reality"]["control_party"],
+        "ownerAgency": quality["execution_reality"]["owner_agency"],
+        "interventionWindow": quality["execution_reality"]["intervention_window"],
+        "lenderControlIntensity": quality["execution_reality"]["lender_control_intensity"],
+        "influenceability": quality["execution_reality"]["influenceability"],
         "executionPosture": quality["execution_reality"]["execution_posture"],
         "workabilityBand": quality["execution_reality"]["workability_band"],
         "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
@@ -668,8 +696,21 @@ def _build_pre_foreclosure_promotion(
                 "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
                 "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
                 "controlParty": quality["execution_reality"]["control_party"],
+                "ownerAgency": quality["execution_reality"]["owner_agency"],
+                "interventionWindow": quality["execution_reality"]["intervention_window"],
+                "lenderControlIntensity": quality["execution_reality"]["lender_control_intensity"],
+                "influenceability": quality["execution_reality"]["influenceability"],
                 "executionPosture": quality["execution_reality"]["execution_posture"],
                 "workabilityBand": quality["execution_reality"]["workability_band"],
+                "ownerName": hydrated.get("owner_name"),
+                "ownerMail": hydrated.get("owner_mail"),
+                "mortgageLender": hydrated.get("mortgage_lender"),
+                "mortgageAmount": hydrated.get("mortgage_amount"),
+                "propertyIdentifier": hydrated.get("property_identifier"),
+                "ownerPhonePrimary": hydrated.get("owner_phone_primary"),
+                "ownerPhoneSecondary": hydrated.get("owner_phone_secondary"),
+                "trusteePhonePublic": hydrated.get("trustee_phone_public"),
+                "noticePhone": hydrated.get("notice_phone"),
             }
         )
 
@@ -966,6 +1007,127 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _read_site_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    env_path = SITE_REPO / ".env.local"
+    if not env_path.exists():
+        return env
+
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        env[key.strip()] = value.strip()
+
+    return env
+
+
+def _site_supabase_config() -> tuple[str | None, str | None]:
+    env_file = _read_site_env()
+    url = (
+        os.environ.get("NEXT_PUBLIC_SUPABASE_URL")
+        or os.environ.get("FALCO_SITE_SUPABASE_URL")
+        or env_file.get("NEXT_PUBLIC_SUPABASE_URL")
+    )
+    service_role_key = (
+        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+        or os.environ.get("FALCO_SITE_SUPABASE_SERVICE_ROLE_KEY")
+        or env_file.get("SUPABASE_SERVICE_ROLE_KEY")
+    )
+    return url, service_role_key
+
+
+def _system_state_email(key: str) -> str:
+    return f"state+{key}@falco.local"
+
+
+def _supabase_rest_request(
+    method: str,
+    url: str,
+    service_role_key: str,
+    payload: dict[str, Any] | None = None,
+) -> Any:
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib_request.Request(url, data=body, method=method)
+    req.add_header("apikey", service_role_key)
+    req.add_header("Authorization", f"Bearer {service_role_key}")
+    req.add_header("Accept", "application/json")
+    if payload is not None:
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Prefer", "return=representation")
+
+    with urllib_request.urlopen(req, timeout=20) as response:
+        raw = response.read().decode("utf-8").strip()
+        return json.loads(raw) if raw else None
+
+
+def _publish_system_state(key: str, payload: dict[str, Any]) -> None:
+    supabase_url, service_role_key = _site_supabase_config()
+    if not supabase_url or not service_role_key:
+        return
+
+    envelope = {
+        "version": 1,
+        "key": key,
+        "updatedAt": _utc_now(),
+        "payload": payload,
+    }
+    email = _system_state_email(key)
+    base_url = supabase_url.rstrip("/") + "/rest/v1/partner_access_requests"
+
+    query = urllib_parse.urlencode(
+        {
+            "select": "id",
+            "company": f"eq.{SYSTEM_STATE_COMPANY}",
+            "status": "eq.state_snapshot",
+            "email": f"eq.{email}",
+            "order": "created_at.desc",
+            "limit": "10",
+        }
+    )
+
+    try:
+        existing_rows = _supabase_rest_request(
+            "GET",
+            f"{base_url}?{query}",
+            service_role_key,
+        )
+        rows = existing_rows if isinstance(existing_rows, list) else []
+        latest_id = str(rows[0].get("id") or "").strip() if rows else ""
+
+        state_row = {
+            "email": email,
+            "full_name": key,
+            "company": SYSTEM_STATE_COMPANY,
+            "notes": json.dumps(envelope, ensure_ascii=False),
+            "status": "state_snapshot",
+        }
+
+        if latest_id:
+            _supabase_rest_request(
+                "PATCH",
+                f"{base_url}?id=eq.{urllib_parse.quote(latest_id)}",
+                service_role_key,
+                state_row,
+            )
+
+            duplicate_ids = [str(row.get("id") or "").strip() for row in rows[1:]]
+            duplicate_ids = [row_id for row_id in duplicate_ids if row_id]
+            if duplicate_ids:
+                _supabase_rest_request(
+                    "DELETE",
+                    f"{base_url}?id=in.({','.join(urllib_parse.quote(row_id) for row_id in duplicate_ids)})",
+                    service_role_key,
+                )
+        else:
+            _supabase_rest_request("POST", base_url, service_role_key, state_row)
+    except urllib_error.URLError as exc:
+        print(f"[site_snapshots] system state publish skipped for {key}: {exc}")
+    except Exception as exc:
+        print(f"[site_snapshots] system state publish failed for {key}: {exc}")
+
+
 def _load_latest_analyst_snapshot() -> dict[str, Any] | None:
     path = REPORTS_DIR / "latest_falco_analyst.json"
     if not path.exists():
@@ -1020,6 +1182,8 @@ def write_site_snapshots() -> dict[str, Any]:
     operator_payload["overview"]["vaultQueue"] = int(candidate_payload.get("count") or 0)
     outreach_paths = _refresh_outreach_snapshots()
     _write_json(operator_path, operator_payload)
+    _publish_system_state("operator_report", operator_payload)
+    _publish_system_state("vault_candidates", candidate_payload)
 
     return {
         "ok": True,
