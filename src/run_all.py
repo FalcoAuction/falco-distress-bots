@@ -27,6 +27,7 @@ from .automation import (
     write_run_summary,
 )
 from .automation import foreclosure_lifecycle
+from .automation.operator_enrichment_requests import process_operator_enrichment_requests
 from .automation.site_snapshots import write_site_snapshots
 from .core.run_metadata import store_run_metadata
 from .telemetry import run_logger
@@ -92,6 +93,13 @@ def main():
         stage_results.append(run_bot("Stage1_ForeclosureLifecycle", foreclosure_lifecycle.run))
 
         # ---------------- Stage 2: Enrichment + Comps ----------------
+        stage_results.append(
+            run_bot(
+                "Stage2_OperatorEnrichmentRequests",
+                lambda: process_operator_enrichment_requests(run_id),
+            )
+        )
+
         def _run_attom_enrichment():
             from .enrichment.attom_enricher import run as _run
             return _run()
