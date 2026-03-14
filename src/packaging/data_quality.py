@@ -12,7 +12,6 @@ _VALUE_FIELDS = ("value_anchor_low", "value_anchor_mid", "value_anchor_high")
 _VAULT_SIGNAL_FIELDS = {
     "falco_score_internal": "Falco score missing",
     "auction_readiness": "Auction readiness missing",
-    "equity_band": "Equity band missing",
 }
 
 _PROPERTY_SNAPSHOT_FIELDS = {
@@ -531,6 +530,9 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     vault_signal_missing = [
         label for key, label in _VAULT_SIGNAL_FIELDS.items() if not _present(enriched.get(key))
     ]
+    equity_band = str(enriched.get("equity_band") or "").strip().upper()
+    if equity_band in {"", "UNKNOWN"}:
+        vault_signal_missing.append("Equity band missing")
     property_snapshot_missing = [
         label for key, label in _PROPERTY_SNAPSHOT_FIELDS.items() if not _present(enriched.get(key))
     ]
@@ -551,6 +553,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     pre_foreclosure_blockers = [
         label for key, label in _PRE_FORECLOSURE_REQUIRED_FIELDS.items() if not _present(enriched.get(key))
     ]
+    if not any(_present(enriched.get(key)) for key in _VALUE_FIELDS):
+        pre_foreclosure_blockers.append("Valuation anchors missing")
     if distress_type in ("LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE") and not _has_actionable_outreach(enriched):
         pre_foreclosure_blockers.append("Actionable outreach path missing")
 

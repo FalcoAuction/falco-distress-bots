@@ -154,11 +154,8 @@ def _latest_prov_num(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> Opt
     except Exception:
         return None
 
-def score_leads_for_run(run_id: str):
-    conn = sqlite3.connect(db_path())
-    conn.row_factory = sqlite3.Row
-
-    rows = conn.execute("""
+def _load_rows_for_run(conn: sqlite3.Connection, run_id: str):
+    return conn.execute("""
         SELECT l.lead_key, l.address, l.county, l.distress_type, l.sale_status,
                COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
                ae.avm_low, ae.avm_high, ae.attom_raw_json,
@@ -195,6 +192,47 @@ def score_leads_for_run(run_id: str):
         ) cp ON cp.lead_key = l.lead_key
     """, (run_id,)).fetchall()
 
+
+def _load_rows_for_lead_keys(conn: sqlite3.Connection, lead_keys: list[str]):
+    if not lead_keys:
+        return []
+
+    placeholders = ",".join("?" for _ in lead_keys)
+    return conn.execute(f"""
+        SELECT l.lead_key, l.address, l.county, l.distress_type, l.sale_status,
+               COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
+               ae.avm_low, ae.avm_high, ae.attom_raw_json,
+               cp.field_value_text AS contact_ready
+        FROM leads l
+        LEFT JOIN (
+            SELECT lead_key, MAX(id) AS max_ie_id
+            FROM ingest_events
+            GROUP BY lead_key
+        ) latest_ie ON latest_ie.lead_key = l.lead_key
+        LEFT JOIN ingest_events ie ON ie.id = latest_ie.max_ie_id
+        LEFT JOIN (
+            SELECT lead_key, MAX(id) AS max_ae_id
+            FROM attom_enrichments
+            GROUP BY lead_key
+        ) latest_ae ON latest_ae.lead_key = l.lead_key
+        LEFT JOIN attom_enrichments ae ON ae.id = latest_ae.max_ae_id
+        LEFT JOIN (
+            SELECT lead_key, field_value_text
+            FROM (
+                SELECT
+                    lead_key,
+                    field_value_text,
+                    ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY created_at DESC) AS rn
+                FROM lead_field_provenance
+                WHERE field_name = 'contact_ready'
+            )
+            WHERE rn = 1
+        ) cp ON cp.lead_key = l.lead_key
+        WHERE l.lead_key IN ({placeholders})
+    """, tuple(lead_keys)).fetchall()
+
+
+def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
     print(f"[SCORING] run_id={run_id} scoring_rows={len(rows)}")
 
     today = date.today()
@@ -303,6 +341,27 @@ def score_leads_for_run(run_id: str):
             else 6 if execution_reality["workability_band"] == "MODERATE"
             else 0
         )
+        owner_agency_score = (
+            10 if execution_reality["owner_agency"] == "HIGH"
+            else 5 if execution_reality["owner_agency"] == "MEDIUM"
+            else 0
+        )
+        intervention_window_score = (
+            10 if execution_reality["intervention_window"] == "WIDE"
+            else 6 if execution_reality["intervention_window"] == "MODERATE"
+            else 2 if execution_reality["intervention_window"] == "TIGHT"
+            else 0
+        )
+        lender_control_penalty = (
+            8 if execution_reality["lender_control_intensity"] == "HIGH"
+            else 3 if execution_reality["lender_control_intensity"] == "MEDIUM"
+            else 0
+        )
+        influenceability_score = (
+            12 if execution_reality["influenceability"] == "HIGH"
+            else 6 if execution_reality["influenceability"] == "MEDIUM"
+            else 0
+        )
 
         raw_score = (
             dts_score
@@ -315,6 +374,10 @@ def score_leads_for_run(run_id: str):
             + contact_score
             + control_score
             + execution_score
+            + owner_agency_score
+            + intervention_window_score
+            + influenceability_score
+            - lender_control_penalty
         )
         total_score = max(0, min(100, raw_score))
 
@@ -335,6 +398,10 @@ def score_leads_for_run(run_id: str):
             and has_debt_pair
             and execution_reality["contact_path_quality"] != "THIN"
             and inside_green_window
+            and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
+            and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
+            and execution_reality["lender_control_intensity"] != "HIGH"
+            and execution_reality["influenceability"] == "HIGH"
             and execution_reality["workability_band"] == "STRONG"
             and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
         ):
@@ -344,6 +411,7 @@ def score_leads_for_run(run_id: str):
             and has_valuation
             and dts is not None
             and dts <= 75
+            and execution_reality["lender_control_intensity"] != "HIGH"
             and execution_reality["workability_band"] != "LIMITED"
         ):
             readiness = "YELLOW"
@@ -354,6 +422,9 @@ def score_leads_for_run(run_id: str):
             and has_debt_pair
             and execution_reality["contact_path_quality"] != "THIN"
             and execution_reality["control_party"] != "UNCLEAR"
+            and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
+            and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
+            and execution_reality["influenceability"] in {"HIGH", "MEDIUM"}
             and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
         ):
             readiness = "PARTIAL"
@@ -390,6 +461,10 @@ def score_leads_for_run(run_id: str):
                 (r["lead_key"], "auction_readiness",    "derived", readiness,   None,               None, None,   None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "contact_path_quality", "derived", execution_reality["contact_path_quality"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "control_party",        "derived", execution_reality["control_party"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "owner_agency",         "derived", execution_reality["owner_agency"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "intervention_window",  "derived", execution_reality["intervention_window"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "lender_control_intensity", "derived", execution_reality["lender_control_intensity"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
+                (r["lead_key"], "influenceability",     "derived", execution_reality["influenceability"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "execution_posture",    "derived", execution_reality["execution_posture"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
                 (r["lead_key"], "workability_band",     "derived", execution_reality["workability_band"], None, None, None, None, "SCORING", _scored_at, run_id, _scored_at),
             ]
@@ -405,4 +480,26 @@ def score_leads_for_run(run_id: str):
             pass  # provenance failure never aborts scoring
 
     conn.commit()
-    conn.close()
+
+
+def score_leads_for_run(run_id: str):
+    conn = sqlite3.connect(db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = _load_rows_for_run(conn, run_id)
+        _score_rows(conn, rows, run_id)
+    finally:
+        conn.close()
+
+
+def score_leads_by_keys(lead_keys: list[str], run_id: Optional[str] = None):
+    if not lead_keys:
+        return
+
+    conn = sqlite3.connect(db_path())
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = _load_rows_for_lead_keys(conn, lead_keys)
+        _score_rows(conn, rows, run_id or utc_now_iso())
+    finally:
+        conn.close()

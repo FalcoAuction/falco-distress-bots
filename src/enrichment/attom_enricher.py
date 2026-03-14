@@ -88,6 +88,34 @@ def _safe_float(x: Any) -> Optional[float]:
         return None
 
 
+def _latest_prov_text(cur: Any, lead_key: str, field_name: str) -> Optional[str]:
+    row = cur.execute(
+        """
+        SELECT field_value_text
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return str(row[0]).strip() if row and row[0] is not None else None
+
+
+def _latest_prov_num(cur: Any, lead_key: str, field_name: str) -> Optional[float]:
+    row = cur.execute(
+        """
+        SELECT field_value_num
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=? AND field_value_num IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return _safe_float(row[0]) if row and row[0] is not None else None
+
+
 def _status_msg(payload: Dict[str, Any]) -> str:
     try:
         s = payload.get("status") or {}
@@ -447,38 +475,36 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
 
     con = sqlite3.connect(db_path)
     con.row_factory = sqlite3.Row
-    try:
-        rows = con.execute(
-            """
-            SELECT l.lead_key, l.address, l.county, l.state,
-                   l.sale_status, l.current_sale_date,
-                   ie.sale_date, ie.source_url, ie.source,
-                   latest_ae.status AS ae_status,
-                   latest_ae.enriched_at AS ae_enriched_at,
-                   latest_ae.avm_value AS ae_avm_value,
-                   latest_ae.confidence AS ae_confidence
-            FROM leads l
+    cur = con.cursor()
+    rows = con.execute(
+        """
+        SELECT l.lead_key, l.address, l.county, l.state,
+               l.sale_status, l.current_sale_date,
+               ie.sale_date, ie.source_url, ie.source,
+               latest_ae.status AS ae_status,
+               latest_ae.enriched_at AS ae_enriched_at,
+               latest_ae.avm_value AS ae_avm_value,
+               latest_ae.confidence AS ae_confidence
+        FROM leads l
+        INNER JOIN (
+            SELECT lead_key, MAX(id) AS max_id
+            FROM ingest_events
+            WHERE sale_date IS NOT NULL OR source IN ('LIS_PENDENS','SUBSTITUTION_OF_TRUSTEE')
+            GROUP BY lead_key
+        ) latest ON latest.lead_key = l.lead_key
+        INNER JOIN ingest_events ie ON ie.id = latest.max_id
+        LEFT JOIN (
+            SELECT ae1.lead_key, ae1.status, ae1.enriched_at, ae1.avm_value, ae1.confidence
+            FROM attom_enrichments ae1
             INNER JOIN (
                 SELECT lead_key, MAX(id) AS max_id
-                FROM ingest_events
-                WHERE sale_date IS NOT NULL OR source IN ('LIS_PENDENS','SUBSTITUTION_OF_TRUSTEE')
+                FROM attom_enrichments
                 GROUP BY lead_key
-            ) latest ON latest.lead_key = l.lead_key
-            INNER JOIN ingest_events ie ON ie.id = latest.max_id
-            LEFT JOIN (
-                SELECT ae1.lead_key, ae1.status, ae1.enriched_at, ae1.avm_value, ae1.confidence
-                FROM attom_enrichments ae1
-                INNER JOIN (
-                    SELECT lead_key, MAX(id) AS max_id
-                    FROM attom_enrichments
-                    GROUP BY lead_key
-                ) m ON m.lead_key = ae1.lead_key AND m.max_id = ae1.id
-            ) latest_ae ON latest_ae.lead_key = l.lead_key
-            WHERE l.address IS NOT NULL AND l.address != ''
-            """,
-        ).fetchall()
-    finally:
-        con.close()
+            ) m ON m.lead_key = ae1.lead_key AND m.max_id = ae1.id
+        ) latest_ae ON latest_ae.lead_key = l.lead_key
+        WHERE l.address IS NOT NULL AND l.address != ''
+        """,
+    ).fetchall()
 
     print(f"[ATTOM][sqlite] sqlite_rows_with_sale_date={len(rows)}")
 
@@ -605,6 +631,15 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
             _write_gate(row["lead_key"], "skipped", "OUT_OF_GEO", {"county": county})
             continue
         lk = row["lead_key"]
+        mortgage_lender = _latest_prov_text(cur, lk, "mortgage_lender")
+        mortgage_amount = _latest_prov_num(cur, lk, "mortgage_amount")
+        last_sale_date = _latest_prov_text(cur, lk, "last_sale_date")
+        owner_name = _latest_prov_text(cur, lk, "owner_name")
+        owner_mail = _latest_prov_text(cur, lk, "owner_mail")
+        owner_phone_primary = _latest_prov_text(cur, lk, "owner_phone_primary")
+        owner_phone_secondary = _latest_prov_text(cur, lk, "owner_phone_secondary")
+        debt_ready = bool(mortgage_lender and mortgage_amount is not None and last_sale_date)
+        contact_ready = bool(owner_phone_primary or owner_phone_secondary)
         candidates.append({
             "lead_key": lk,
             "page_id": lk,          # no Notion page; reuse lead_key so page_id check passes
@@ -614,6 +649,15 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
             "sale_date_iso": row["sale_date"],
             "sale_status": sale_status,
             "url": row["source_url"],
+            "mortgage_lender": mortgage_lender,
+            "mortgage_amount": mortgage_amount,
+            "last_sale_date": last_sale_date,
+            "owner_name": owner_name,
+            "owner_mail": owner_mail,
+            "owner_phone_primary": owner_phone_primary,
+            "owner_phone_secondary": owner_phone_secondary,
+            "_prefc_debt_ready": debt_ready,
+            "_prefc_contact_ready": contact_ready,
             # Pass-through TTL fields for budget ordering
             "ae_status": ae_status,
             "ae_enriched_at": (row["ae_enriched_at"] if "ae_enriched_at" in _row_keys_cache else None),
@@ -637,6 +681,42 @@ def _load_sqlite_candidates(dts_min: int, dts_max: int) -> List[Dict[str, Any]]:
     _tbs_keys = ",".join(sorted(ttl_by_status.keys()))
     _tbs_vals = ",".join(f"{k}={ttl_by_status[k]}" for k in sorted(ttl_by_status.keys()))
     print(f"[ATTOM][ttl] ttl_mode={ttl_mode} ttl_default={ttl_days_default} ttl_by_status_raw=\"{_ttl_by_status_raw}\" ttl_by_status_keys={_tbs_keys} ttl_by_status_vals={_tbs_vals} rows={len(rows)} fresh_skips={ttl_skipped_fresh} expired_refreshable={ttl_expired_refreshable} parse_or_missing_skipped={parse_or_missing_skipped} no_prior={no_prior_enrichment} breakdown=[{_status_breakdown}]")
+    target_lead_keys = {
+        item.strip()
+        for item in os.environ.get("FALCO_ATTOM_TARGET_LEAD_KEYS", "").split(",")
+        if item.strip()
+    }
+    prefc_debt_only = os.environ.get("FALCO_ATTOM_PREFC_DEBT_ONLY", "0").strip() in ("1", "true", "True")
+
+    if target_lead_keys:
+        candidates = [c for c in candidates if c.get("lead_key") in target_lead_keys]
+
+    if prefc_debt_only:
+        candidates = [
+            c
+            for c in candidates
+            if str(c.get("sale_status") or "").strip().lower() == "pre_foreclosure"
+            and c.get("_prefc_debt_ready")
+        ]
+
+    candidates.sort(
+        key=lambda c: (
+            0 if c.get("lead_key") in target_lead_keys else 1,
+            0 if (
+                str(c.get("sale_status") or "").strip().lower() == "pre_foreclosure"
+                and c.get("_prefc_debt_ready")
+                and c.get("ae_avm_value") is None
+            ) else 1,
+            0 if (
+                str(c.get("sale_status") or "").strip().lower() == "pre_foreclosure"
+                and c.get("_prefc_contact_ready")
+            ) else 1,
+            0 if c.get("_ttl_expired_refreshable") else 1,
+            c.get("sale_date_iso") or "\uffff",
+            c.get("lead_key") or "",
+        )
+    )
+    con.close()
     return candidates
 
 
