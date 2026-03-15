@@ -583,6 +583,14 @@ def run() -> Dict[str, int]:
         (dts_min, dts_max, max(limit * 4, pre_foreclosure_limit * 4)),
     ).fetchall()
 
+    target_lead_keys = {
+        item.strip()
+        for item in os.environ.get("FALCO_BATCHDATA_TARGET_LEAD_KEYS", "").split(",")
+        if item.strip()
+    }
+    if target_lead_keys:
+        rows = [row for row in rows if str(row["lead_key"] or "").strip() in target_lead_keys]
+
     summary = {
         "requested": 0,
         "enriched_count": 0,

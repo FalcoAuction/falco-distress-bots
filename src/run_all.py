@@ -26,6 +26,7 @@ from .automation import (
     write_agent_reports,
     write_run_summary,
 )
+from .automation.auto_prefc_pipeline import run as run_auto_prefc_pipeline
 from .automation import foreclosure_lifecycle
 from .automation.operator_enrichment_requests import process_operator_enrichment_requests
 from .automation.site_snapshots import write_site_snapshots
@@ -134,6 +135,15 @@ def main():
 
         publish_result = maybe_publish_to_vault(run_id)
         print(f"[VaultPublish] {publish_result}")
+        auto_prefc_result = run_bot(
+            "Stage3_AutoPreForeclosurePipeline",
+            lambda: run_auto_prefc_pipeline(run_id),
+        )
+        stage_results.append(auto_prefc_result)
+        publish_result = {
+            **publish_result,
+            "auto_pre_foreclosure": auto_prefc_result.get("result"),
+        }
 
         utc_end = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         print(f"RUN_ALL UTC END: {utc_end}")
