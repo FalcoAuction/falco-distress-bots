@@ -46,8 +46,11 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     )
     if not has_contact:
         issues.append("contact path")
-    if sale_status == "pre_foreclosure" and (not equity_band or equity_band == "UNKNOWN"):
-        issues.append("equity / valuation")
+    if sale_status == "pre_foreclosure":
+        if not equity_band or equity_band == "UNKNOWN":
+            issues.append("equity / valuation")
+        elif equity_band == "LOW":
+            issues.append("equity risk")
 
     return issues
 
@@ -74,6 +77,13 @@ def _write_site_rows(rows: dict[str, dict[str, Any]]) -> None:
     ordered = sorted(rows.values(), key=lambda row: str(row.get("createdAt") or ""))
     payload = "\n".join(json.dumps(row, ensure_ascii=False) for row in ordered)
     SITE_VAULT_LISTINGS.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+
+
+def _has_hard_contact_fields(payload: dict[str, Any]) -> bool:
+    return any(
+        str(payload.get(key) or "").strip()
+        for key in ("ownerPhonePrimary", "ownerPhoneSecondary", "trusteePhonePublic", "noticePhone")
+    )
 
 
 def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
@@ -152,12 +162,32 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                 and hydrated.get("mortgage_amount") is not None
                 and hydrated.get("last_sale_date")
             )
+            hard_contact_gap = not _has_hard_contact_fields(
+                {
+                    "ownerPhonePrimary": hydrated.get("owner_phone_primary"),
+                    "ownerPhoneSecondary": hydrated.get("owner_phone_secondary"),
+                    "trusteePhonePublic": hydrated.get("trustee_phone_public"),
+                    "noticePhone": hydrated.get("notice_phone"),
+                }
+            )
             contact_gap = (
                 "Actionable outreach path missing" in blockers
                 or contact_path not in {"GOOD", "STRONG"}
+                or hard_contact_gap
             )
 
-            if quality.get("pre_foreclosure_review_ready"):
+            strong_staged_contact_retry = bool(
+                quality.get("pre_foreclosure_review_ready")
+                and owner_agency in {"HIGH", "MEDIUM"}
+                and intervention_window in {"WIDE", "MODERATE"}
+                and lender_control == "LOW"
+                and influenceability == "HIGH"
+                and lane != "unclear"
+                and confidence == "HIGH"
+                and hard_contact_gap
+            )
+
+            if quality.get("pre_foreclosure_review_ready") and not strong_staged_contact_retry:
                 continue
             if owner_agency == "LOW" or intervention_window == "COMPRESSED" or lender_control == "HIGH":
                 continue
@@ -178,6 +208,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                     "owner_agency": owner_agency,
                     "intervention_window": intervention_window,
                     "lender_control": lender_control,
+                    "hard_contact_gap": hard_contact_gap,
+                    "staged_contact_retry": strong_staged_contact_retry,
                 }
             )
 
