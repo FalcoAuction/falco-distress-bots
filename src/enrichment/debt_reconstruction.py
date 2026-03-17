@@ -13,13 +13,32 @@ from ..storage import sqlite_store as _store
 _SOURCE_CHANNEL = "DEBT_RECONSTRUCTION"
 _BOOK_RX = re.compile(r"\bbook\s+([A-Za-z0-9-]+)\b", re.IGNORECASE)
 _PAGE_RX = re.compile(r"\bpage\s+([A-Za-z0-9-]+)\b", re.IGNORECASE)
+_VOL_RX = re.compile(r"\bvol\.?\s+([A-Za-z0-9-]+)\b", re.IGNORECASE)
+_IMAGE_RX = re.compile(r"\bimage\s+([A-Za-z0-9-]+)\b", re.IGNORECASE)
 _INSTRUMENT_RX = re.compile(r"\b(?:instrument|document)\s*(?:#|number|no\.?)?\s*([A-Za-z0-9-]+)\b", re.IGNORECASE)
 _DATE_RX = re.compile(
     r"\b(?:dated|recorded(?:\s+on)?)\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4}|20\d{2}-\d{2}-\d{2})",
     re.IGNORECASE,
 )
+_CURRENCY_RX = re.compile(r"\$\s*([0-9][0-9,]+(?:\.\d{2})?)")
 _CLAUSE_SPLIT_RX = re.compile(
     r"\b(?:which the aforementioned|dated|recorded|by instrument|book\s+[A-Za-z0-9-]+|page\s+[A-Za-z0-9-]+|instrument\s*#?|document\s*#?)\b",
+    re.IGNORECASE,
+)
+_DOT_DEED_RX = re.compile(
+    r"deed of trust dated\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4}).{0,240}?for the benefit of\s+(.+?)(?:, of record|;| and )",
+    re.IGNORECASE | re.DOTALL,
+)
+_LAST_ASSIGNED_RX = re.compile(
+    r"was last assigned to\s+(.+?)(?:\(|, c/o|, its attorney|, the entire indebtedness|;|\n)",
+    re.IGNORECASE | re.DOTALL,
+)
+_PROPERTY_CONVEYED_RX = re.compile(
+    r"same property conveyed .*? by deed dated\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})\s+recorded\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})\s+in\s+(?:book|vol\.?)\s+([A-Za-z0-9-]+),\s*(?:page|image)\s+([A-Za-z0-9-]+)",
+    re.IGNORECASE | re.DOTALL,
+)
+_PRINCIPAL_AMOUNT_RX = re.compile(
+    r"(?:original\s+principal\s+amount|principal\s+sum|indebtedness\s+in\s+the\s+principal\s+sum|note\s+in\s+the\s+original\s+principal\s+amount)\D{0,20}\$\s*([0-9][0-9,]+(?:\.\d{2})?)",
     re.IGNORECASE,
 )
 
@@ -135,6 +154,63 @@ def _latest_batchdata_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[
     return payload, str(row[0] or ""), str(row[2] or _now_iso())
 
 
+def _latest_notice_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[str | None, str | None, str]:
+    prov = con.execute(
+        """
+        SELECT artifact_id, source_url, retrieved_at
+        FROM lead_field_provenance
+        WHERE lead_key=? AND source_channel NOT IN ('BATCHDATA', 'ATTOM', 'DEBT_RECONSTRUCTION')
+          AND (artifact_id IS NOT NULL OR source_url IS NOT NULL)
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    if prov:
+        artifact_id = str(prov[0] or "").strip() or None
+        source_url = str(prov[1] or "").strip() or None
+        retrieved_at = str(prov[2] or _now_iso())
+        if artifact_id:
+            row = con.execute(
+                """
+                SELECT payload
+                FROM raw_artifacts
+                WHERE artifact_id=? AND payload IS NOT NULL
+                LIMIT 1
+                """,
+                (artifact_id,),
+            ).fetchone()
+            if row and row[0]:
+                return str(row[0]), artifact_id, retrieved_at
+        if source_url:
+            row = con.execute(
+                """
+                SELECT artifact_id, payload, retrieved_at
+                FROM raw_artifacts
+                WHERE source_url=? AND payload IS NOT NULL AND channel NOT IN ('BATCHDATA', 'ATTOM')
+                ORDER BY retrieved_at DESC
+                LIMIT 1
+                """,
+                (source_url,),
+            ).fetchone()
+            if row and row[1]:
+                return str(row[1]), str(row[0] or ""), str(row[2] or retrieved_at)
+
+    row = con.execute(
+        """
+        SELECT artifact_id, payload, retrieved_at
+        FROM raw_artifacts
+        WHERE lead_key=? AND payload IS NOT NULL AND channel NOT IN ('BATCHDATA', 'ATTOM')
+        ORDER BY retrieved_at DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    if not row or not row[1]:
+        return None, None, _now_iso()
+    return str(row[1]), str(row[0] or ""), str(row[2] or _now_iso())
+
+
 def _parse_notice_chain(raw: str | None) -> dict[str, Any]:
     text = str(raw or "").strip()
     if not text:
@@ -158,6 +234,63 @@ def _parse_notice_chain(raw: str | None) -> dict[str, Any]:
     instrument_match = _INSTRUMENT_RX.search(text)
     if instrument_match:
         out["record_instrument"] = instrument_match.group(1)
+    return out
+
+
+def _parse_notice_debt_details(raw: str | None) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    if not text:
+        return {}
+
+    out: dict[str, Any] = {}
+
+    dot_match = _DOT_DEED_RX.search(text)
+    if dot_match:
+        deed_date = _coerce_date(dot_match.group(1))
+        original_lender = _clean_party_name(dot_match.group(2))
+        if deed_date:
+            out["mortgage_date"] = deed_date
+        if original_lender:
+            out["original_lender"] = original_lender
+
+    assigned_match = _LAST_ASSIGNED_RX.search(text)
+    if assigned_match:
+        current_holder = _clean_party_name(assigned_match.group(1))
+        if current_holder:
+            out["current_holder"] = current_holder
+
+    conveyed_match = _PROPERTY_CONVEYED_RX.search(text)
+    if conveyed_match:
+        deed_date = _coerce_date(conveyed_match.group(1))
+        recorded_date = _coerce_date(conveyed_match.group(2))
+        if recorded_date or deed_date:
+            out["last_sale_date"] = recorded_date or deed_date
+        out.setdefault("transfer_record_book", conveyed_match.group(3))
+        out.setdefault("transfer_record_page", conveyed_match.group(4))
+
+    principal_match = _PRINCIPAL_AMOUNT_RX.search(text)
+    if principal_match:
+        amount = _coerce_num(principal_match.group(1))
+        if amount is not None:
+            out["mortgage_amount"] = amount
+    elif "deed of trust" in text.lower():
+        money_matches = [_coerce_num(match.group(1)) for match in _CURRENCY_RX.finditer(text)]
+        money_values = [value for value in money_matches if value is not None]
+        if len(money_values) == 1:
+            out["mortgage_amount"] = money_values[0]
+
+    if "record_book" not in out:
+        vol_match = _VOL_RX.search(text) or _BOOK_RX.search(text)
+        if vol_match:
+            out["record_book"] = vol_match.group(1)
+    if "record_page" not in out:
+        image_match = _IMAGE_RX.search(text) or _PAGE_RX.search(text)
+        if image_match:
+            out["record_page"] = image_match.group(1)
+    if "record_instrument" not in out:
+        instrument_match = _INSTRUMENT_RX.search(text)
+        if instrument_match:
+            out["record_instrument"] = instrument_match.group(1)
     return out
 
 
@@ -227,27 +360,37 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
     chain_info = _parse_notice_chain(_latest_text(con, lead_key, "mortgage_chain_notice"))
     payload, artifact_id, retrieved_at = _latest_batchdata_artifact(con, lead_key)
     batchdata_info = _extract_batchdata_reconstruction(payload or {}) if payload else {}
+    notice_payload, notice_artifact_id, notice_retrieved_at = _latest_notice_artifact(con, lead_key)
+    notice_details = _parse_notice_debt_details(notice_payload)
 
     canonical_lender = (
+        notice_details.get("current_holder")
+        or
         batchdata_info.get("current_holder")
         or chain_info.get("current_holder")
         or current_lender
     )
     original_lender = (
+        notice_details.get("original_lender")
+        or
         chain_info.get("original_lender")
         or batchdata_info.get("original_lender")
         or current_lender
     )
     canonical_mortgage_date = (
         mortgage_date
+        or notice_details.get("mortgage_date")
         or batchdata_info.get("mortgage_date")
         or chain_info.get("assignment_recorded_at")
     )
-    canonical_amount = mortgage_amount if mortgage_amount is not None else batchdata_info.get("mortgage_amount")
-    record_book = chain_info.get("record_book") or batchdata_info.get("record_book")
-    record_page = chain_info.get("record_page") or batchdata_info.get("record_page")
-    record_instrument = chain_info.get("record_instrument") or batchdata_info.get("record_instrument")
+    canonical_amount = mortgage_amount if mortgage_amount is not None else (
+        notice_details.get("mortgage_amount") if notice_details.get("mortgage_amount") is not None else batchdata_info.get("mortgage_amount")
+    )
+    record_book = chain_info.get("record_book") or notice_details.get("record_book") or batchdata_info.get("record_book")
+    record_page = chain_info.get("record_page") or notice_details.get("record_page") or batchdata_info.get("record_page")
+    record_instrument = chain_info.get("record_instrument") or notice_details.get("record_instrument") or batchdata_info.get("record_instrument")
     assignment_recorded_at = chain_info.get("assignment_recorded_at") or batchdata_info.get("assignment_recorded_at")
+    canonical_last_sale_date = last_sale_date or notice_details.get("last_sale_date")
 
     confidence = "FULL"
     if not canonical_lender and canonical_amount is None:
@@ -266,6 +409,8 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         summary_parts.append(f"Loan amount: {int(canonical_amount):,}")
     if canonical_mortgage_date:
         summary_parts.append(f"Recording support: {canonical_mortgage_date}")
+    if canonical_last_sale_date:
+        summary_parts.append(f"Transfer support: {canonical_last_sale_date}")
     if record_book or record_page or record_instrument:
         ref = " ".join(part for part in (
             f"Book {record_book}" if record_book else "",
@@ -276,13 +421,13 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
             summary_parts.append(ref)
 
     return {
-        "artifact_id": artifact_id,
-        "retrieved_at": retrieved_at,
+        "artifact_id": artifact_id or notice_artifact_id,
+        "retrieved_at": retrieved_at if artifact_id else notice_retrieved_at,
         "mortgage_lender": canonical_lender,
         "mortgage_lender_original": original_lender,
         "mortgage_amount": canonical_amount,
         "mortgage_date": canonical_mortgage_date,
-        "last_sale_date": last_sale_date,
+        "last_sale_date": canonical_last_sale_date,
         "mortgage_assignment_recorded_at": assignment_recorded_at,
         "mortgage_record_book": record_book,
         "mortgage_record_page": record_page,
