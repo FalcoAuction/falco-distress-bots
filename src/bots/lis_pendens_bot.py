@@ -198,6 +198,26 @@ _BORROWER_RX = re.compile(
     r"\b(?:Borrower|Grantor|Defendant|Owner)\s*[:=\-]\s*([^\n]{3,120})",
     re.IGNORECASE,
 )
+_NOTE_PAYABLE_TO_RX = re.compile(
+    r"\b(?:note|promissory\s+note)[^.\n]{0,220}?\bpayable\s+to,?\s+([^\n;]{3,180})",
+    re.IGNORECASE,
+)
+_FOR_BENEFIT_OF_RX = re.compile(
+    r"\bfor\s+the\s+benefit\s+of\s+([^\n;]{3,180})",
+    re.IGNORECASE,
+)
+_LAST_ASSIGNED_TO_RX = re.compile(
+    r"\b(?:last\s+assigned\s+to|assigned\s+to)\s+([^\n;]{3,220})",
+    re.IGNORECASE,
+)
+_HOLDER_RX = re.compile(
+    r"\bholder\b[^.\n]{0,80}?\bis\s+([^\n;]{3,160})",
+    re.IGNORECASE,
+)
+_PRINCIPAL_AMOUNT_RX = re.compile(
+    r"\b(?:original\s+principal(?:\s+sum|\s+amount)?|principal(?:\s+sum|\s+amount)?)\s+(?:of\s+)?\$?\s*([\d,]+(?:\.\d{2})?)",
+    re.IGNORECASE,
+)
 
 _DATE_FMTS = [
     "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y",
@@ -224,6 +244,32 @@ def _try_parse_date(raw: str) -> str | None:
         except Exception:
             pass
     return None
+
+
+def _clean_party_name(raw: str | None) -> str | None:
+    value = _norm_ws(raw or "").strip(" ,.;:-")
+    if not value:
+        return None
+    value = re.split(
+        r"\b(?:c/o|its attorney in fact|the entire indebtedness|of record|which note|by instrument recorded|has requested foreclosure proceedings|and as provided|and WHEREAS|WHEREAS)\b",
+        value,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" ,.;:-")
+    value = re.sub(r"\s*\((?:the\s+)?[\"“']?Holder[\"”']?\)\s*$", "", value, flags=re.IGNORECASE)
+    value = re.sub(r"\s{2,}", " ", value).strip(" ,.;:-")
+    if len(value) < 3:
+        return None
+    return value[:180]
+
+
+def _parse_money_amount(raw: str | None) -> float | None:
+    if not raw:
+        return None
+    try:
+        return float(str(raw).replace(",", "").replace("$", "").strip())
+    except Exception:
+        return None
 
 
 def _parse_notice_fields(text: str) -> dict:
@@ -289,6 +335,23 @@ def _parse_notice_fields(text: str) -> dict:
                 borrower_val = val[:120]
     if borrower_val:
         out["borrower"] = borrower_val
+
+    lender_val: str | None = None
+    for rx in (_LAST_ASSIGNED_TO_RX, _NOTE_PAYABLE_TO_RX, _FOR_BENEFIT_OF_RX, _HOLDER_RX):
+        m = rx.search(text)
+        if not m:
+            continue
+        lender_val = _clean_party_name(m.group(1))
+        if lender_val:
+            break
+    if lender_val:
+        out["mortgage_lender"] = lender_val
+
+    amount_match = _PRINCIPAL_AMOUNT_RX.search(text)
+    if amount_match:
+        amount = _parse_money_amount(amount_match.group(1))
+        if amount is not None and amount > 0:
+            out["mortgage_amount"] = amount
 
     return out
 
@@ -423,6 +486,26 @@ def run() -> dict:
         )
         if ok:
             stored_artifacts += 1
+
+        if _fields.get("mortgage_lender"):
+            _store.insert_provenance_text(
+                lead_key,
+                "mortgage_lender",
+                str(_fields["mortgage_lender"]),
+                "LIS_PENDENS_NOTICE",
+                retrieved_at=retrieved_at,
+            )
+        if isinstance(_fields.get("mortgage_amount"), (int, float)):
+            _store.insert_provenance_num(
+                lead_key,
+                "mortgage_amount",
+                float(_fields["mortgage_amount"]),
+                "USD",
+                None,
+                "LIS_PENDENS_NOTICE",
+                None,
+                retrieved_at,
+            )
 
         filtered_in += 1
         if len(sample_kept) < 5:

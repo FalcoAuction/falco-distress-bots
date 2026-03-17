@@ -383,13 +383,21 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
 
         has_valuation = bool(r["avm_low"] and r["avm_high"])
         has_owner_pair = bool(owner_mortgage.get("owner_name") and owner_mortgage.get("owner_mail"))
+        is_pre_foreclosure = str(r["sale_status"] or "").strip().lower() == "pre_foreclosure"
         has_debt_pair = bool(
             owner_mortgage.get("mortgage_lender")
             and owner_mortgage.get("last_sale_date")
             and owner_mortgage.get("mortgage_amount") is not None
         )
+        has_debt_proxy = bool(
+            is_pre_foreclosure
+            and quality.get("prefc_debt_proxy_ready")
+            and owner_mortgage.get("mortgage_lender")
+            and owner_mortgage.get("last_sale_date")
+            and has_owner_pair
+            and has_valuation
+        )
         inside_green_window = dts is not None and 21 <= dts <= 60
-        is_pre_foreclosure = str(r["sale_status"] or "").strip().lower() == "pre_foreclosure"
 
         if (
             total_score >= 80
@@ -419,7 +427,7 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             is_pre_foreclosure
             and total_score >= 60
             and has_owner_pair
-            and has_debt_pair
+            and (has_debt_pair or has_debt_proxy)
             and execution_reality["contact_path_quality"] != "THIN"
             and execution_reality["control_party"] != "UNCLEAR"
             and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}

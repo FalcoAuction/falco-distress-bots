@@ -1,6 +1,13 @@
 import json
 from typing import Any, Dict, List, Optional
 
+from ..automation.prefc_policy import (
+    prefc_county_is_active,
+    prefc_county_is_watch,
+    prefc_county_tier,
+    prefc_source_priority,
+)
+
 
 _PACKET_CRITICAL_FIELDS = {
     "address": "Address missing",
@@ -196,6 +203,30 @@ def _has_actionable_outreach(enriched: Dict[str, Any]) -> bool:
     )
 
 
+def _prefc_debt_proxy_ready(enriched: Dict[str, Any]) -> bool:
+    sale_status = str(enriched.get("sale_status") or "").strip().lower()
+    distress_type = str(enriched.get("distress_type") or "").strip().upper()
+    is_pre_foreclosure = sale_status == "pre_foreclosure" or distress_type in {"LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE"}
+
+    if not is_pre_foreclosure or not prefc_county_is_active(enriched.get("county")):
+        return False
+
+    has_lender = _present(enriched.get("mortgage_lender"))
+    has_amount = _present(enriched.get("mortgage_amount"))
+    has_last_sale = _present(enriched.get("last_sale_date"))
+    has_owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
+    has_value = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
+
+    return (
+        has_lender
+        and not has_amount
+        and has_last_sale
+        and has_owner_profile
+        and has_value
+        and _has_actionable_outreach(enriched)
+    )
+
+
 def _int_or_none(value: Any) -> Optional[int]:
     try:
         if value is None or value == "":
@@ -216,12 +247,14 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         for key in ("notice_phone", "trustee_phone_public")
     )
     owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
-    debt_context = (
+    debt_context_strict = (
         _present(enriched.get("mortgage_lender"))
         and _present(enriched.get("mortgage_amount"))
         and _present(enriched.get("last_sale_date"))
     )
     value_context = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
+    debt_context_proxy = _prefc_debt_proxy_ready(enriched)
+    debt_context = debt_context_strict or debt_context_proxy
     dts_days = _int_or_none(enriched.get("dts_days"))
 
     if owner_contact and sale_status_contact:
@@ -361,6 +394,8 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         notes.append("Execution path is credible but not yet fully turn-key")
     elif workability_band == "LIMITED":
         notes.append("Execution path remains thin relative to timing and debt context")
+    if debt_context_proxy:
+        notes.append("Original loan amount remains unconfirmed, but lender and debt path are credible enough for early review")
 
     return {
         "owner_contact_available": owner_contact,
@@ -373,6 +408,7 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
         "influenceability": influenceability,
         "execution_posture": execution_posture,
         "workability_band": workability_band,
+        "debt_proxy_ready": debt_context_proxy,
         "notes": notes,
     }
 
@@ -506,6 +542,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     sale_status = str(enriched.get("sale_status") or "").lower().strip()
     distress_type = str(enriched.get("distress_type") or "").upper().strip()
     is_pre_foreclosure = sale_status == "pre_foreclosure" or distress_type in {"LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE"}
+    county_tier = prefc_county_tier(enriched.get("county"))
+    source_priority = prefc_source_priority(distress_type)
 
     critical_missing: List[str] = []
     for key, label in _PACKET_CRITICAL_FIELDS.items():
@@ -553,6 +591,16 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     pre_foreclosure_blockers = [
         label for key, label in _PRE_FORECLOSURE_REQUIRED_FIELDS.items() if not _present(enriched.get(key))
     ]
+    debt_proxy_ready = _prefc_debt_proxy_ready(enriched)
+    if debt_proxy_ready and "Original loan amount missing" in pre_foreclosure_blockers:
+        pre_foreclosure_blockers = [
+            blocker for blocker in pre_foreclosure_blockers if blocker != "Original loan amount missing"
+        ]
+    if is_pre_foreclosure and not prefc_county_is_active(enriched.get("county")):
+        if prefc_county_is_watch(enriched.get("county")):
+            pre_foreclosure_blockers.append("County remains in watch lane")
+        else:
+            pre_foreclosure_blockers.append("County is not in the active pre-foreclosure lane")
     if not any(_present(enriched.get(key)) for key in _VALUE_FIELDS):
         pre_foreclosure_blockers.append("Valuation anchors missing")
     if distress_type in ("LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE") and not _has_actionable_outreach(enriched):
@@ -613,6 +661,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     pre_foreclosure_review_ready = (
         is_pre_foreclosure
         and len(pre_foreclosure_blockers) == 0
+        and prefc_county_is_active(enriched.get("county"))
         and execution_reality["owner_contact_available"]
         and execution_reality["contact_path_quality"] in {"STRONG", "GOOD"}
         and execution_reality["control_party"] in {"OWNER", "MIXED"}
@@ -643,6 +692,9 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "vault_publish_blockers": vault_blockers,
         "pre_foreclosure_review_ready": pre_foreclosure_review_ready,
         "pre_foreclosure_review_blockers": pre_foreclosure_blockers,
+        "prefc_debt_proxy_ready": debt_proxy_ready,
+        "prefc_county_tier": county_tier,
+        "prefc_source_priority": source_priority,
         "execution_blockers": execution_blockers,
         "execution_reality": execution_reality,
         "lane_suggestion": lane_suggestion,

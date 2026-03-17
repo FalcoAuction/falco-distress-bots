@@ -13,6 +13,7 @@ from urllib import request as urllib_request
 
 from ..packaging.data_quality import assess_packet_data
 from ..storage.sqlite_store import init_db
+from .prefc_policy import prefc_county_priority, prefc_county_tier, prefc_source_priority
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE_REPO = ROOT.parent / "falco-site"
@@ -145,6 +146,20 @@ def _attach_vault_state(rows: list[dict[str, Any]], live_slugs: list[str]) -> li
             }
         )
     return attached
+
+
+def _latest_foreclosure_recorded_at(con: sqlite3.Connection, lead_key: str) -> str | None:
+    row = con.execute(
+        """
+        SELECT recorded_at
+        FROM foreclosure_events
+        WHERE lead_key = ? AND recorded_at IS NOT NULL
+        ORDER BY COALESCE(event_at, recorded_at) DESC, event_key DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    return row["recorded_at"] if row and row["recorded_at"] is not None else None
 
 
 def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str) -> bool:
@@ -418,6 +433,7 @@ def _hydrate_quality_fields(
 
 
 def _build_candidate_listing_payload(
+    con: sqlite3.Connection,
     lead: sqlite3.Row | dict[str, Any],
     quality: dict[str, Any],
     packet_file_name: str,
@@ -441,6 +457,10 @@ def _build_candidate_listing_payload(
     dts_days = int(lead_data["dts_days"]) if lead_data.get("dts_days") is not None else None
     contact_ready = bool(quality.get("contact_ready"))
     created_at = str(lead_data.get("score_updated_at") or lead_data.get("last_seen_at") or lead_data.get("first_seen_at") or _utc_now())
+    distress_recorded_at = _latest_foreclosure_recorded_at(con, str(lead_data.get("lead_key") or ""))
+
+    def _field(name: str) -> Any:
+        return enriched_fields.get(name) or lead_data.get(name)
 
     return {
         "slug": slug,
@@ -465,21 +485,24 @@ def _build_candidate_listing_payload(
         "auctionReadiness": readiness,
         "equityBand": lead_data.get("equity_band") or "",
         "dtsDays": dts_days,
+        "currentSaleDate": lead_data.get("current_sale_date") or "",
+        "originalSaleDate": lead_data.get("original_sale_date") or "",
+        "distressRecordedAt": distress_recorded_at or "",
         "contactReady": contact_ready,
-        "propertyIdentifier": enriched_fields.get("property_identifier"),
-        "ownerName": enriched_fields.get("owner_name"),
-        "ownerMail": enriched_fields.get("owner_mail"),
-        "ownerPhonePrimary": enriched_fields.get("owner_phone_primary"),
-        "ownerPhoneSecondary": enriched_fields.get("owner_phone_secondary"),
-        "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
-        "noticePhone": enriched_fields.get("notice_phone"),
-        "lastSaleDate": enriched_fields.get("last_sale_date"),
-        "mortgageLender": enriched_fields.get("mortgage_lender"),
-        "mortgageAmount": enriched_fields.get("mortgage_amount"),
-        "yearBuilt": enriched_fields.get("year_built"),
-        "buildingAreaSqft": enriched_fields.get("building_area_sqft"),
-        "beds": enriched_fields.get("beds"),
-        "baths": enriched_fields.get("baths"),
+        "propertyIdentifier": _field("property_identifier"),
+        "ownerName": _field("owner_name"),
+        "ownerMail": _field("owner_mail"),
+        "ownerPhonePrimary": _field("owner_phone_primary"),
+        "ownerPhoneSecondary": _field("owner_phone_secondary"),
+        "trusteePhonePublic": _field("trustee_phone_public"),
+        "noticePhone": _field("notice_phone"),
+        "lastSaleDate": _field("last_sale_date"),
+        "mortgageLender": _field("mortgage_lender"),
+        "mortgageAmount": _field("mortgage_amount"),
+        "yearBuilt": _field("year_built"),
+        "buildingAreaSqft": _field("building_area_sqft"),
+        "beds": _field("beds"),
+        "baths": _field("baths"),
         "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
         "controlParty": quality["execution_reality"]["control_party"],
         "ownerAgency": quality["execution_reality"]["owner_agency"],
@@ -494,6 +517,7 @@ def _build_candidate_listing_payload(
         "topTierReady": bool(quality["top_tier_ready"]),
         "vaultPublishReady": bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready")),
         "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+        "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
         "saleStatus": sale_status,
         "dataNotes": (
             (quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"])
@@ -582,7 +606,7 @@ def _build_publish_candidates(
         staged_packet_path = SITE_PRIVATE_PACKET_DIR / packet_file_name
         shutil.copy2(packet_path, staged_packet_path)
 
-        listing_payload = _build_candidate_listing_payload(lead, quality, packet_file_name)
+        listing_payload = _build_candidate_listing_payload(con, hydrated, quality, packet_file_name)
         candidates.append(
             {
                 "leadKey": lead_key,
@@ -686,6 +710,7 @@ def _build_pre_foreclosure_promotion(
             "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
             "vaultPublishReady": bool(quality["vault_publish_ready"]),
             "topTierReady": bool(quality["top_tier_ready"]),
+            "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
             "packetCompletenessPct": quality["packet_completeness_pct"],
             "executionBlockers": quality["execution_blockers"],
         }
@@ -694,6 +719,8 @@ def _build_pre_foreclosure_promotion(
             {
                 "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
                 "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
+                "prefcCountyTier": quality.get("prefc_county_tier") or prefc_county_tier(lead["county"]),
+                "prefcSourcePriority": quality.get("prefc_source_priority"),
                 "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
                 "controlParty": quality["execution_reality"]["control_party"],
                 "ownerAgency": quality["execution_reality"]["owner_agency"],
@@ -723,6 +750,8 @@ def _build_pre_foreclosure_promotion(
 
     blocked.sort(
         key=lambda row: (
+            prefc_county_priority(row.get("county")),
+            prefc_source_priority(row.get("distress_type")),
             len(row.get("executionBlockers") or []),
             -(row.get("falco_score_internal") or 0),
             row.get("dts_days") or 9999,
@@ -730,6 +759,8 @@ def _build_pre_foreclosure_promotion(
     )
     ready_for_review.sort(
         key=lambda row: (
+            prefc_county_priority(row.get("county")),
+            prefc_source_priority(row.get("distress_type")),
             0 if str(row.get("suggestedLaneConfidence") or "").upper() == "HIGH" else 1,
             -(row.get("falco_score_internal") or 0),
             row.get("dts_days") or 9999,

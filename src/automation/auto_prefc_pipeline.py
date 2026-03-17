@@ -10,6 +10,7 @@ from ..enrichment.batchdata_fallback import run as run_batchdata_fallback
 from ..packaging.data_quality import assess_packet_data
 from ..packaging.packager import run as run_packager
 from ..scoring.scorer import score_leads_by_keys
+from .prefc_policy import prefc_county_is_active, prefc_county_priority, prefc_source_priority
 from .site_publish import _load_env_file, _run_command
 from .site_snapshots import (
     SITE_REPO,
@@ -29,6 +30,7 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     sale_status = str(payload.get("saleStatus") or "").strip().lower()
     equity_band = str(payload.get("equityBand") or "").strip().upper()
+    debt_proxy_ready = bool(payload.get("prefcDebtProxyReady"))
 
     if not str(payload.get("ownerName") or "").strip():
         issues.append("owner")
@@ -37,7 +39,7 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     if not str(payload.get("mortgageLender") or "").strip():
         issues.append("lender")
     mortgage_amount = payload.get("mortgageAmount")
-    if not isinstance(mortgage_amount, (int, float)):
+    if not isinstance(mortgage_amount, (int, float)) and not (sale_status == "pre_foreclosure" and debt_proxy_ready):
         issues.append("loan amount")
 
     has_contact = any(
@@ -141,6 +143,10 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             quality = assess_packet_data(hydrated)
             execution_reality = quality.get("execution_reality") or {}
             lane_suggestion = quality.get("lane_suggestion") or {}
+            county = str(lead["county"] or "").strip()
+
+            if not prefc_county_is_active(county):
+                continue
 
             prefix = lead_key[:8].lower()
             matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
@@ -210,12 +216,16 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                     "lender_control": lender_control,
                     "hard_contact_gap": hard_contact_gap,
                     "staged_contact_retry": strong_staged_contact_retry,
+                    "county_priority": prefc_county_priority(county),
+                    "source_priority": prefc_source_priority(str(lead["distress_type"] or "")),
                 }
             )
 
     targets.sort(
         key=lambda row: (
+            row["county_priority"],
             0 if row["needs_attom"] else 1,
+            row["source_priority"],
             0 if row["confidence"] == "HIGH" else 1,
             -row["score"],
             0 if row["owner_agency"] == "HIGH" else 1,
@@ -297,6 +307,8 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
         payload = candidate.get("listingPayload") or {}
         if str(payload.get("saleStatus") or "").strip().lower() != "pre_foreclosure":
             continue
+        if not prefc_county_is_active(str(payload.get("county") or "")):
+            continue
         if _candidate_publish_issues(payload):
             continue
         if not bool(payload.get("preForeclosureReviewReady")):
@@ -319,6 +331,8 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
 
     filtered.sort(
         key=lambda row: (
+            prefc_county_priority(str((row.get("listingPayload") or {}).get("county") or "")),
+            prefc_source_priority(str((row.get("listingPayload") or {}).get("distressType") or "")),
             0 if str((row.get("listingPayload") or {}).get("ownerAgency") or "").upper() == "HIGH" else 1,
             -float(((row.get("listingPayload") or {}).get("falcoScore") or 0)),
             int(((row.get("listingPayload") or {}).get("dtsDays") or 9999)),
