@@ -182,6 +182,13 @@ def _hydrate_fields(con: sqlite3.Connection, lead: sqlite3.Row, attom_map: Dict[
         "mortgage_date",
         "mortgage_lender",
         "property_identifier",
+        "mortgage_record_book",
+        "mortgage_record_page",
+        "mortgage_record_instrument",
+        "debt_reconstruction_confidence",
+        "debt_reconstruction_source_mix",
+        "debt_reconstruction_missing_reason",
+        "debt_reconstruction_summary",
     ):
         value = _latest_text_field(con, lead_key, field_name)
         if value:
@@ -271,9 +278,21 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         reasons.append("Clears strong live pre-foreclosure bar")
         return "publish", "high", reasons
 
+    has_record_refs = bool(
+        lead.get("mortgage_record_book")
+        or lead.get("mortgage_record_page")
+        or lead.get("mortgage_record_instrument")
+    )
+    debt_missing_reason = str(lead.get("debt_reconstruction_missing_reason") or "").strip()
+
     if prefc_is_special_situation(overlap_signals):
         reasons.append("Overlap signals increase upside versus ordinary notice flow")
         if not lead.get("mortgage_lender") or lead.get("mortgage_amount") is None:
+            if has_record_refs:
+                reasons.append("Recorded debt refs are present, but loan amount is still missing")
+                if debt_missing_reason:
+                    reasons.append(debt_missing_reason)
+                return "county_record_lookup", "high", reasons
             reasons.append("Debt stack still needs reconstruction before it can convert")
             return "reconstruct_debt", "high", reasons
         if not lead.get("last_sale_date") and not lead.get("mortgage_date"):
@@ -282,6 +301,11 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         return "special_situations_review", "high", reasons
 
     if not lead.get("mortgage_lender") or lead.get("mortgage_amount") is None:
+        if has_record_refs:
+            reasons.append("County record refs are present but the debt amount is still missing")
+            if debt_missing_reason:
+                reasons.append(debt_missing_reason)
+            return "county_record_lookup", "high", reasons
         reasons.append("Debt picture is still incomplete")
         return "reconstruct_debt", "high", reasons
 
@@ -348,6 +372,13 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
                 "falco_score_internal": lead["falco_score_internal"],
                 "equity_band": lead["equity_band"],
                 "debt_confidence": quality.get("debt_confidence"),
+                "debt_reconstruction_confidence": fields.get("debt_reconstruction_confidence"),
+                "debt_reconstruction_source_mix": fields.get("debt_reconstruction_source_mix"),
+                "debt_reconstruction_missing_reason": fields.get("debt_reconstruction_missing_reason"),
+                "debt_reconstruction_summary": fields.get("debt_reconstruction_summary"),
+                "mortgage_record_book": fields.get("mortgage_record_book"),
+                "mortgage_record_page": fields.get("mortgage_record_page"),
+                "mortgage_record_instrument": fields.get("mortgage_record_instrument"),
                 "prefc_live_quality": bool(quality.get("prefc_live_quality")),
                 "contact_path_quality": execution.get("contact_path_quality"),
                 "owner_agency": execution.get("owner_agency"),
@@ -365,7 +396,7 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
     actions.sort(
         key=lambda row: (
             {"high": 0, "medium": 1, "low": 2}.get(str(row["priority"]), 3),
-            0 if row["next_action"] in {"publish", "remove_from_vault", "reconstruct_debt", "reconstruct_transfer"} else 1,
+            0 if row["next_action"] in {"publish", "remove_from_vault", "county_record_lookup", "reconstruct_debt", "reconstruct_transfer"} else 1,
             prefc_overlap_priority(row["overlap_signals"]),
             prefc_county_priority(row["county"]),
             prefc_source_priority(row["distress_type"]),

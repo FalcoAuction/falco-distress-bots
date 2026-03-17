@@ -41,6 +41,7 @@ _PRINCIPAL_AMOUNT_RX = re.compile(
     r"(?:original\s+principal\s+amount|principal\s+sum|indebtedness\s+in\s+the\s+principal\s+sum|note\s+in\s+the\s+original\s+principal\s+amount)\D{0,20}\$\s*([0-9][0-9,]+(?:\.\d{2})?)",
     re.IGNORECASE,
 )
+_TAG_RX = re.compile(r"<[^>]+>")
 
 
 def _now_iso() -> str:
@@ -73,6 +74,24 @@ def _clean_party_name(value: Any) -> str | None:
     if len(text) < 3:
         return None
     return text[:180]
+
+
+def _clean_notice_body(raw: str | None) -> str:
+    text = str(raw or "")
+    if not text:
+        return ""
+    text = _TAG_RX.sub(" ", text)
+    text = (
+        text.replace("&nbsp;", " ")
+        .replace("\xa0", " ")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
+    text = re.sub(r"\s+", " ", text).strip()
+    notice_match = re.search(r"Notice Text:\s*(.+)", text, re.IGNORECASE)
+    if notice_match:
+        text = notice_match.group(1).strip()
+    return text
 
 
 def _coerce_num(value: Any) -> float | None:
@@ -212,7 +231,7 @@ def _latest_notice_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[str
 
 
 def _parse_notice_chain(raw: str | None) -> dict[str, Any]:
-    text = str(raw or "").strip()
+    text = _clean_notice_body(raw)
     if not text:
         return {}
     parts = [_clean_party_name(part) for part in text.split("->")]
@@ -238,7 +257,7 @@ def _parse_notice_chain(raw: str | None) -> dict[str, Any]:
 
 
 def _parse_notice_debt_details(raw: str | None) -> dict[str, Any]:
-    text = re.sub(r"\s+", " ", str(raw or "")).strip()
+    text = _clean_notice_body(raw)
     if not text:
         return {}
 
