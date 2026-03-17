@@ -67,9 +67,9 @@ def prefc_county_tier(county: str | None) -> str:
     normalized = normalize_prefc_county(county)
     if normalized in {"hamilton county", "rutherford county"}:
         return "PRIMARY"
-    if normalized in {"montgomery county"}:
+    if normalized in {"montgomery county", "davidson county", "wilson county", "sumner county"}:
         return "SECONDARY"
-    if normalized in {"knox county", "davidson county"}:
+    if normalized in {"knox county"}:
         return "WATCH"
     return "OTHER"
 
