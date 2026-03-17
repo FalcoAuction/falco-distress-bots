@@ -26,6 +26,7 @@ from .automation import (
     write_agent_reports,
     write_run_summary,
 )
+from .automation.autonomy_agents import write_autonomy_report
 from .automation.auto_prefc_pipeline import run as run_auto_prefc_pipeline
 from .automation import foreclosure_lifecycle
 from .automation.operator_enrichment_requests import process_operator_enrichment_requests
@@ -151,6 +152,8 @@ def main():
         print(f"[RunSummary] {summary_result}")
         agent_result = write_agent_reports(run_id, stage_results, summary_result["report"])
         print(f"[AgentReports] {agent_result}")
+        autonomy_result = write_autonomy_report(run_id, summary_result["report"])
+        print(f"[AutonomyAgents] {autonomy_result}")
         snapshot_result = write_site_snapshots()
         print(f"[SiteSnapshots] {snapshot_result}")
 
@@ -161,6 +164,7 @@ def main():
             "publish": publish_result,
             "report": summary_result,
             "agents": agent_result,
+            "autonomy": autonomy_result,
             "site_snapshots": snapshot_result,
         })
 
