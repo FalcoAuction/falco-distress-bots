@@ -299,6 +299,7 @@ def _extract_batchdata_reconstruction(payload: dict[str, Any]) -> dict[str, Any]
     foreclosure = item.get("foreclosure") if isinstance(item.get("foreclosure"), dict) else {}
     history = item.get("mortgageHistory") if isinstance(item.get("mortgageHistory"), list) else []
     history = [candidate for candidate in history if isinstance(candidate, dict)]
+    current_lender_name = _clean_party_name(foreclosure.get("currentLenderName"))
     history.sort(
         key=lambda candidate: str(
             candidate.get("recordingDate")
@@ -306,23 +307,38 @@ def _extract_batchdata_reconstruction(payload: dict[str, Any]) -> dict[str, Any]
             or candidate.get("loanDate")
             or candidate.get("saleDate")
             or ""
-        ),
-        reverse=True,
+        )
     )
 
-    latest = history[0] if history else {}
-    earliest = history[-1] if history else {}
+    matched_history: list[dict[str, Any]] = []
+    if current_lender_name:
+        matched_history = [
+            candidate
+            for candidate in history
+            if _clean_party_name(candidate.get("lenderName")) == current_lender_name
+        ]
+
+    latest = (matched_history[-1] if matched_history else (history[-1] if history else {}))
+    earliest = history[0] if history else {}
+    amount_candidate = next(
+        (
+            candidate
+            for candidate in reversed(matched_history or history)
+            if _coerce_num(candidate.get("loanAmount") or candidate.get("amount")) is not None
+        ),
+        {},
+    )
 
     out: dict[str, Any] = {}
     current_lender = _clean_party_name(
-        foreclosure.get("currentLenderName")
+        current_lender_name
         or latest.get("lenderName")
         or item.get("mortgageLender")
     )
     original_lender = _clean_party_name(earliest.get("lenderName"))
     mortgage_amount = _coerce_num(
-        latest.get("loanAmount")
-        or latest.get("amount")
+        amount_candidate.get("loanAmount")
+        or amount_candidate.get("amount")
         or foreclosure.get("loanAmount")
         or foreclosure.get("amount")
     )
@@ -391,6 +407,15 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
     record_instrument = chain_info.get("record_instrument") or notice_details.get("record_instrument") or batchdata_info.get("record_instrument")
     assignment_recorded_at = chain_info.get("assignment_recorded_at") or batchdata_info.get("assignment_recorded_at")
     canonical_last_sale_date = last_sale_date or notice_details.get("last_sale_date")
+    source_mix = [
+        label
+        for label, present in (
+            ("NOTICE", bool(notice_payload)),
+            ("BATCHDATA", bool(payload)),
+            ("CHAIN", bool(chain_info)),
+        )
+        if present
+    ]
 
     confidence = "FULL"
     if not canonical_lender and canonical_amount is None:
@@ -399,6 +424,17 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         confidence = "PARTIAL"
     elif not canonical_lender:
         confidence = "PARTIAL"
+
+    missing_reason = ""
+    if canonical_amount is None:
+        if payload and not batchdata_info.get("mortgage_amount"):
+            missing_reason = "No loan amount in BatchData debt fields"
+        elif notice_payload and not notice_details.get("mortgage_amount"):
+            missing_reason = "No principal amount stated in notice text"
+        else:
+            missing_reason = "Loan amount could not be reconstructed from current sources"
+    elif not canonical_lender:
+        missing_reason = "Current lender could not be reconstructed from current sources"
 
     summary_parts = []
     if canonical_lender:
@@ -419,6 +455,8 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         ) if part)
         if ref:
             summary_parts.append(ref)
+    if missing_reason:
+        summary_parts.append(f"Blocker: {missing_reason}")
 
     return {
         "artifact_id": artifact_id or notice_artifact_id,
@@ -433,6 +471,8 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         "mortgage_record_page": record_page,
         "mortgage_record_instrument": record_instrument,
         "debt_reconstruction_confidence": confidence,
+        "debt_reconstruction_source_mix": ", ".join(source_mix) if source_mix else "NONE",
+        "debt_reconstruction_missing_reason": missing_reason,
         "debt_reconstruction_summary": " | ".join(summary_parts) if summary_parts else "No durable debt reconstruction found",
     }
 

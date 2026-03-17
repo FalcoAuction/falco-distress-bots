@@ -299,13 +299,14 @@ def _coerce_num(value: Any) -> Optional[float]:
 
 
 def _best_batchdata_mortgage(item: Dict[str, Any]) -> Dict[str, Any]:
-    best: Dict[str, Any] = {}
-    best_sort_key = ""
-
     history = item.get("mortgageHistory")
     if not isinstance(history, list):
         history = []
 
+    foreclosure = item.get("foreclosure") if isinstance(item.get("foreclosure"), dict) else {}
+    current_lender_name = str(foreclosure.get("currentLenderName") or "").strip().upper()
+
+    scored: list[tuple[tuple[int, int, str], Dict[str, Any]]] = []
     for candidate in history:
         if not isinstance(candidate, dict):
             continue
@@ -313,17 +314,29 @@ def _best_batchdata_mortgage(item: Dict[str, Any]) -> Dict[str, Any]:
         lender = str(candidate.get("lenderName") or "").strip()
         if amount is None and not lender:
             continue
+        lender_matches_current = bool(current_lender_name and lender.upper() == current_lender_name)
         sort_key = str(
             candidate.get("recordingDate")
             or candidate.get("documentDate")
             or candidate.get("loanDate")
             or ""
         ).strip()
-        if not best or sort_key >= best_sort_key:
-            best = candidate
-            best_sort_key = sort_key
+        scored.append(
+            (
+                (
+                    0 if lender_matches_current else 1,
+                    0 if amount is not None else 1,
+                    sort_key,
+                ),
+                candidate,
+            )
+        )
 
-    return best
+    if not scored:
+        return {}
+
+    scored.sort(key=lambda item: item[0])
+    return scored[0][1]
 
 
 def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:

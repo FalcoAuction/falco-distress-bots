@@ -424,6 +424,10 @@ def _hydrate_quality_fields(
         "mortgage_date",
         "mortgage_lender",
         "property_identifier",
+        "debt_reconstruction_confidence",
+        "debt_reconstruction_source_mix",
+        "debt_reconstruction_missing_reason",
+        "debt_reconstruction_summary",
     ):
         row = con.execute(
             """
@@ -539,6 +543,10 @@ def _build_candidate_listing_payload(
         "mortgageDate": _field("mortgage_date"),
         "mortgageLender": _field("mortgage_lender"),
         "mortgageAmount": _field("mortgage_amount"),
+        "debtReconstructionConfidence": _field("debt_reconstruction_confidence"),
+        "debtReconstructionSourceMix": _field("debt_reconstruction_source_mix"),
+        "debtReconstructionMissingReason": _field("debt_reconstruction_missing_reason"),
+        "debtReconstructionSummary": _field("debt_reconstruction_summary"),
         "yearBuilt": _field("year_built"),
         "buildingAreaSqft": _field("building_area_sqft"),
         "beds": _field("beds"),
@@ -806,6 +814,10 @@ def _build_pre_foreclosure_promotion(
                 "mortgageDate": hydrated.get("mortgage_date"),
                 "mortgageLender": hydrated.get("mortgage_lender"),
                 "mortgageAmount": hydrated.get("mortgage_amount"),
+                "debtReconstructionConfidence": hydrated.get("debt_reconstruction_confidence"),
+                "debtReconstructionSourceMix": hydrated.get("debt_reconstruction_source_mix"),
+                "debtReconstructionMissingReason": hydrated.get("debt_reconstruction_missing_reason"),
+                "debtReconstructionSummary": hydrated.get("debt_reconstruction_summary"),
                 "propertyIdentifier": hydrated.get("property_identifier"),
                 "ownerPhonePrimary": hydrated.get("owner_phone_primary"),
                 "ownerPhoneSecondary": hydrated.get("owner_phone_secondary"),
