@@ -13,7 +13,13 @@ from urllib import request as urllib_request
 
 from ..packaging.data_quality import assess_packet_data
 from ..storage.sqlite_store import init_db
-from .prefc_policy import prefc_county_priority, prefc_county_tier, prefc_source_priority
+from .prefc_policy import (
+    prefc_county_priority,
+    prefc_county_tier,
+    prefc_is_special_situation,
+    prefc_overlap_priority,
+    prefc_source_priority,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE_REPO = ROOT.parent / "falco-site"
@@ -73,6 +79,8 @@ def _lead_key_prefix(lead_key: str) -> str:
 def _prefc_strength_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
         prefc_county_priority(row.get("county")),
+        prefc_overlap_priority(row.get("overlapSignals") or []),
+        0 if bool(row.get("specialSituation")) else 1,
         prefc_source_priority(row.get("distress_type") or row.get("distressType") or ""),
         0 if bool(row.get("prefcLiveQuality")) else 1,
         0 if str(row.get("debtConfidence") or "").upper() == "FULL" else 1,
@@ -473,6 +481,22 @@ def _build_candidate_listing_payload(
     contact_ready = bool(quality.get("contact_ready"))
     created_at = str(lead_data.get("score_updated_at") or lead_data.get("last_seen_at") or lead_data.get("first_seen_at") or _utc_now())
     distress_recorded_at = _latest_foreclosure_recorded_at(con, str(lead_data.get("lead_key") or ""))
+    source_rows = con.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))
+        FROM ingest_events
+        WHERE lead_key=?
+        """,
+        (str(lead_data.get("lead_key") or ""),),
+    ).fetchall()
+    source_mix = [str(row[0] or "").strip() for row in source_rows if str(row[0] or "").strip()]
+    overlap_signals: list[str] = []
+    if "SUBSTITUTION_OF_TRUSTEE" in source_mix and "LIS_PENDENS" in source_mix:
+        overlap_signals.append("stacked_notice_path")
+    if any(source in source_mix for source in ("API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES")):
+        overlap_signals.append("tax_overlap")
+    if lead_data.get("current_sale_date") and lead_data.get("original_sale_date") and lead_data.get("current_sale_date") != lead_data.get("original_sale_date"):
+        overlap_signals.append("reopened_timing")
 
     def _field(name: str) -> Any:
         return enriched_fields.get(name) or lead_data.get(name)
@@ -537,6 +561,9 @@ def _build_candidate_listing_payload(
         "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
         "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
         "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
+        "overlapSignals": overlap_signals,
+        "specialSituation": prefc_is_special_situation(overlap_signals),
+        "sourceMix": source_mix,
         "saleStatus": sale_status,
         "dataNotes": (
             (quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"])
@@ -657,6 +684,8 @@ def _build_publish_candidates(
     candidates.sort(
         key=lambda row: (
             0 if row["listingPayload"].get("topTierReady") else 1,
+            prefc_overlap_priority(row["listingPayload"].get("overlapSignals") or []),
+            0 if row["listingPayload"].get("specialSituation") else 1,
             0 if str(row["listingPayload"].get("auctionReadiness") or "").upper() == "GREEN" else 1,
             -(row["listingPayload"].get("falcoScore") or 0),
             row["listingPayload"].get("dtsDays") or 9999,
@@ -722,6 +751,22 @@ def _build_pre_foreclosure_promotion(
     for lead in lead_rows:
         hydrated = _hydrate_quality_fields(con, lead, attom_map)
         quality = assess_packet_data(hydrated)
+        source_rows = con.execute(
+            """
+            SELECT DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))
+            FROM ingest_events
+            WHERE lead_key=?
+            """,
+            (str(lead["lead_key"] or ""),),
+        ).fetchall()
+        source_mix = [str(row[0] or "").strip() for row in source_rows if str(row[0] or "").strip()]
+        overlap_signals: list[str] = []
+        if "SUBSTITUTION_OF_TRUSTEE" in source_mix and "LIS_PENDENS" in source_mix:
+            overlap_signals.append("stacked_notice_path")
+        if any(source in source_mix for source in ("API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES")):
+            overlap_signals.append("tax_overlap")
+        if lead["current_sale_date"] and lead["original_sale_date"] and lead["current_sale_date"] != lead["original_sale_date"]:
+            overlap_signals.append("reopened_timing")
         prefix = _lead_key_prefix(str(lead["lead_key"] or ""))
         matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
         row = {
@@ -737,6 +782,9 @@ def _build_pre_foreclosure_promotion(
             "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
             "packetCompletenessPct": quality["packet_completeness_pct"],
             "executionBlockers": quality["execution_blockers"],
+            "overlapSignals": overlap_signals,
+            "specialSituation": prefc_is_special_situation(overlap_signals),
+            "sourceMix": source_mix,
         }
 
         row.update(

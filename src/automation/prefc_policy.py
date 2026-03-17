@@ -45,6 +45,24 @@ def prefc_source_directive(distress_type: str | None) -> str | None:
     return None
 
 
+def prefc_overlap_priority(signals: list[str] | tuple[str, ...] | set[str] | None) -> int:
+    signal_set = {str(item or "").strip().lower() for item in (signals or []) if str(item or "").strip()}
+    if not signal_set:
+        return 3
+    if "stacked_notice_path" in signal_set and "tax_overlap" in signal_set:
+        return 0
+    if "stacked_notice_path" in signal_set:
+        return 1
+    if "tax_overlap" in signal_set or "reopened_timing" in signal_set:
+        return 2
+    return 3
+
+
+def prefc_is_special_situation(signals: list[str] | tuple[str, ...] | set[str] | None) -> bool:
+    signal_set = {str(item or "").strip().lower() for item in (signals or []) if str(item or "").strip()}
+    return bool(signal_set.intersection({"stacked_notice_path", "tax_overlap", "reopened_timing"}))
+
+
 def prefc_county_tier(county: str | None) -> str:
     normalized = normalize_prefc_county(county)
     if normalized in {"hamilton county", "rutherford county"}:

@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..packaging.data_quality import assess_packet_data
-from .prefc_policy import prefc_county_is_active, prefc_county_priority, prefc_county_tier, prefc_source_priority
+from .prefc_policy import (
+    prefc_county_is_active,
+    prefc_county_priority,
+    prefc_county_tier,
+    prefc_is_special_situation,
+    prefc_overlap_priority,
+    prefc_source_priority,
+)
 
 
 def _db_path() -> str:
@@ -264,6 +271,16 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         reasons.append("Clears strong live pre-foreclosure bar")
         return "publish", "high", reasons
 
+    if prefc_is_special_situation(overlap_signals):
+        reasons.append("Overlap signals increase upside versus ordinary notice flow")
+        if not lead.get("mortgage_lender") or lead.get("mortgage_amount") is None:
+            reasons.append("Debt stack still needs reconstruction before it can convert")
+            return "reconstruct_debt", "high", reasons
+        if not lead.get("last_sale_date") and not lead.get("mortgage_date"):
+            reasons.append("Transfer support still missing on a special-situations lead")
+            return "reconstruct_transfer", "high", reasons
+        return "special_situations_review", "high", reasons
+
     if not lead.get("mortgage_lender") or lead.get("mortgage_amount") is None:
         reasons.append("Debt picture is still incomplete")
         return "reconstruct_debt", "high", reasons
@@ -276,8 +293,8 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         reasons.append("Actionable contact path is missing")
         return "enrich_contact", "medium", reasons
 
-    if "tax_overlap" in overlap_signals:
-        reasons.append("Tax overlap makes this a tighter special-situations file")
+    if prefc_is_special_situation(overlap_signals):
+        reasons.append("Special-situations overlap makes this worth a tighter review path")
         return "special_situations_review", "medium", reasons
 
     if str(execution.get("lender_control_intensity") or "HIGH").upper() == "HIGH" or str(lead.get("equity_band") or "").upper() == "LOW":
@@ -349,6 +366,7 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
         key=lambda row: (
             {"high": 0, "medium": 1, "low": 2}.get(str(row["priority"]), 3),
             0 if row["next_action"] in {"publish", "remove_from_vault", "reconstruct_debt", "reconstruct_transfer"} else 1,
+            prefc_overlap_priority(row["overlap_signals"]),
             prefc_county_priority(row["county"]),
             prefc_source_priority(row["distress_type"]),
             -float(row["falco_score_internal"] or 0),

@@ -11,7 +11,13 @@ from ..enrichment.debt_reconstruction import run as run_debt_reconstruction
 from ..packaging.data_quality import assess_packet_data
 from ..packaging.packager import run as run_packager
 from ..scoring.scorer import score_leads_by_keys
-from .prefc_policy import prefc_county_is_active, prefc_county_priority, prefc_source_priority
+from .prefc_policy import (
+    prefc_county_is_active,
+    prefc_county_priority,
+    prefc_is_special_situation,
+    prefc_overlap_priority,
+    prefc_source_priority,
+)
 from .site_publish import _load_env_file, _run_command
 from .site_snapshots import (
     SITE_REPO,
@@ -87,6 +93,35 @@ def _has_hard_contact_fields(payload: dict[str, Any]) -> bool:
     )
 
 
+def _source_set(con: sqlite3.Connection, lead_key: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, ''))
+        FROM ingest_events
+        WHERE lead_key = ?
+        """,
+        (lead_key,),
+    ).fetchall()
+    return {str(row[0] or "").strip().upper() for row in rows if str(row[0] or "").strip()}
+
+
+def _overlap_signals(con: sqlite3.Connection, lead: sqlite3.Row | dict[str, Any]) -> list[str]:
+    lead_key = str((dict(lead) if not isinstance(lead, dict) else lead).get("lead_key") or "").strip()
+    if not lead_key:
+        return []
+    sources = _source_set(con, lead_key)
+    signals: list[str] = []
+    if "SUBSTITUTION_OF_TRUSTEE" in sources and "LIS_PENDENS" in sources:
+        signals.append("stacked_notice_path")
+    if sources.intersection({"API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES"}):
+        signals.append("tax_overlap")
+    current_sale_date = str((dict(lead) if not isinstance(lead, dict) else lead).get("current_sale_date") or "").strip()
+    original_sale_date = str((dict(lead) if not isinstance(lead, dict) else lead).get("original_sale_date") or "").strip()
+    if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
+        signals.append("reopened_timing")
+    return signals
+
+
 def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
     with _connect() as con:
@@ -143,6 +178,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             execution_reality = quality.get("execution_reality") or {}
             lane_suggestion = quality.get("lane_suggestion") or {}
             county = str(lead["county"] or "").strip()
+            overlap_signals = _overlap_signals(con, lead)
+            special_situation = prefc_is_special_situation(overlap_signals)
 
             if not prefc_county_is_active(county):
                 continue
@@ -200,7 +237,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                 continue
             if len(blockers) > 5:
                 continue
-            if not (missing_valuation or batchdata_targets or contact_gap):
+            if not (missing_valuation or batchdata_targets or contact_gap or special_situation):
                 continue
 
             targets.append(
@@ -215,6 +252,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                     "lender_control": lender_control,
                     "hard_contact_gap": hard_contact_gap,
                     "staged_contact_retry": strong_staged_contact_retry,
+                    "special_situation": special_situation,
+                    "overlap_signals": overlap_signals,
                     "county_priority": prefc_county_priority(county),
                     "source_priority": prefc_source_priority(str(lead["distress_type"] or "")),
                 }
@@ -223,6 +262,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
     targets.sort(
         key=lambda row: (
             row["county_priority"],
+            prefc_overlap_priority(row["overlap_signals"]),
+            0 if row["special_situation"] else 1,
             0 if row["needs_attom"] else 1,
             row["source_priority"],
             0 if row["confidence"] == "HIGH" else 1,
@@ -231,6 +272,33 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
         )
     )
     return targets[:limit]
+
+
+def _prune_weak_live_prefc(limit: int) -> dict[str, Any]:
+    if limit <= 0:
+        return {"attempted": True, "pruned": 0, "slugs": []}
+
+    existing = _load_existing_site_rows()
+    prune_slugs: list[str] = []
+    for slug, row in existing.items():
+        if str(row.get("saleStatus") or "").strip().lower() != "pre_foreclosure":
+            continue
+        if str(row.get("status") or "").strip().lower() != "active":
+            continue
+        debt_confidence = str(row.get("debtConfidence") or "").strip().upper()
+        live_quality = bool(row.get("prefcLiveQuality"))
+        equity_band = str(row.get("equityBand") or "").strip().upper()
+        if debt_confidence != "FULL" or not live_quality or equity_band == "LOW":
+            prune_slugs.append(slug)
+
+    if not prune_slugs:
+        return {"attempted": True, "pruned": 0, "slugs": []}
+
+    prune_slugs = prune_slugs[:limit]
+    for slug in prune_slugs:
+        existing.pop(slug, None)
+    _write_site_rows(existing)
+    return {"attempted": True, "pruned": len(prune_slugs), "slugs": prune_slugs}
 
 
 def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
@@ -338,7 +406,9 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
     filtered.sort(
         key=lambda row: (
             prefc_county_priority(str((row.get("listingPayload") or {}).get("county") or "")),
+            prefc_overlap_priority((row.get("listingPayload") or {}).get("overlapSignals") or []),
             prefc_source_priority(str((row.get("listingPayload") or {}).get("distressType") or "")),
+            0 if prefc_is_special_situation((row.get("listingPayload") or {}).get("overlapSignals") or []) else 1,
             0 if str((row.get("listingPayload") or {}).get("ownerAgency") or "").upper() == "HIGH" else 1,
             -float(((row.get("listingPayload") or {}).get("falcoScore") or 0)),
             int(((row.get("listingPayload") or {}).get("dtsDays") or 9999)),
@@ -386,12 +456,15 @@ def _publish_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
 
 def run(run_id: str) -> dict[str, Any]:
     enrichment_result = _run_targeted_enrichment(run_id)
+    prune_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PRUNE_LIMIT", "3")), 0)
+    prune_result = _prune_weak_live_prefc(prune_limit)
 
     publish_enabled = _truthy(os.environ.get("FALCO_AUTO_PUBLISH_VAULT"))
     if not publish_enabled:
         return {
             "ok": True,
             "enrichment": enrichment_result,
+            "prune": prune_result,
             "publish": {
                 "attempted": False,
                 "enabled": False,
@@ -405,6 +478,7 @@ def run(run_id: str) -> dict[str, Any]:
     return {
         "ok": bool(publish_result.get("ok", True)),
         "enrichment": enrichment_result,
+        "prune": prune_result,
         "publish": {
             **publish_result,
             "enabled": True,
