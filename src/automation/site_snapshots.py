@@ -317,7 +317,7 @@ def _build_vault_candidates(
 
         quality = assess_packet_data(fields)
         readiness = str(lead["auction_readiness"] or "").upper()
-        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        publish_ready = bool(quality["vault_publish_ready"])
         if not publish_ready:
             continue
         if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):
@@ -515,7 +515,7 @@ def _build_candidate_listing_payload(
         "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
         "suggestedLaneReasons": quality["lane_suggestion"]["reasons"],
         "topTierReady": bool(quality["top_tier_ready"]),
-        "vaultPublishReady": bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready")),
+        "vaultPublishReady": bool(quality["vault_publish_ready"]),
         "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
         "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
         "saleStatus": sale_status,
@@ -592,7 +592,7 @@ def _build_publish_candidates(
 
         hydrated = _hydrate_quality_fields(con, lead, attom_map)
         quality = assess_packet_data(hydrated)
-        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        publish_ready = bool(quality["vault_publish_ready"])
         if not publish_ready:
             continue
         if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):

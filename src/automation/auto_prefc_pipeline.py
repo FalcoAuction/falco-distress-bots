@@ -30,8 +30,6 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     issues: list[str] = []
     sale_status = str(payload.get("saleStatus") or "").strip().lower()
     equity_band = str(payload.get("equityBand") or "").strip().upper()
-    debt_proxy_ready = bool(payload.get("prefcDebtProxyReady"))
-
     if not str(payload.get("ownerName") or "").strip():
         issues.append("owner")
     if not str(payload.get("ownerMail") or "").strip():
@@ -39,7 +37,7 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     if not str(payload.get("mortgageLender") or "").strip():
         issues.append("lender")
     mortgage_amount = payload.get("mortgageAmount")
-    if not isinstance(mortgage_amount, (int, float)) and not (sale_status == "pre_foreclosure" and debt_proxy_ready):
+    if not isinstance(mortgage_amount, (int, float)):
         issues.append("loan amount")
 
     has_contact = any(
