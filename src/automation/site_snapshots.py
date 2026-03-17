@@ -70,6 +70,20 @@ def _lead_key_prefix(lead_key: str) -> str:
     return (lead_key or "")[:8].lower()
 
 
+def _prefc_strength_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        prefc_county_priority(row.get("county")),
+        prefc_source_priority(row.get("distress_type") or row.get("distressType") or ""),
+        0 if bool(row.get("prefcLiveQuality")) else 1,
+        0 if str(row.get("debtConfidence") or "").upper() == "FULL" else 1,
+        0 if str(row.get("equity_band") or row.get("equityBand") or "").upper() in {"HIGH", "MED"} else 1,
+        0 if str(row.get("contactPathQuality") or "").upper() in {"STRONG", "GOOD"} else 1,
+        0 if str(row.get("ownerAgency") or "").upper() == "HIGH" else 1,
+        -float(row.get("falco_score_internal") or row.get("falcoScore") or 0),
+        int(row.get("dts_days") or row.get("dtsDays") or 9999),
+    )
+
+
 def _slugify(text: str) -> str:
     value = (text or "").lower().strip()
     out: list[str] = []
@@ -399,6 +413,7 @@ def _hydrate_quality_fields(
         "owner_name",
         "owner_mail",
         "last_sale_date",
+        "mortgage_date",
         "mortgage_lender",
         "property_identifier",
     ):
@@ -497,6 +512,7 @@ def _build_candidate_listing_payload(
         "trusteePhonePublic": _field("trustee_phone_public"),
         "noticePhone": _field("notice_phone"),
         "lastSaleDate": _field("last_sale_date"),
+        "mortgageDate": _field("mortgage_date"),
         "mortgageLender": _field("mortgage_lender"),
         "mortgageAmount": _field("mortgage_amount"),
         "yearBuilt": _field("year_built"),
@@ -517,7 +533,10 @@ def _build_candidate_listing_payload(
         "topTierReady": bool(quality["top_tier_ready"]),
         "vaultPublishReady": bool(quality["vault_publish_ready"]),
         "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+        "debtConfidence": quality.get("debt_confidence") or "",
         "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
+        "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
+        "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
         "saleStatus": sale_status,
         "dataNotes": (
             (quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"])
@@ -594,6 +613,8 @@ def _build_publish_candidates(
         quality = assess_packet_data(hydrated)
         publish_ready = bool(quality["vault_publish_ready"])
         if not publish_ready:
+            continue
+        if str(dict(lead).get("sale_status") or "").strip().lower() == "pre_foreclosure" and not bool(quality.get("prefc_live_quality")):
             continue
         if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):
             continue
@@ -711,6 +732,9 @@ def _build_pre_foreclosure_promotion(
             "vaultPublishReady": bool(quality["vault_publish_ready"]),
             "topTierReady": bool(quality["top_tier_ready"]),
             "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
+            "debtConfidence": quality.get("debt_confidence") or "",
+            "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
+            "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
             "packetCompletenessPct": quality["packet_completeness_pct"],
             "executionBlockers": quality["execution_blockers"],
         }
@@ -731,6 +755,7 @@ def _build_pre_foreclosure_promotion(
                 "workabilityBand": quality["execution_reality"]["workability_band"],
                 "ownerName": hydrated.get("owner_name"),
                 "ownerMail": hydrated.get("owner_mail"),
+                "mortgageDate": hydrated.get("mortgage_date"),
                 "mortgageLender": hydrated.get("mortgage_lender"),
                 "mortgageAmount": hydrated.get("mortgage_amount"),
                 "propertyIdentifier": hydrated.get("property_identifier"),
@@ -750,28 +775,31 @@ def _build_pre_foreclosure_promotion(
 
     blocked.sort(
         key=lambda row: (
-            prefc_county_priority(row.get("county")),
-            prefc_source_priority(row.get("distress_type")),
+            0 if bool(row.get("vaultLive")) and not bool(row.get("prefcLiveQuality")) else 1,
+            _prefc_strength_sort_key(row),
             len(row.get("executionBlockers") or []),
-            -(row.get("falco_score_internal") or 0),
-            row.get("dts_days") or 9999,
         )
     )
-    ready_for_review.sort(
-        key=lambda row: (
-            prefc_county_priority(row.get("county")),
-            prefc_source_priority(row.get("distress_type")),
-            0 if str(row.get("suggestedLaneConfidence") or "").upper() == "HIGH" else 1,
-            -(row.get("falco_score_internal") or 0),
-            row.get("dts_days") or 9999,
-        )
-    )
+    ready_for_review.sort(key=_prefc_strength_sort_key)
+
+    strongest_candidates = [
+        row
+        for row in ready_for_review
+        if bool(row.get("prefcLiveQuality")) and str(row.get("debtConfidence") or "").upper() == "FULL"
+    ]
+    weak_live_review = [
+        row
+        for row in blocked
+        if bool(row.get("vaultLive")) and not bool(row.get("prefcLiveQuality"))
+    ]
 
     return {
         "readyCount": len(ready_for_review),
         "blockedCount": len(blocked),
         "readyForReview": ready_for_review[:limit],
         "blocked": blocked[:limit],
+        "strongestCandidates": strongest_candidates[:limit],
+        "weakLiveReview": weak_live_review[:limit],
         "blockerCounts": [
             {"label": label, "count": count}
             for label, count in sorted(blocker_counts.items(), key=lambda item: (-item[1], item[0]))

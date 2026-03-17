@@ -133,6 +133,20 @@ def latest_attom_snapshot(cur: sqlite3.Cursor, lead_key: str) -> dict[str, objec
     }
 
 
+def latest_foreclosure_recorded_at(cur: sqlite3.Cursor, lead_key: str) -> str | None:
+    row = cur.execute(
+        """
+        SELECT recorded_at
+        FROM foreclosure_events
+        WHERE lead_key = ? AND recorded_at IS NOT NULL
+        ORDER BY COALESCE(event_at, recorded_at) DESC, event_key DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
 def derive_status(existing_row: dict, dts_days) -> str:
     if existing_row.get("status") == "claimed":
         return "claimed"
@@ -190,6 +204,8 @@ def main() -> None:
             dts_days,
             distress_type,
             sale_status,
+            current_sale_date,
+            original_sale_date,
             falco_score_internal,
             equity_band
         FROM leads
@@ -223,6 +239,8 @@ def main() -> None:
         dts_days,
         distress_type,
         sale_status,
+        current_sale_date,
+        original_sale_date,
         falco_score,
         equity_band,
     ) in rows:
@@ -233,6 +251,7 @@ def main() -> None:
 
         contact_ready = latest_contact_ready(cur, lead_key) == "1"
         attom = latest_attom_snapshot(cur, lead_key)
+        distress_recorded_at = latest_foreclosure_recorded_at(cur, lead_key)
         display_distress_type = "Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "")
         title = masked_title(county or "", display_distress_type or distress_type or "")
         slug = f"{slugify(title)}-{lead_key[:8]}"
@@ -257,6 +276,7 @@ def main() -> None:
                 "owner_name": latest_prov_text(cur, lead_key, "owner_name"),
                 "owner_mail": latest_prov_text(cur, lead_key, "owner_mail"),
                 "last_sale_date": latest_prov_text(cur, lead_key, "last_sale_date"),
+                "mortgage_date": latest_prov_text(cur, lead_key, "mortgage_date"),
                 "mortgage_lender": latest_prov_text(cur, lead_key, "mortgage_lender"),
                 "mortgage_amount": latest_prov_num(cur, lead_key, "mortgage_amount"),
                 "year_built": latest_prov_num(cur, lead_key, "year_built"),
@@ -270,6 +290,8 @@ def main() -> None:
             }
         )
         publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        if sale_status == "pre_foreclosure":
+            publish_ready = bool(quality.get("prefc_live_quality"))
         if not publish_ready and not base:
             continue
         enriched_fields = quality.get("enriched_fields", {})
@@ -321,11 +343,19 @@ def main() -> None:
             "auctionReadiness": published_readiness or "",
             "equityBand": equity_band or "",
             "dtsDays": int(dts_days) if dts_days is not None else None,
+            "currentSaleDate": current_sale_date or "",
+            "originalSaleDate": original_sale_date or "",
+            "distressRecordedAt": distress_recorded_at or "",
             "contactReady": contact_ready,
             "propertyIdentifier": enriched_fields.get("property_identifier"),
             "ownerName": enriched_fields.get("owner_name"),
             "ownerMail": enriched_fields.get("owner_mail"),
+            "ownerPhonePrimary": enriched_fields.get("owner_phone_primary"),
+            "ownerPhoneSecondary": enriched_fields.get("owner_phone_secondary"),
+            "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
+            "noticePhone": enriched_fields.get("notice_phone"),
             "lastSaleDate": enriched_fields.get("last_sale_date"),
+            "mortgageDate": enriched_fields.get("mortgage_date"),
             "mortgageLender": enriched_fields.get("mortgage_lender"),
             "mortgageAmount": enriched_fields.get("mortgage_amount"),
             "yearBuilt": enriched_fields.get("year_built"),
@@ -336,12 +366,16 @@ def main() -> None:
             "controlParty": quality["execution_reality"]["control_party"],
             "executionPosture": quality["execution_reality"]["execution_posture"],
             "workabilityBand": quality["execution_reality"]["workability_band"],
+            "debtConfidence": quality.get("debt_confidence"),
+            "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
+            "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
             "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
             "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
             "suggestedLaneReasons": quality["lane_suggestion"]["reasons"],
             "topTierReady": bool(quality["top_tier_ready"]),
             "vaultPublishReady": publish_ready,
             "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
+            "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
             "saleStatus": sale_status or "",
             "dataNotes": ((quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"]) + quality["execution_notes"])[:4],
         }

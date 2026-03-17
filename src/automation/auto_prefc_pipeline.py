@@ -311,6 +311,10 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
             continue
         if not bool(payload.get("preForeclosureReviewReady")):
             continue
+        if not bool(payload.get("prefcLiveQuality")):
+            continue
+        if str(payload.get("debtConfidence") or "").upper() != "FULL":
+            continue
         if str(payload.get("suggestedLaneConfidence") or "").upper() != "HIGH":
             continue
         if str(payload.get("contactPathQuality") or "").upper() not in {"GOOD", "STRONG"}:

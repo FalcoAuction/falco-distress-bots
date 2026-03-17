@@ -228,6 +228,22 @@ def _prefc_debt_proxy_ready(enriched: Dict[str, Any]) -> bool:
     )
 
 
+def _debt_confidence(enriched: Dict[str, Any]) -> str:
+    has_lender = _present(enriched.get("mortgage_lender"))
+    has_amount = _present(enriched.get("mortgage_amount"))
+    has_transfer_support = _present(enriched.get("last_sale_date")) or _present(enriched.get("mortgage_date"))
+
+    if has_lender and has_amount and has_transfer_support:
+        return "FULL"
+    if has_lender and has_amount:
+        return "PARTIAL"
+    if _prefc_debt_proxy_ready(enriched):
+        return "PROXY"
+    if has_lender or has_amount:
+        return "THIN"
+    return "NONE"
+
+
 def _int_or_none(value: Any) -> Optional[int]:
     try:
         if value is None or value == "":
@@ -613,6 +629,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     ]
     execution_reality = _derive_execution_reality(enriched)
     lane_suggestion = _derive_lane_suggestion(enriched, execution_reality)
+    debt_confidence = _debt_confidence(enriched)
+    equity_is_strong_enough = equity_band in {"MED", "HIGH"}
 
     total_checks = (
         len(_PACKET_CRITICAL_FIELDS)
@@ -663,6 +681,8 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         is_pre_foreclosure
         and len(pre_foreclosure_blockers) == 0
         and prefc_county_is_active(enriched.get("county"))
+        and debt_confidence == "FULL"
+        and equity_is_strong_enough
         and execution_reality["owner_contact_available"]
         and execution_reality["contact_path_quality"] in {"STRONG", "GOOD"}
         and execution_reality["control_party"] in {"OWNER", "MIXED"}
@@ -674,6 +694,28 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
         and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "YELLOW", "PARTIAL"}
     )
+    weak_live_prefc_reasons: List[str] = []
+    if is_pre_foreclosure:
+        if debt_confidence != "FULL":
+            weak_live_prefc_reasons.append("Debt confidence is below full")
+        if not equity_is_strong_enough:
+            weak_live_prefc_reasons.append("Equity band is too weak for live pre-foreclosure")
+        if execution_reality["contact_path_quality"] not in {"STRONG", "GOOD"}:
+            weak_live_prefc_reasons.append("Contact path is not strong enough")
+        if execution_reality["owner_agency"] not in {"HIGH", "MEDIUM"}:
+            weak_live_prefc_reasons.append("Owner agency remains too limited")
+        if execution_reality["intervention_window"] not in {"WIDE", "MODERATE"}:
+            weak_live_prefc_reasons.append("Intervention window is too compressed")
+        if execution_reality["lender_control_intensity"] != "LOW":
+            weak_live_prefc_reasons.append("Lender control is too strong")
+        if execution_reality["influenceability"] != "HIGH":
+            weak_live_prefc_reasons.append("Influenceability is not high enough")
+        if execution_reality["execution_posture"] not in {"OWNER ACTIONABLE", "MIXED / OPERATOR REVIEW"}:
+            weak_live_prefc_reasons.append("Execution posture is not strong enough")
+        if execution_reality["workability_band"] not in {"STRONG", "MODERATE"}:
+            weak_live_prefc_reasons.append("Workability is too limited")
+
+    prefc_live_quality = is_pre_foreclosure and len(weak_live_prefc_reasons) == 0
 
     return {
         "enriched_fields": {
@@ -681,6 +723,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
             "owner_name": enriched.get("owner_name"),
             "owner_mail": enriched.get("owner_mail"),
             "last_sale_date": enriched.get("last_sale_date"),
+            "mortgage_date": enriched.get("mortgage_date"),
             "mortgage_lender": enriched.get("mortgage_lender"),
             "mortgage_amount": enriched.get("mortgage_amount"),
             "year_built": enriched.get("year_built"),
@@ -693,7 +736,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "vault_publish_blockers": vault_blockers,
         "pre_foreclosure_review_ready": pre_foreclosure_review_ready,
         "pre_foreclosure_review_blockers": pre_foreclosure_blockers,
+        "debt_confidence": debt_confidence,
         "prefc_debt_proxy_ready": debt_proxy_ready,
+        "prefc_live_quality": prefc_live_quality,
+        "prefc_live_review_reasons": weak_live_prefc_reasons[:5],
         "prefc_county_tier": county_tier,
         "prefc_source_priority": source_priority,
         "execution_blockers": execution_blockers,
