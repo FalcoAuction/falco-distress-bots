@@ -92,6 +92,7 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         "owner_mail",
         "last_sale_date",
         "mortgage_lender",
+        "mortgage_date",
         "property_identifier",
         "owner_phone_primary",
         "owner_phone_secondary",
@@ -133,6 +134,20 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         if row and row[0] is not None:
             out[field_name] = row[0]
     return out
+
+
+def _latest_foreclosure_recorded_at(cur: sqlite3.Cursor, lead_key: str) -> Optional[str]:
+    row = cur.execute(
+        """
+        SELECT recorded_at
+        FROM foreclosure_events
+        WHERE lead_key=? AND recorded_at IS NOT NULL
+        ORDER BY COALESCE(event_at, recorded_at) DESC, event_key DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
 
 
 # Distress types where a foreclosure contact is expected and required for outreach
@@ -328,6 +343,7 @@ _LEAD_COLS = """
           l.distress_type,
           l.sale_status,
           l.current_sale_date,
+          l.original_sale_date,
           l.falco_score_internal,
           l.auction_readiness,
           l.equity_band,
@@ -518,6 +534,11 @@ def run() -> Dict[str, int]:
         for _k, _v in _hydrate_fallback_fields(cur, lead_key).items():
             if _v is not None:
                 fields[_k] = _v
+        if fields.get("current_sale_date") and not fields.get("sale_date_iso"):
+            fields["sale_date_iso"] = fields.get("current_sale_date")
+        if fields.get("current_sale_date") and not fields.get("sale_date"):
+            fields["sale_date"] = fields.get("current_sale_date")
+        fields["distress_recorded_at"] = _latest_foreclosure_recorded_at(cur, lead_key)
 
         try:
             fields = apply_convertibility_gate(fields)

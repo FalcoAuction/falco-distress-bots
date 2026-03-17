@@ -68,6 +68,7 @@ _BATCHDATA_TARGET_FIELDS = frozenset({
     "last_sale_date",
     "mortgage_lender",
     "mortgage_amount",
+    "mortgage_date",
     "property_identifier",
     "year_built",
     "building_area_sqft",

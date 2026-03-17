@@ -2225,8 +2225,8 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
         "owner_mail":       _val(fields.get("owner_mail"), None),
         "last_sale_date":   _val(fields.get("last_sale_date"), None),
         "mortgage_lender":  _val(fields.get("mortgage_lender"), None),
-        "mortgage_amount":  None,
-        "mortgage_date":    None,
+        "mortgage_amount":  _fmt_cur(fields.get("mortgage_amount")) if fields.get("mortgage_amount") is not None else None,
+        "mortgage_date":    _val(fields.get("mortgage_date"), None),
     }
     raw_json = fields.get("attom_raw_json")
     if not raw_json:
@@ -2316,21 +2316,26 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
 def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
     """Extract lien skeleton from raw_merged mortgage blob + AVM low."""
     out: Dict[str, Any] = {
-        "first_lender":    None,
+        "first_lender":    _val(fields.get("mortgage_lender"), None),
         "first_amount":    None,   # float or None
         "second_amount":   None,   # float or None
         "total_amount":    None,   # float or None
         "equity_proxy_low": None,  # float or None
     }
+    if fields.get("mortgage_amount") is not None:
+        try:
+            out["first_amount"] = float(fields.get("mortgage_amount"))
+        except (TypeError, ValueError):
+            pass
     raw_json = fields.get("attom_raw_json")
-    if not raw_json:
-        return out
-    try:
-        blob = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
-        if not isinstance(blob, dict):
-            return out
-    except Exception:
-        return out
+    blob: Dict[str, Any] = {}
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+            if isinstance(parsed, dict):
+                blob = parsed
+        except Exception:
+            blob = {}
 
     mort_blob = blob.get("mortgage")
     if isinstance(mort_blob, dict):

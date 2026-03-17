@@ -11,6 +11,7 @@ import requests
 
 from .contact_enricher import enrich_contact_data
 from ..packaging.data_quality import assess_packet_data
+from ..automation.prefc_policy import prefc_county_priority
 from ..settings import is_allowed_county, within_target_counties
 from ..storage import sqlite_store as _store
 
@@ -23,6 +24,7 @@ _TARGET_FIELDS = (
     "last_sale_date",
     "mortgage_lender",
     "mortgage_amount",
+    "mortgage_date",
     "property_identifier",
     "year_built",
     "building_area_sqft",
@@ -269,9 +271,38 @@ def _coerce_num(value: Any) -> Optional[float]:
         return None
 
 
+def _best_batchdata_mortgage(item: Dict[str, Any]) -> Dict[str, Any]:
+    best: Dict[str, Any] = {}
+    best_sort_key = ""
+
+    history = item.get("mortgageHistory")
+    if not isinstance(history, list):
+        history = []
+
+    for candidate in history:
+        if not isinstance(candidate, dict):
+            continue
+        amount = _coerce_num(candidate.get("loanAmount") or candidate.get("amount"))
+        lender = str(candidate.get("lenderName") or "").strip()
+        if amount is None and not lender:
+            continue
+        sort_key = str(
+            candidate.get("recordingDate")
+            or candidate.get("documentDate")
+            or candidate.get("loanDate")
+            or ""
+        ).strip()
+        if not best or sort_key >= best_sort_key:
+            best = candidate
+            best_sort_key = sort_key
+
+    return best
+
+
 def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = _first_obj(payload)
     fields: Dict[str, Any] = {}
+    best_mortgage = _best_batchdata_mortgage(item)
 
     owner_name = (
         _dig(item, "owner", "name")
@@ -294,6 +325,7 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or _dig(item, "saleHistory", "lastSaleDate")
         or _dig(item, "deed", "recordingDate")
         or _dig(item, "deedHistory", "recordingDate")
+        or _dig(item, "owner", "ownershipStartDate")
     )
     mortgage_lender = (
         _dig(item, "mortgage", "lenderName")
@@ -304,6 +336,7 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or _dig(item, "openLien", "mortgages", 0, "lenderName")
         or _dig(item, "sale", "lastSale", "mortgages", 0, "lenderName")
         or _dig(item, "sale", "lastTransfer", "mortgages", 0, "lenderName")
+        or best_mortgage.get("lenderName")
     )
     mortgage_amount = (
         _dig(item, "mortgage", "amount")
@@ -316,6 +349,16 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or _dig(item, "openLien", "mortgages", 0, "amount")
         or _dig(item, "sale", "lastSale", "mortgages", 0, "loanAmount")
         or _dig(item, "sale", "lastTransfer", "mortgages", 0, "loanAmount")
+        or best_mortgage.get("loanAmount")
+        or best_mortgage.get("amount")
+    )
+    mortgage_date = (
+        _dig(item, "mortgage", "recordingDate")
+        or _dig(item, "mortgage", "date")
+        or _dig(item, "openMortgage", "recordingDate")
+        or best_mortgage.get("recordingDate")
+        or best_mortgage.get("documentDate")
+        or best_mortgage.get("loanDate")
     )
     property_identifier = (
         _dig(item, "parcel", "apn")
@@ -364,6 +407,8 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     mortgage_amount_num = _coerce_num(mortgage_amount)
     if mortgage_amount_num is not None:
         fields["mortgage_amount"] = mortgage_amount_num
+    if _truthy(mortgage_date):
+        fields["mortgage_date"] = _coerce_date(mortgage_date)
     if _truthy(property_identifier):
         fields["property_identifier"] = str(property_identifier).strip()
 
@@ -590,6 +635,16 @@ def run() -> Dict[str, int]:
     }
     if target_lead_keys:
         rows = [row for row in rows if str(row["lead_key"] or "").strip() in target_lead_keys]
+
+    rows = sorted(
+        rows,
+        key=lambda row: (
+            0 if str(row["sale_status"] or "").strip().lower() == "pre_foreclosure" else 1,
+            prefc_county_priority(row["county"]),
+            -float(row["falco_score_internal"] or 0),
+            str(row["lead_key"] or ""),
+        ),
+    )
 
     summary = {
         "requested": 0,
