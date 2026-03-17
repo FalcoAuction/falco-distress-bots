@@ -124,6 +124,19 @@ def _trim_line(text: str, font: str, size: float, max_w: float) -> str:
     return (s + "…") if s else "…"
 
 
+def _timeline_sale_date(fields: Dict[str, Any]) -> Any:
+    return (
+        fields.get("current_sale_date")
+        or fields.get("sale_date_iso")
+        or fields.get("sale_date")
+        or fields.get("original_sale_date")
+    )
+
+
+def _timeline_recorded_date(fields: Dict[str, Any]) -> Any:
+    return fields.get("distress_recorded_at") or fields.get("recorded_at")
+
+
 # ─── PDF document wrapper ─────────────────────────────────────────────────────
 
 def _title_case_if_all_caps(v: Any) -> Optional[str]:
@@ -479,6 +492,7 @@ def _draw_hero(
     doc: _Doc,
     img_path: Optional[str] = None,
     imagery_date: Optional[str] = None,
+    image_source: Optional[str] = None,
 ) -> None:
     c  = doc.c
     bh = 1.8 * inch
@@ -500,10 +514,15 @@ def _draw_hero(
             c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")
         # Two-line caption: source label + combined imagery date + attribution
         date_str = (imagery_date or "").strip()
+        source_key = str(image_source or "street_view").strip().lower()
         meta_line = (f"Imagery date: {date_str} \u2022 " if date_str else "") + "Street View imagery \u00a9 Google"
+        source_line = "Exterior image — Google Street View"
+        if source_key == "satellite_map":
+            meta_line = "Satellite map imagery \u00a9 Google"
+            source_line = "Exterior image — Satellite map"
         c.setFont("Helvetica", 7)
         c.setFillColor(_GRAY)
-        c.drawCentredString(ML + CW / 2, by - 9,  "Exterior image — Google Street View")
+        c.drawCentredString(ML + CW / 2, by - 9, source_line)
         c.drawCentredString(ML + CW / 2, by - 18, meta_line)
     else:
         c.setFillColor(_LGRAY)
@@ -514,7 +533,7 @@ def _draw_hero(
         c.setFillColor(_GRAY)
         c.drawCentredString(ML + CW / 2, by + bh / 2 - 4, "[ Property Image ]")
         c.setFont("Helvetica", 7)
-        c.drawCentredString(ML + CW / 2, by - 9, "No street-level image available")
+        c.drawCentredString(ML + CW / 2, by - 9, "No exterior image available")
 
     doc.y = by - 28
 
@@ -695,8 +714,14 @@ def _sv_exterior_note(img_path: Optional[str], fields: Dict[str, Any]) -> str:
     Derives text only from structured facts (imagery availability, imagery date).
     Never claims roof condition, landscaping, or visual damage.
     """
+    source = str(fields.get("property_image_source") or "street_view").strip().lower()
     if img_path:
         date_str = (fields.get("streetview_imagery_date") or "").strip()
+        if source == "satellite_map":
+            return (
+                "Aerial image available for parcel orientation. "
+                "On-site inspection is still required to confirm exterior condition."
+            )
         if date_str:
             return (
                 f"Exterior review pending — Street View captured {date_str}. "
@@ -707,7 +732,7 @@ def _sv_exterior_note(img_path: Optional[str], fields: Dict[str, Any]) -> str:
             "without field inspection."
         )
     return (
-        "Exterior review pending — no Street View imagery retrieved. "
+        "Exterior review pending — no exterior imagery retrieved. "
         "Physical condition unverified; on-site or assessor inspection recommended."
     )
 
@@ -1613,6 +1638,10 @@ def _execution_reality_rows(fields: Dict[str, Any]) -> Tuple[List[Tuple[str, str
     rows: List[Tuple[str, str]] = [
         ("Contact Path", _val(execution.get("contact_path_quality"), "Unknown")),
         ("Likely Control", _val(execution.get("control_party"), "Unclear")),
+        ("Owner Agency", _val(execution.get("owner_agency"), "Low")),
+        ("Intervention Window", _val(execution.get("intervention_window"), "Compressed")),
+        ("Lender Control", _val(execution.get("lender_control_intensity"), "High")),
+        ("Influenceability", _val(execution.get("influenceability"), "Low")),
         ("Execution Posture", _val(execution.get("execution_posture"), "Needs More Control Clarity")),
         ("Workability", _val(execution.get("workability_band"), "Limited")),
     ]
@@ -1677,8 +1706,9 @@ def _page1_executive(
     # 2) Why This Property Is in Distress
     doc.section("Auction Trigger")
     doc.kv("Distress Type",     _distress_label(fields))
-    doc.kv("Scheduled Sale Date", _val(fields.get("sale_date_iso") or fields.get("sale_date")))
+    doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)))
     doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
+    doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
     _dts_raw = fields.get("dts_days")
     doc.kv("Scheduled Sale In", f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
     doc.kv("Enrichment Status", _val(fields.get("attom_status")))
@@ -2004,7 +2034,7 @@ def _draw_due_diligence_checklist(doc: _Doc, fields: Dict[str, Any], avm_low: An
     lane = _distress_label(fields)
     if lane == "Unknown":
         lane = ""
-    sale = str(fields.get("sale_date_iso") or fields.get("sale_date") or "").strip()
+    sale = str(_timeline_sale_date(fields) or "").strip()
 
     bid_cap_txt = "N/A"
     try:
@@ -2534,7 +2564,12 @@ def _page_property_snapshot(
 
     # ── Exterior image (only when we actually have one) ────────────────────────
     if img_path:
-        _draw_hero(doc, img_path=img_path, imagery_date=fields.get("streetview_imagery_date"))
+        _draw_hero(
+            doc,
+            img_path=img_path,
+            imagery_date=fields.get("streetview_imagery_date"),
+            image_source=fields.get("property_image_source"),
+        )
     doc.gap(4)
 
     # ── Exterior observation note (conservative — derived from structured facts only) ──
@@ -2659,12 +2694,13 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
     doc.page_header("Timing, Value & Underwriting")
 
     doc.section("Sale Timeline")
-    doc.kv("Scheduled Sale Date", _val(fields.get("sale_date_iso") or fields.get("sale_date")), bold_v=True)
+    doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)), bold_v=True)
     doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
     _dts_display = _val(fields.get("dts_days"))
     if _dts_display not in {"â€”", "Unknown"}:
         _dts_display = f"{_dts_display} days"
     doc.kv("Days Until Scheduled Sale", _dts_display)
+    doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
     doc.kv("Sale Location",     _val(fields.get("sale_location")), lw=110)
     doc.kv("Sale Type",         _val(fields.get("sale_type")))
     doc.kv("Enriched At",       _val(fields.get("enriched_at")))
@@ -3169,7 +3205,11 @@ def _page5_scoring_appendix(
     doc.bullet("FALCO scoring and screening")
     doc.bullet("Lead records (address, county, timeline)")
     if img_embedded:
-        doc.bullet("Image Source: Google Street View (static)")
+        image_source = str(fields.get("property_image_source") or "street_view").strip().lower()
+        if image_source == "satellite_map":
+            doc.bullet("Image Source: Google satellite map")
+        else:
+            doc.bullet("Image Source: Google Street View (static)")
 
     doc.gap(8)
 

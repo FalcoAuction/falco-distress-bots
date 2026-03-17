@@ -14,6 +14,7 @@ _LOG = logging.getLogger(__name__)
 
 _META_URL  = "https://maps.googleapis.com/maps/api/streetview/metadata"
 _IMAGE_URL = "https://maps.googleapis.com/maps/api/streetview"
+_STATICMAP_URL = "https://maps.googleapis.com/maps/api/staticmap"
 
 
 # ─── Env helpers ──────────────────────────────────────────────────────────────
@@ -38,6 +39,13 @@ def _build_location(fields: dict) -> str:
     if isinstance(detail, dict):
         for key in ("address", "oneLine", "singleLineAddress"):
             v = detail.get(key)
+            if isinstance(v, dict):
+                for nested_key in ("oneLine", "line1", "singleLineAddress"):
+                    nested_val = v.get(nested_key)
+                    if nested_val and str(nested_val).strip():
+                        if nested_key == "line1" and v.get("line2"):
+                            return f"{str(nested_val).strip()}, {str(v.get('line2')).strip()}"
+                        return str(nested_val).strip()
             if v and str(v).strip():
                 return str(v).strip()
 
@@ -119,6 +127,7 @@ def get_streetview_image_path(fields: dict, run_budget: dict) -> Optional[str]:
                 fields["streetview_status"]       = meta.get("status", "unknown")
                 fields["streetview_imagery_date"]  = meta.get("date")
                 fields["streetview_pano_id"]       = meta.get("pano_id")
+                fields["property_image_source"]    = meta.get("source", "street_view")
                 print(f"[SV] cache hit: {cache_path} (date={meta.get('date')})")
             except Exception as exc:
                 _LOG.warning("[SV] could not read sidecar for lead_key=%s: %s", lead_key, exc)
@@ -159,7 +168,46 @@ def get_streetview_image_path(fields: dict, run_budget: dict) -> Optional[str]:
         print(f"[SV] meta status={status} date={img_date} pano={pano_id}")
 
         if status != "OK":
-            return None
+            fallback_enabled = _env("FALCO_STATICMAP_FALLBACK_ENABLE", "1") == "1"
+            if not fallback_enabled:
+                return None
+
+            map_params: dict = {
+                "size": "640x360",
+                "maptype": "satellite",
+                "center": location,
+                "zoom": _env("FALCO_STATICMAP_ZOOM", "18") or "18",
+                "key": api_key,
+                "markers": f"size:small|color:{_env('FALCO_STATICMAP_MARKER_COLOR', '0x13c296')}|{location}",
+            }
+            map_r = _req.get(_STATICMAP_URL, params=map_params, timeout=timeout)
+            map_r.raise_for_status()
+            if "image" not in map_r.headers.get("content-type", ""):
+                return None
+            with open(cache_path, "wb") as fh:
+                fh.write(map_r.content)
+            if os.path.getsize(cache_path) <= 5_120:
+                try:
+                    os.remove(cache_path)
+                except OSError:
+                    pass
+                return None
+
+            run_budget["used"] += 1
+            fields["streetview_status"] = status or "unknown"
+            fields["streetview_imagery_date"] = None
+            fields["streetview_pano_id"] = None
+            fields["property_image_source"] = "satellite_map"
+            try:
+                with open(sidecar_path, "w") as fh:
+                    json.dump(
+                        {"status": status, "date": None, "pano_id": None, "source": "satellite_map"},
+                        fh,
+                    )
+            except Exception as exc:
+                _LOG.warning("[SV] could not write static map sidecar: %s", exc)
+            print(f"[SV] fallback static map saved: {cache_path}")
+            return cache_path
 
         # ── 8. Budget re-check before image fetch (race safety) ───────────────
         if run_budget.get("used", 0) >= run_budget.get("max", 0):
@@ -220,6 +268,7 @@ def get_streetview_image_path(fields: dict, run_budget: dict) -> Optional[str]:
         fields["streetview_status"]      = status or "unknown"
         fields["streetview_imagery_date"] = img_date
         fields["streetview_pano_id"]      = pano_id
+        fields["property_image_source"]   = "street_view"
 
         return cache_path
 
