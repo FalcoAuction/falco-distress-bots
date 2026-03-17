@@ -7,6 +7,7 @@ from typing import Any
 
 from ..enrichment.attom_enricher import run as run_attom_enrichment
 from ..enrichment.batchdata_fallback import run as run_batchdata_fallback
+from ..enrichment.debt_reconstruction import run as run_debt_reconstruction
 from ..packaging.data_quality import assess_packet_data
 from ..packaging.packager import run as run_packager
 from ..scoring.scorer import score_leads_by_keys
@@ -253,6 +254,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
             "FALCO_ATTOM_MAX_ENRICH",
             "FALCO_MAX_ATTOM_CALLS_PER_RUN",
             "FALCO_BATCHDATA_TARGET_LEAD_KEYS",
+            "FALCO_DEBT_RECON_TARGET_LEAD_KEYS",
         )
     }
 
@@ -271,6 +273,8 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
             batchdata_result = run_batchdata_fallback()
 
         if all_keys:
+            os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(all_keys)
+            run_debt_reconstruction()
             score_leads_by_keys(all_keys, run_id=f"{run_id}_auto_prefc")
             for lead_key in all_keys:
                 os.environ["FALCO_REPACK_LEAD_KEY"] = lead_key

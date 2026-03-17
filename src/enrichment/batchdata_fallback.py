@@ -330,6 +330,7 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = _first_obj(payload)
     fields: Dict[str, Any] = {}
     best_mortgage = _best_batchdata_mortgage(item)
+    foreclosure = item.get("foreclosure") if isinstance(item.get("foreclosure"), dict) else {}
 
     owner_name = (
         _dig(item, "owner", "name")
@@ -364,6 +365,7 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or _dig(item, "sale", "lastSale", "mortgages", 0, "lenderName")
         or _dig(item, "sale", "lastTransfer", "mortgages", 0, "lenderName")
         or best_mortgage.get("lenderName")
+        or foreclosure.get("currentLenderName")
     )
     mortgage_amount = (
         _dig(item, "mortgage", "amount")
@@ -386,6 +388,8 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         or best_mortgage.get("recordingDate")
         or best_mortgage.get("documentDate")
         or best_mortgage.get("loanDate")
+        or foreclosure.get("recordingDate")
+        or foreclosure.get("filingDate")
     )
     property_identifier = (
         _dig(item, "parcel", "apn")
@@ -438,6 +442,12 @@ def _extract_batchdata_fields(payload: Dict[str, Any]) -> Dict[str, Any]:
         fields["mortgage_date"] = _coerce_date(mortgage_date)
     if _truthy(property_identifier):
         fields["property_identifier"] = str(property_identifier).strip()
+    if _truthy(foreclosure.get("bookNumber")):
+        fields["mortgage_record_book"] = str(foreclosure.get("bookNumber")).strip()
+    if _truthy(foreclosure.get("pageNumber")):
+        fields["mortgage_record_page"] = str(foreclosure.get("pageNumber")).strip()
+    if _truthy(foreclosure.get("documentNumber")):
+        fields["mortgage_record_instrument"] = str(foreclosure.get("documentNumber")).strip()
 
     for key, value in (
         ("year_built", year_built),
