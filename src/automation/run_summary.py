@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
+from ..automation.prefc_policy import prefc_county_is_active, prefc_county_priority
 from ..packaging.data_quality import assess_packet_data
 from ..settings import get_dts_window
 
@@ -117,6 +118,27 @@ def _json_ready(value: Any) -> Any:
     return value
 
 
+def _load_live_vault_lead_keys() -> set[str]:
+    site_file = Path(__file__).resolve().parents[3] / "falco-site" / "data" / "vault_listings.ndjson"
+    if not site_file.exists():
+        return set()
+    live: set[str] = set()
+    for line in site_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict) or row.get("status") != "active":
+            continue
+        lead_key = str(row.get("sourceLeadKey") or "").strip()
+        if lead_key:
+            live.add(lead_key)
+    return live
+
+
 def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> Dict[str, Any]:
     dts_min, dts_max = get_dts_window("RUN_SUMMARY")
     attom_map = _latest_attom_map(con)
@@ -219,6 +241,161 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
     }
 
 
+def _build_county_hit_rate_snapshot(con: sqlite3.Connection) -> Dict[str, Any]:
+    live_lead_keys = _load_live_vault_lead_keys()
+    packeted = {
+        str(row[0] or "")
+        for row in con.execute("SELECT DISTINCT lead_key FROM packets").fetchall()
+        if str(row[0] or "").strip()
+    }
+    rows = con.execute(
+        """
+        SELECT
+          l.lead_key,
+          l.county,
+          l.distress_type,
+          l.sale_status,
+          l.auction_readiness,
+          l.equity_band,
+          l.falco_score_internal,
+          l.current_sale_date,
+          l.original_sale_date
+        FROM leads l
+        WHERE l.county IS NOT NULL
+          AND TRIM(l.county) != ''
+        """
+    ).fetchall()
+
+    county_rollup: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        county = str(row["county"] or "").strip()
+        if not county:
+            continue
+        bucket = county_rollup.setdefault(
+            county,
+            {
+                "county": county,
+                "activeLane": prefc_county_is_active(county),
+                "tracked": 0,
+                "preForeclosureTracked": 0,
+                "packeted": 0,
+                "live": 0,
+                "strongLivePrefc": 0,
+                "sourceMix": Counter(),
+            },
+        )
+        lead_key = str(row["lead_key"] or "").strip()
+        bucket["tracked"] += 1
+        bucket["sourceMix"][str(row["distress_type"] or "UNKNOWN")] += 1
+        if str(row["sale_status"] or "").strip().lower() == "pre_foreclosure":
+            bucket["preForeclosureTracked"] += 1
+        if lead_key in packeted:
+            bucket["packeted"] += 1
+        if lead_key in live_lead_keys:
+            bucket["live"] += 1
+            if (
+                str(row["sale_status"] or "").strip().lower() == "pre_foreclosure"
+                and str(row["equity_band"] or "").upper() in {"MED", "HIGH"}
+            ):
+                bucket["strongLivePrefc"] += 1
+
+    ranked = []
+    for bucket in county_rollup.values():
+        tracked = bucket["tracked"] or 1
+        packeted_count = bucket["packeted"]
+        live_count = bucket["live"]
+        bucket["packetRate"] = round((packeted_count / tracked) * 100, 1)
+        bucket["liveRate"] = round((live_count / tracked) * 100, 1)
+        bucket["sourceMix"] = dict(bucket["sourceMix"])
+        ranked.append(bucket)
+
+    ranked.sort(
+        key=lambda row: (
+            prefc_county_priority(row["county"]),
+            -row["strongLivePrefc"],
+            -row["live"],
+            -row["packeted"],
+            row["county"],
+        )
+    )
+    return {
+        "generated_at": _utc_now(),
+        "counties": ranked[:12],
+        "focusCounties": [row for row in ranked if row["activeLane"]][:6],
+    }
+
+
+def _build_special_situations_snapshot(con: sqlite3.Connection) -> Dict[str, Any]:
+    rows = con.execute(
+        """
+        WITH source_rollup AS (
+          SELECT
+            lead_key,
+            GROUP_CONCAT(DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))) AS source_mix
+          FROM ingest_events
+          GROUP BY lead_key
+        )
+        SELECT
+          l.lead_key,
+          l.address,
+          l.county,
+          l.distress_type,
+          l.sale_status,
+          l.equity_band,
+          l.falco_score_internal,
+          l.current_sale_date,
+          l.original_sale_date,
+          COALESCE(sr.source_mix, '') AS source_mix
+        FROM leads l
+        LEFT JOIN source_rollup sr ON sr.lead_key = l.lead_key
+        WHERE l.sale_status = 'pre_foreclosure'
+           OR COALESCE(sr.source_mix, '') LIKE '%API_TAX%'
+           OR COALESCE(sr.source_mix, '') LIKE '%OFFICIAL_TAX_SALE%'
+           OR COALESCE(sr.source_mix, '') LIKE '%TAXPAGES%'
+        ORDER BY COALESCE(l.falco_score_internal, 0) DESC, COALESCE(l.last_seen_at, l.first_seen_at) DESC
+        LIMIT 80
+        """
+    ).fetchall()
+
+    candidates: list[Dict[str, Any]] = []
+    for row in rows:
+        source_mix = [part for part in str(row["source_mix"] or "").split(",") if part]
+        overlap_signals: list[str] = []
+        if "SUBSTITUTION_OF_TRUSTEE" in source_mix and "LIS_PENDENS" in source_mix:
+            overlap_signals.append("stacked_notice_path")
+        if any(source in source_mix for source in ("API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES")):
+            overlap_signals.append("tax_overlap")
+        if row["current_sale_date"] and row["original_sale_date"] and row["current_sale_date"] != row["original_sale_date"]:
+            overlap_signals.append("reopened_timing")
+        if not overlap_signals:
+            continue
+        candidates.append(
+            {
+                "lead_key": row["lead_key"],
+                "address": row["address"],
+                "county": row["county"],
+                "sale_status": row["sale_status"],
+                "equity_band": row["equity_band"],
+                "falco_score_internal": row["falco_score_internal"],
+                "overlap_signals": overlap_signals,
+                "source_mix": source_mix,
+            }
+        )
+
+    candidates.sort(
+        key=lambda row: (
+            prefc_county_priority(row.get("county")),
+            0 if "tax_overlap" in row["overlap_signals"] else 1,
+            -float(row.get("falco_score_internal") or 0),
+        )
+    )
+    return {
+        "generated_at": _utc_now(),
+        "candidate_count": len(candidates),
+        "candidates": candidates[:12],
+    }
+
+
 def _build_ingest_snapshot(con: sqlite3.Connection, run_id: str) -> Dict[str, Any]:
     by_source = con.execute(
         """
@@ -286,6 +463,8 @@ def write_run_summary(
             "ingest": _build_ingest_snapshot(con, run_id),
             "packets": _build_packet_snapshot(con, run_id),
             "quality": _build_packet_quality_snapshot(con),
+            "county_hit_rates": _build_county_hit_rate_snapshot(con),
+            "special_situations": _build_special_situations_snapshot(con),
             "publish": publish_result or {"attempted": False},
         }
     finally:

@@ -5,6 +5,7 @@
 import os
 import re
 import sqlite3
+from datetime import datetime
 from typing import Dict
 
 _TAG_RX = re.compile(r"<[^>]+>")
@@ -13,6 +14,20 @@ _FOR_BENEFIT_OF_RX = re.compile(r"for\s+the\s+benefit\s+of\s+([^;.\n\r]+)", re.I
 _LAST_ASSIGNED_TO_RX = re.compile(r"last\s+assigned\s+to\s+([^;\n\r]+?)(?:\(|,?\s+c/o|\s+of\s+record|\s*,\s*the\s+entire|\s+the\s+entire)", re.IGNORECASE)
 _HOLDER_RX = re.compile(r"owner\s+and\s+holder\s+of\s+the\s+note", re.IGNORECASE)
 _PRINCIPAL_AMOUNT_RX = re.compile(r"principal\s+sum\s+of\s+\$?\s*([0-9][0-9,]*(?:\.\d{2})?)", re.IGNORECASE)
+_DEED_DATE_RX = re.compile(r"(?:deed of trust|security instrument)[^.;\n\r]{0,60}?\bdated\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})", re.IGNORECASE)
+_RECORDED_DATE_RX = re.compile(r"\brecorded\s+(?:on\s+)?([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})", re.IGNORECASE)
+
+
+def _coerce_notice_date(value: str | None) -> str | None:
+    raw = str(value or "").strip(" ,.;")
+    if not raw:
+        return None
+    for fmt in ("%B %d, %Y", "%b %d, %Y", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except Exception:
+            continue
+    return None
 
 
 def _clean_notice_text(raw_html: str) -> str:
@@ -46,14 +61,23 @@ def _parse_notice_fields(raw_html: str) -> Dict[str, object]:
     text = _clean_notice_text(raw_html)
     out: Dict[str, object] = {}
 
+    debt_chain: list[str] = []
     lender_val = None
     for rx in (_LAST_ASSIGNED_TO_RX, _FOR_BENEFIT_OF_RX, _NOTE_PAYABLE_TO_RX):
         match = rx.search(text)
         if match:
             candidate = _clean_party_name(match.group(1))
             if candidate:
+                debt_chain.append(candidate)
                 lender_val = candidate
                 break
+
+    for rx in (_NOTE_PAYABLE_TO_RX, _FOR_BENEFIT_OF_RX, _LAST_ASSIGNED_TO_RX):
+        match = rx.search(text)
+        if match:
+            candidate = _clean_party_name(match.group(1))
+            if candidate and candidate not in debt_chain:
+                debt_chain.append(candidate)
 
     if lender_val:
         out["mortgage_lender"] = lender_val
@@ -63,6 +87,15 @@ def _parse_notice_fields(raw_html: str) -> Dict[str, object]:
         amount = _parse_money_amount(amount_match.group(1))
         if amount is not None and amount > 0:
             out["mortgage_amount"] = amount
+
+    mortgage_date_match = _RECORDED_DATE_RX.search(text) or _DEED_DATE_RX.search(text)
+    if mortgage_date_match:
+        mortgage_date = _coerce_notice_date(mortgage_date_match.group(1))
+        if mortgage_date:
+            out["mortgage_date"] = mortgage_date
+
+    if debt_chain:
+        out["mortgage_chain_notice"] = " -> ".join(debt_chain[:4])
 
     if _HOLDER_RX.search(text):
         out["holder_reference_present"] = True
@@ -184,6 +217,62 @@ def run() -> Dict[str, int]:
                                     float(parsed["mortgage_amount"]),
                                     "USD",
                                     0.7,
+                                    "SUBSTITUTION_OF_TRUSTEE",
+                                    source_url,
+                                    artifact[0],
+                                    artifact[2],
+                                    os.environ.get("FALCO_RUN_ID"),
+                                    created_at,
+                                ),
+                            )
+                            summary["notice_fields_written"] += 1
+
+                        if parsed.get("mortgage_date"):
+                            con.execute(
+                                """
+                                INSERT INTO lead_field_provenance
+                                    (lead_key, field_name, value_type,
+                                     field_value_text,
+                                     units, confidence,
+                                     source_channel, source_url, artifact_id,
+                                     retrieved_at, run_id, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    lead_key,
+                                    "mortgage_date",
+                                    "raw",
+                                    str(parsed["mortgage_date"]),
+                                    None,
+                                    0.68,
+                                    "SUBSTITUTION_OF_TRUSTEE",
+                                    source_url,
+                                    artifact[0],
+                                    artifact[2],
+                                    os.environ.get("FALCO_RUN_ID"),
+                                    created_at,
+                                ),
+                            )
+                            summary["notice_fields_written"] += 1
+
+                        if parsed.get("mortgage_chain_notice"):
+                            con.execute(
+                                """
+                                INSERT INTO lead_field_provenance
+                                    (lead_key, field_name, value_type,
+                                     field_value_text,
+                                     units, confidence,
+                                     source_channel, source_url, artifact_id,
+                                     retrieved_at, run_id, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                """,
+                                (
+                                    lead_key,
+                                    "mortgage_chain_notice",
+                                    "raw",
+                                    str(parsed["mortgage_chain_notice"]),
+                                    None,
+                                    0.6,
                                     "SUBSTITUTION_OF_TRUSTEE",
                                     source_url,
                                     artifact[0],

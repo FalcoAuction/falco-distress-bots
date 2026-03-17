@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone, date
 from typing import Optional
 
+from ..automation.prefc_policy import prefc_county_is_active, prefc_source_priority
 from ..packaging.data_quality import assess_packet_data
 
 DB_PATH_DEFAULT = os.path.join("data", "falco.db")
@@ -13,6 +14,18 @@ def utc_now_iso() -> str:
 
 def db_path() -> str:
     return os.environ.get("FALCO_DB_PATH", DB_PATH_DEFAULT)
+
+
+def _source_set(conn: sqlite3.Connection, lead_key: str) -> set[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, ''))
+        FROM ingest_events
+        WHERE lead_key=?
+        """,
+        (lead_key,),
+    ).fetchall()
+    return {str(row[0] or "").strip().upper() for row in rows if str(row[0] or "").strip()}
 
 def score_dts(dts: int) -> int:
     if 21 <= dts <= 45:
@@ -71,6 +84,7 @@ def _extract_owner_mortgage(raw_json: Optional[str]) -> dict:
         "last_sale_date": None,
         "mortgage_lender": None,
         "mortgage_amount": None,
+        "mortgage_date": None,
     }
 
     owner_blob = blob.get("owner")
@@ -108,11 +122,24 @@ def _extract_owner_mortgage(raw_json: Optional[str]) -> dict:
                 or mortgage.get("originationAmount")
                 or None
             )
+            out["mortgage_date"] = (
+                mortgage.get("recordingDate")
+                or mortgage.get("documentDate")
+                or mortgage.get("loanDate")
+                or None
+            )
         if not out["mortgage_amount"]:
             out["mortgage_amount"] = (
                 mortgage_blob.get("amount")
                 or mortgage_blob.get("loanAmount")
                 or mortgage_blob.get("originationAmount")
+                or None
+            )
+        if not out["mortgage_date"]:
+            out["mortgage_date"] = (
+                mortgage_blob.get("recordingDate")
+                or mortgage_blob.get("documentDate")
+                or mortgage_blob.get("loanDate")
                 or None
             )
 
@@ -158,6 +185,8 @@ def _load_rows_for_run(conn: sqlite3.Connection, run_id: str):
     return conn.execute("""
         SELECT l.lead_key, l.address, l.county, l.distress_type, l.sale_status,
                COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
+               l.current_sale_date,
+               l.original_sale_date,
                ae.avm_low, ae.avm_high, ae.attom_raw_json,
                cp.field_value_text AS contact_ready
         FROM leads l
@@ -201,6 +230,8 @@ def _load_rows_for_lead_keys(conn: sqlite3.Connection, lead_keys: list[str]):
     return conn.execute(f"""
         SELECT l.lead_key, l.address, l.county, l.distress_type, l.sale_status,
                COALESCE(l.current_sale_date, ie.sale_date) AS sale_date,
+               l.current_sale_date,
+               l.original_sale_date,
                ae.avm_low, ae.avm_high, ae.attom_raw_json,
                cp.field_value_text AS contact_ready
         FROM leads l
@@ -254,6 +285,9 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             prov_value = _latest_prov_text(conn, r["lead_key"], key)
             if prov_value:
                 owner_mortgage[key] = prov_value
+        prov_mortgage_date = _latest_prov_text(conn, r["lead_key"], "mortgage_date")
+        if prov_mortgage_date:
+            owner_mortgage["mortgage_date"] = prov_mortgage_date
         prov_amount = _latest_prov_num(conn, r["lead_key"], "mortgage_amount")
         if prov_amount is not None:
             owner_mortgage["mortgage_amount"] = prov_amount
@@ -287,6 +321,7 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             "owner_name": owner_mortgage.get("owner_name"),
             "owner_mail": owner_mortgage.get("owner_mail"),
             "last_sale_date": owner_mortgage.get("last_sale_date"),
+            "mortgage_date": owner_mortgage.get("mortgage_date"),
             "mortgage_lender": owner_mortgage.get("mortgage_lender"),
             "mortgage_amount": owner_mortgage.get("mortgage_amount"),
             "year_built": property_detail.get("year_built"),
@@ -316,9 +351,10 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             owner_mortgage.get("owner_name") or owner_mortgage.get("owner_mail")
         ) else 0
         debt_history_score = 18 if (
-            owner_mortgage.get("mortgage_lender") and owner_mortgage.get("last_sale_date")
+            owner_mortgage.get("mortgage_lender")
+            and (owner_mortgage.get("last_sale_date") or owner_mortgage.get("mortgage_date"))
         ) else 9 if (
-            owner_mortgage.get("mortgage_lender") or owner_mortgage.get("last_sale_date")
+            owner_mortgage.get("mortgage_lender") or owner_mortgage.get("last_sale_date") or owner_mortgage.get("mortgage_date")
         ) else 0
         property_depth_score = 10 if (
             property_detail.get("year_built") is not None
@@ -362,6 +398,19 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             else 6 if execution_reality["influenceability"] == "MEDIUM"
             else 0
         )
+        sources = _source_set(conn, r["lead_key"])
+        overlap_bonus = 0
+        if "SUBSTITUTION_OF_TRUSTEE" in sources and "LIS_PENDENS" in sources:
+            overlap_bonus += 5
+        if sources.intersection({"API_TAX", "TAXPAGES", "OFFICIAL_TAX_SALE"}):
+            overlap_bonus += 3
+        if r["current_sale_date"] and r["original_sale_date"] and r["current_sale_date"] != r["original_sale_date"]:
+            overlap_bonus += 3
+        county_source_bonus = 0
+        if str(r["sale_status"] or "").strip().lower() == "pre_foreclosure" and prefc_county_is_active(r["county"]):
+            county_source_bonus += 4
+            county_source_bonus += max(0, 2 - prefc_source_priority(r["distress_type"]))
+        debt_confidence_bonus = 4 if str(quality.get("debt_confidence") or "").upper() == "FULL" else 0
 
         raw_score = (
             dts_score
@@ -377,6 +426,9 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             + owner_agency_score
             + intervention_window_score
             + influenceability_score
+            + county_source_bonus
+            + overlap_bonus
+            + debt_confidence_bonus
             - lender_control_penalty
         )
         total_score = max(0, min(100, raw_score))
@@ -386,14 +438,14 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
         is_pre_foreclosure = str(r["sale_status"] or "").strip().lower() == "pre_foreclosure"
         has_debt_pair = bool(
             owner_mortgage.get("mortgage_lender")
-            and owner_mortgage.get("last_sale_date")
+            and (owner_mortgage.get("last_sale_date") or owner_mortgage.get("mortgage_date"))
             and owner_mortgage.get("mortgage_amount") is not None
         )
         has_debt_proxy = bool(
             is_pre_foreclosure
             and quality.get("prefc_debt_proxy_ready")
             and owner_mortgage.get("mortgage_lender")
-            and owner_mortgage.get("last_sale_date")
+            and (owner_mortgage.get("last_sale_date") or owner_mortgage.get("mortgage_date"))
             and has_owner_pair
             and has_valuation
         )

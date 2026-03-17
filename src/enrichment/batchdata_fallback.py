@@ -11,7 +11,7 @@ import requests
 
 from .contact_enricher import enrich_contact_data
 from ..packaging.data_quality import assess_packet_data
-from ..automation.prefc_policy import prefc_county_priority
+from ..automation.prefc_policy import prefc_county_is_active, prefc_county_priority, prefc_source_priority
 from ..settings import is_allowed_county, within_target_counties
 from ..storage import sqlite_store as _store
 
@@ -178,6 +178,33 @@ def _latest_text_field(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> O
     if not row or row[0] is None:
         return None
     return str(row[0]).strip() or None
+
+
+def _source_set(cur: sqlite3.Cursor, lead_key: str) -> set[str]:
+    rows = cur.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, ''))
+        FROM ingest_events
+        WHERE lead_key=?
+        """,
+        (lead_key,),
+    ).fetchall()
+    return {str(row[0] or "").strip().upper() for row in rows if str(row[0] or "").strip()}
+
+
+def _overlap_signals(cur: sqlite3.Cursor, lead_key: str, row: sqlite3.Row | dict[str, Any]) -> list[str]:
+    sources = _source_set(cur, lead_key)
+    signals: list[str] = []
+
+    if "SUBSTITUTION_OF_TRUSTEE" in sources and "LIS_PENDENS" in sources:
+        signals.append("stacked_notice_path")
+    if sources.intersection({"API_TAX", "TAXPAGES", "OFFICIAL_TAX_SALE"}):
+        signals.append("tax_overlap")
+    current_sale_date = str((row["current_sale_date"] if isinstance(row, sqlite3.Row) else row.get("current_sale_date")) or "").strip()
+    original_sale_date = str((row["original_sale_date"] if isinstance(row, sqlite3.Row) else row.get("original_sale_date")) or "").strip()
+    if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
+        signals.append("reopened_timing")
+    return signals
 
 
 def _hydrate_contact_fields(cur: sqlite3.Cursor, lead_key: str, fields: Dict[str, Any]) -> None:
@@ -598,6 +625,8 @@ def run() -> Dict[str, int]:
           l.state,
           l.distress_type,
           l.sale_status,
+          l.current_sale_date,
+          l.original_sale_date,
           l.falco_score_internal,
           l.auction_readiness,
           l.equity_band,
@@ -641,6 +670,7 @@ def run() -> Dict[str, int]:
         key=lambda row: (
             0 if str(row["sale_status"] or "").strip().lower() == "pre_foreclosure" else 1,
             prefc_county_priority(row["county"]),
+            prefc_source_priority(row["distress_type"]),
             -float(row["falco_score_internal"] or 0),
             str(row["lead_key"] or ""),
         ),
@@ -690,6 +720,7 @@ def run() -> Dict[str, int]:
         fields.update(_latest_prov_map(cur, lead_key))
         _hydrate_contact_fields(cur, lead_key, fields)
         quality = assess_packet_data(fields)
+        overlap_signals = _overlap_signals(cur, lead_key, row)
         targets = quality["batchdata_fallback_targets"]
         execution_reality = quality.get("execution_reality") or {}
         contact_path_quality = str(execution_reality.get("contact_path_quality") or "THIN").upper()
@@ -697,6 +728,9 @@ def run() -> Dict[str, int]:
         owner_agency = str(execution_reality.get("owner_agency") or "LOW").upper()
         intervention_window = str(execution_reality.get("intervention_window") or "COMPRESSED").upper()
         lender_control = str(execution_reality.get("lender_control_intensity") or "HIGH").upper()
+        debt_confidence = str(quality.get("debt_confidence") or "NONE").upper()
+        county_is_active = prefc_county_is_active(county)
+        overlap_count = len(overlap_signals)
 
         needs_contact = "Actionable outreach path missing" in quality["execution_blockers"]
         prefc_needs_contact_upgrade = (
@@ -709,6 +743,25 @@ def run() -> Dict[str, int]:
             and intervention_window != "COMPRESSED"
             and lender_control != "HIGH"
         )
+        prefc_is_worth_it = (
+            is_pre_foreclosure
+            and county_is_active
+            and owner_agency in {"HIGH", "MEDIUM"}
+            and intervention_window in {"WIDE", "MODERATE"}
+            and lender_control != "HIGH"
+            and (debt_confidence in {"FULL", "PARTIAL", "PROXY"} or overlap_count > 0)
+        )
+        if is_pre_foreclosure and not prefc_is_worth_it:
+            summary["skipped_not_worth_it"] += 1
+            continue
+        if (
+            not is_pre_foreclosure
+            and readiness not in {"GREEN", "YELLOW", "PARTIAL"}
+            and score < 75
+            and overlap_count == 0
+        ):
+            summary["skipped_not_worth_it"] += 1
+            continue
         if not targets and not needs_contact and not prefc_needs_contact_upgrade:
             summary["skipped_already_complete"] += 1
             continue

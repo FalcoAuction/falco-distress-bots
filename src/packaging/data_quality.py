@@ -77,6 +77,10 @@ _BATCHDATA_TARGET_FIELDS = frozenset({
 })
 
 
+def _has_transfer_support(enriched: Dict[str, Any]) -> bool:
+    return _present(enriched.get("last_sale_date")) or _present(enriched.get("mortgage_date"))
+
+
 def _present(value: Any) -> bool:
     if value is None:
         return False
@@ -214,14 +218,14 @@ def _prefc_debt_proxy_ready(enriched: Dict[str, Any]) -> bool:
 
     has_lender = _present(enriched.get("mortgage_lender"))
     has_amount = _present(enriched.get("mortgage_amount"))
-    has_last_sale = _present(enriched.get("last_sale_date"))
+    has_transfer_support = _has_transfer_support(enriched)
     has_owner_profile = _present(enriched.get("owner_name")) and _present(enriched.get("owner_mail"))
     has_value = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
 
     return (
         has_lender
         and not has_amount
-        and has_last_sale
+        and has_transfer_support
         and has_owner_profile
         and has_value
         and _has_actionable_outreach(enriched)
@@ -267,7 +271,7 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     debt_context_strict = (
         _present(enriched.get("mortgage_lender"))
         and _present(enriched.get("mortgage_amount"))
-        and _present(enriched.get("last_sale_date"))
+        and _has_transfer_support(enriched)
     )
     value_context = any(_present(enriched.get(key)) for key in _VALUE_FIELDS)
     debt_context_proxy = _prefc_debt_proxy_ready(enriched)
@@ -609,6 +613,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         label for key, label in _PRE_FORECLOSURE_REQUIRED_FIELDS.items() if not _present(enriched.get(key))
     ]
     debt_proxy_ready = _prefc_debt_proxy_ready(enriched)
+    if _has_transfer_support(enriched) and "Last transfer date missing" in pre_foreclosure_blockers:
+        pre_foreclosure_blockers = [
+            blocker for blocker in pre_foreclosure_blockers if blocker != "Last transfer date missing"
+        ]
     if debt_proxy_ready and "Original loan amount missing" in pre_foreclosure_blockers:
         pre_foreclosure_blockers = [
             blocker for blocker in pre_foreclosure_blockers if blocker != "Original loan amount missing"

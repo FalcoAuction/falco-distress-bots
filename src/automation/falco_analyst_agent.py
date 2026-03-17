@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from ..automation.prefc_policy import prefc_county_is_active
 from ..packaging.data_quality import assess_packet_data
 
 
@@ -121,6 +122,33 @@ def _contact_ready_map(con: sqlite3.Connection) -> Dict[str, bool]:
     return out
 
 
+def _source_set(con: sqlite3.Connection, lead_key: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, ''))
+        FROM ingest_events
+        WHERE lead_key = ?
+        """,
+        (lead_key,),
+    ).fetchall()
+    return {str(row[0] or "").strip().upper() for row in rows if str(row[0] or "").strip()}
+
+
+def _overlap_signals(fields: Dict[str, Any], con: sqlite3.Connection) -> List[str]:
+    lead_key = str(fields.get("lead_key") or "").strip()
+    if not lead_key:
+        return []
+    sources = _source_set(con, lead_key)
+    signals: List[str] = []
+    if "SUBSTITUTION_OF_TRUSTEE" in sources and "LIS_PENDENS" in sources:
+        signals.append("stacked_notice_path")
+    if sources.intersection({"API_TAX", "TAXPAGES", "OFFICIAL_TAX_SALE"}):
+        signals.append("tax_overlap")
+    if fields.get("current_sale_date") and fields.get("original_sale_date") and fields.get("current_sale_date") != fields.get("original_sale_date"):
+        signals.append("reopened_timing")
+    return signals
+
+
 def _enriched_fields_for_lead(
     lead: Dict[str, Any],
     attom_map: Dict[str, sqlite3.Row],
@@ -171,8 +199,9 @@ def _summary_for_priority(fields: Dict[str, Any], quality: Dict[str, Any]) -> st
     lane = quality["lane_suggestion"]["suggested_execution_lane"].replace("_", " ")
     control = quality["execution_reality"]["control_party"]
     workability = quality["execution_reality"]["workability_band"].lower()
+    influenceability = quality["execution_reality"].get("influenceability", "LOW").lower()
     return (
-        f"Screened candidate with a {workability} workability profile. "
+        f"Screened candidate with {workability} workability and {influenceability} influenceability. "
         f"Suggested lane is {lane}, with likely control leaning {control.lower()}."
     )
 
@@ -180,18 +209,22 @@ def _summary_for_priority(fields: Dict[str, Any], quality: Dict[str, Any]) -> st
 def _summary_for_enrichment(fields: Dict[str, Any], quality: Dict[str, Any]) -> str:
     blockers = quality.get("execution_blockers") or []
     blocker_text = ", ".join(blockers[:2]) if blockers else "key execution context missing"
+    execution = quality.get("execution_reality") or {}
+    control = str(execution.get("control_party") or "UNCLEAR").lower()
     return (
         "The file looks directionally interesting, but it is still blocked by "
-        f"{blocker_text.lower()}."
+        f"{blocker_text.lower()}. Control currently leans {control}."
     )
 
 
 def _summary_for_watch(fields: Dict[str, Any], quality: Dict[str, Any]) -> str:
     distress_type = str(fields.get("distress_type") or "pre-foreclosure").replace("_", " ").title()
     county = str(fields.get("county") or "Unknown county")
+    execution = quality.get("execution_reality") or {}
+    owner_agency = str(execution.get("owner_agency") or "LOW").lower()
     return (
         f"Very early {distress_type} signal in {county}. "
-        "Good for lifecycle tracking, but too early to claim execution readiness."
+        f"Good for lifecycle tracking, but still needs stronger owner agency than the current {owner_agency} reading."
     )
 
 
@@ -199,13 +232,24 @@ def _recommended_action(fields: Dict[str, Any], quality: Dict[str, Any]) -> str:
     sale_status = str(fields.get("sale_status") or "").lower()
     lane = quality["lane_suggestion"]["suggested_execution_lane"]
     blockers = quality.get("execution_blockers") or []
+    execution = quality.get("execution_reality") or {}
+    influenceability = str(execution.get("influenceability") or "LOW").upper()
+    owner_agency = str(execution.get("owner_agency") or "LOW").upper()
+    lender_control = str(execution.get("lender_control_intensity") or "HIGH").upper()
+    overlap_signals = fields.get("overlap_signals") or []
 
     if quality.get("top_tier_ready"):
         return "Send to licensed operator for execution validation"
+    if "tax_overlap" in overlap_signals and sale_status == "pre_foreclosure":
+        return "Escalate as a special-situations pre-foreclosure with tax pressure overlap"
     if quality.get("vault_publish_ready"):
         return "Keep on review shelf and request operator lane confirmation"
     if sale_status == "pre_foreclosure":
+        if influenceability == "HIGH" and owner_agency in {"HIGH", "MEDIUM"}:
+            return "Escalate to operator review while owner still appears influenceable"
         return "Enrich now and monitor for foreclosure progression"
+    if lender_control == "HIGH":
+        return "Deprioritize or hold unless operator sees a lender/trustee path"
     if "Actionable outreach path missing" in blockers:
         return "Repair contact path before escalating"
     if any("Mortgage" in blocker or "loan" in blocker.lower() for blocker in blockers):
@@ -228,12 +272,23 @@ def _is_high_confidence_operator_candidate(fields: Dict[str, Any], quality: Dict
         return False
     if str(execution_reality.get("control_party") or "UNCLEAR").upper() == "UNCLEAR":
         return False
+    if str(execution_reality.get("owner_agency") or "LOW").upper() == "LOW":
+        return False
+    if str(execution_reality.get("intervention_window") or "COMPRESSED").upper() == "COMPRESSED":
+        return False
+    if str(execution_reality.get("lender_control_intensity") or "HIGH").upper() == "HIGH":
+        return False
+    if str(execution_reality.get("influenceability") or "LOW").upper() == "LOW":
+        return False
     if str(execution_reality.get("execution_posture") or "NEEDS MORE CONTROL CLARITY").upper() == "NEEDS MORE CONTROL CLARITY":
         return False
 
     if sale_status == "pre_foreclosure":
         return bool(
             quality.get("pre_foreclosure_review_ready")
+            and quality.get("prefc_live_quality")
+            and str(quality.get("debt_confidence") or "").upper() == "FULL"
+            and prefc_county_is_active(fields.get("county"))
             and str(execution_reality.get("workability_band") or "LIMITED").upper() in {"STRONG", "MODERATE"}
             and len(blockers) <= 2
         )
@@ -298,12 +353,18 @@ def _analyst_entry(fields: Dict[str, Any], quality: Dict[str, Any]) -> Dict[str,
         "suggested_lane_reasons": quality["lane_suggestion"]["reasons"],
         "control_party": quality["execution_reality"]["control_party"],
         "contact_path_quality": quality["execution_reality"]["contact_path_quality"],
+        "owner_agency": quality["execution_reality"]["owner_agency"],
+        "intervention_window": quality["execution_reality"]["intervention_window"],
+        "lender_control_intensity": quality["execution_reality"]["lender_control_intensity"],
+        "influenceability": quality["execution_reality"]["influenceability"],
         "execution_posture": quality["execution_reality"]["execution_posture"],
         "workability_band": quality["execution_reality"]["workability_band"],
         "recommended_action": _recommended_action(fields, quality),
         "summary": summary,
         "execution_blockers": quality.get("execution_blockers") or [],
         "missing_fields": quality.get("batchdata_fallback_targets") or [],
+        "debt_confidence": quality.get("debt_confidence"),
+        "overlap_signals": fields.get("overlap_signals") or [],
         "operator_validation_required": True,
         "top_tier_ready": bool(quality.get("top_tier_ready")),
         "vault_publish_ready": bool(quality.get("vault_publish_ready")),
@@ -341,6 +402,7 @@ def build_falco_analyst_report(run_summary: Dict[str, Any], limit: int = 12) -> 
         analyzed: List[Dict[str, Any]] = []
         for row in leads:
             fields = _enriched_fields_for_lead(dict(row), attom_map, text_maps, num_maps, contact_ready)
+            fields["overlap_signals"] = _overlap_signals(fields, con)
             quality_result = assess_packet_data(fields)
             analyzed.append(_analyst_entry(fields, quality_result))
 
@@ -392,6 +454,8 @@ def build_falco_analyst_report(run_summary: Dict[str, Any], limit: int = 12) -> 
         strategic_notes.append("Most near misses are blocked by missing execution context rather than bad property signal.")
     if overview["pre_foreclosure_watch_count"]:
         strategic_notes.append("Pre-foreclosure watch is feeding the top of funnel earlier than sale-scheduled notices.")
+    if any("tax_overlap" in (row.get("overlap_signals") or []) for row in analyzed):
+        strategic_notes.append("Tax-overlap special situations are present and should stay in a tighter review lane than the general vault.")
 
     return {
         "agent": "falco_analyst",
