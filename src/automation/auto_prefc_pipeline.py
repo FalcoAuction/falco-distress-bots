@@ -7,6 +7,7 @@ from typing import Any
 
 from ..enrichment.attom_enricher import run as run_attom_enrichment
 from ..enrichment.batchdata_fallback import run as run_batchdata_fallback
+from ..enrichment.county_record_lookup import run as run_county_record_lookup
 from ..enrichment.debt_reconstruction import run as run_debt_reconstruction
 from ..packaging.data_quality import assess_packet_data
 from ..packaging.packager import run as run_packager
@@ -392,11 +393,13 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
             "FALCO_MAX_ATTOM_CALLS_PER_RUN",
             "FALCO_BATCHDATA_TARGET_LEAD_KEYS",
             "FALCO_DEBT_RECON_TARGET_LEAD_KEYS",
+            "FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS",
         )
     }
 
     attom_result: dict[str, Any] | None = None
     batchdata_result: dict[str, Any] | None = None
+    county_lookup_result: dict[str, Any] | None = None
     try:
         if attom_keys:
             os.environ["FALCO_STAGE2_SOURCE"] = "sqlite"
@@ -408,6 +411,11 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         if batchdata_keys:
             os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(batchdata_keys)
             batchdata_result = run_batchdata_fallback()
+
+        county_lookup_keys = [row["lead_key"] for row in targets if row["next_action"] == "county_record_lookup"]
+        if county_lookup_keys:
+            os.environ["FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS"] = ",".join(sorted(set(county_lookup_keys)))
+            county_lookup_result = run_county_record_lookup()
 
         if debt_recon_keys:
             os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(sorted(set(debt_recon_keys)))
@@ -436,6 +444,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         "attomTargets": attom_keys,
         "batchdataTargets": batchdata_keys,
         "debtReconTargets": debt_recon_keys,
+        "countyLookup": county_lookup_result,
         "targetActions": [
             {
                 "lead_key": row["lead_key"],
