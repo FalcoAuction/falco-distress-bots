@@ -11,6 +11,7 @@ from ..enrichment.debt_reconstruction import run as run_debt_reconstruction
 from ..packaging.data_quality import assess_packet_data
 from ..packaging.packager import run as run_packager
 from ..scoring.scorer import score_leads_by_keys
+from .autonomy_agents import determine_lead_action
 from .prefc_policy import (
     prefc_county_is_active,
     prefc_county_priority,
@@ -240,11 +241,19 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             if not (missing_valuation or batchdata_targets or contact_gap or special_situation):
                 continue
 
+            decision = determine_lead_action(hydrated, quality, overlap_signals, [])
+            next_action = str(decision.get("next_action") or "").strip().lower()
+
             targets.append(
                 {
                     "lead_key": lead_key,
                     "needs_attom": bool(missing_valuation and debt_ready),
                     "needs_batchdata": bool(batchdata_targets or contact_gap),
+                    "needs_debt_reconstruction": next_action in {"reconstruct_debt", "county_record_lookup"},
+                    "needs_transfer_reconstruction": next_action == "reconstruct_transfer",
+                    "needs_contact_recovery": next_action == "enrich_contact" or hard_contact_gap,
+                    "next_action": next_action,
+                    "blocker_type": str(hydrated.get("debt_reconstruction_blocker_type") or "").strip().lower(),
                     "score": float(lead["falco_score_internal"] or 0),
                     "confidence": confidence,
                     "owner_agency": owner_agency,
@@ -261,9 +270,12 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
 
     targets.sort(
         key=lambda row: (
+            0 if row["next_action"] in {"county_record_lookup", "reconstruct_debt"} else 1,
+            0 if row["next_action"] == "reconstruct_transfer" else 1,
             row["county_priority"],
             prefc_overlap_priority(row["overlap_signals"]),
             0 if row["special_situation"] else 1,
+            0 if row["blocker_type"] == "missing_amount_with_refs" else 1,
             0 if row["needs_attom"] else 1,
             row["source_priority"],
             0 if row["confidence"] == "HIGH" else 1,
@@ -311,7 +323,8 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
 
     attom_keys = [row["lead_key"] for row in targets if row["needs_attom"]]
-    batchdata_keys = [row["lead_key"] for row in targets if row["needs_batchdata"]]
+    batchdata_keys = [row["lead_key"] for row in targets if row["needs_batchdata"] or row["needs_contact_recovery"]]
+    debt_recon_keys = [row["lead_key"] for row in targets if row["needs_debt_reconstruction"] or row["needs_transfer_reconstruction"]]
     all_keys = sorted({row["lead_key"] for row in targets})
 
     env_backup = {
@@ -340,9 +353,13 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
             os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(batchdata_keys)
             batchdata_result = run_batchdata_fallback()
 
-        if all_keys:
+        if debt_recon_keys:
+            os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(sorted(set(debt_recon_keys)))
+            run_debt_reconstruction()
+        elif all_keys:
             os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(all_keys)
             run_debt_reconstruction()
+        if all_keys:
             score_leads_by_keys(all_keys, run_id=f"{run_id}_auto_prefc")
             for lead_key in all_keys:
                 os.environ["FALCO_REPACK_LEAD_KEY"] = lead_key
@@ -362,6 +379,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         "processed": len(all_keys),
         "attomTargets": attom_keys,
         "batchdataTargets": batchdata_keys,
+        "debtReconTargets": debt_recon_keys,
         "attom": attom_result,
         "batchdata": batchdata_result,
     }
@@ -407,8 +425,8 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
         key=lambda row: (
             prefc_county_priority(str((row.get("listingPayload") or {}).get("county") or "")),
             prefc_overlap_priority((row.get("listingPayload") or {}).get("overlapSignals") or []),
+            0 if bool((row.get("listingPayload") or {}).get("specialSituation")) else 1,
             prefc_source_priority(str((row.get("listingPayload") or {}).get("distressType") or "")),
-            0 if prefc_is_special_situation((row.get("listingPayload") or {}).get("overlapSignals") or []) else 1,
             0 if str((row.get("listingPayload") or {}).get("ownerAgency") or "").upper() == "HIGH" else 1,
             -float(((row.get("listingPayload") or {}).get("falcoScore") or 0)),
             int(((row.get("listingPayload") or {}).get("dtsDays") or 9999)),

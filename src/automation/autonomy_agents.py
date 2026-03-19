@@ -188,12 +188,17 @@ def _hydrate_fields(con: sqlite3.Connection, lead: sqlite3.Row, attom_map: Dict[
         "debt_reconstruction_confidence",
         "debt_reconstruction_source_mix",
         "debt_reconstruction_missing_reason",
+        "debt_reconstruction_blocker_type",
         "debt_reconstruction_summary",
+        "fsbo_listing_title",
+        "fsbo_listing_description",
+        "fsbo_signal_labels",
+        "fsbo_listing_source",
     ):
         value = _latest_text_field(con, lead_key, field_name)
         if value:
             fields[field_name] = value
-    for field_name in ("mortgage_amount", "year_built", "building_area_sqft", "beds", "baths"):
+    for field_name in ("mortgage_amount", "year_built", "building_area_sqft", "beds", "baths", "list_price", "fsbo_signal_score"):
         value = _latest_num_field(con, lead_key, field_name)
         if value is not None:
             fields[field_name] = value
@@ -251,6 +256,11 @@ def _build_market_allocation(run_summary: dict[str, Any] | None) -> dict[str, An
             "reason": "Special-situations path with better upside than generic new-county expansion.",
         },
         {
+            "source": "FSBO",
+            "directive": "expand_selectively",
+            "reason": "Seller-direct lane is worth pushing only when direct contact and pricing dislocation are both present.",
+        },
+        {
             "source": "FORECLOSURE_NOTICE",
             "directive": "deprioritize",
             "reason": "Later-stage signal. Useful for lifecycle, weaker for upstream quality creation.",
@@ -267,8 +277,25 @@ def _build_market_allocation(run_summary: dict[str, Any] | None) -> dict[str, An
 def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signals: List[str], live_lookup: set[str]) -> tuple[str, str, List[str]]:
     lead_key = str(lead["lead_key"] or "")
     sale_status = str(lead["sale_status"] or "").strip().lower()
+    distress_type = str(lead["distress_type"] or "").strip().upper()
     execution = quality.get("execution_reality") or {}
     reasons: List[str] = []
+
+    if distress_type == "FSBO":
+        if lead_key in live_lookup and not bool(quality.get("fsbo_vault_ready")):
+            reasons.append("Seller-direct opportunity no longer clears the live bar")
+            return "remove_from_vault", "high", reasons
+        if bool(quality.get("fsbo_vault_ready")):
+            reasons.append("Clears seller-direct live bar with direct contact and actionable pricing")
+            return "publish", "high", reasons
+        if bool(quality.get("fsbo_review_ready")):
+            reasons.extend((quality.get("fsbo_actionability_reasons") or ["Seller-direct file is worth operator review"])[:2])
+            return "hold_for_review", "medium", reasons
+        if str(execution.get("contact_path_quality") or "THIN").upper() == "THIN":
+            reasons.append("Direct seller contact is missing")
+            return "hold_or_suppress", "medium", reasons
+        reasons.extend((quality.get("vault_publish_blockers") or quality.get("execution_blockers") or ["Seller-direct opportunity is not actionable enough yet"])[:2])
+        return "hold_or_suppress", "low", reasons
 
     if lead_key in live_lookup and sale_status == "pre_foreclosure" and not bool(quality.get("prefc_live_quality")):
         reasons.extend(quality.get("prefc_live_review_reasons") or ["Live quality slipped below target"])
@@ -284,6 +311,7 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         or lead.get("mortgage_record_instrument")
     )
     debt_missing_reason = str(lead.get("debt_reconstruction_missing_reason") or "").strip()
+    blocker_type = str(lead.get("debt_reconstruction_blocker_type") or "").strip().lower()
 
     if prefc_is_special_situation(overlap_signals):
         reasons.append("Overlap signals increase upside versus ordinary notice flow")
@@ -306,6 +334,11 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
             if debt_missing_reason:
                 reasons.append(debt_missing_reason)
             return "county_record_lookup", "high", reasons
+        if blocker_type == "missing_amount_notice":
+            reasons.append("Notice-derived debt clues are present but still incomplete")
+            if debt_missing_reason:
+                reasons.append(debt_missing_reason)
+            return "reconstruct_debt", "high", reasons
         reasons.append("Debt picture is still incomplete")
         return "reconstruct_debt", "high", reasons
 
@@ -329,6 +362,26 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
     return "hold_for_review", "low", reasons
 
 
+def determine_lead_action(
+    lead: sqlite3.Row | dict[str, Any],
+    quality: dict[str, Any],
+    overlap_signals: List[str],
+    live_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    lead_dict = dict(lead)
+    live_lookup = {
+        str(row.get("sourceLeadKey") or "").strip()
+        for row in (live_rows or [])
+        if str(row.get("sourceLeadKey") or "").strip()
+    }
+    action, priority, reasons = _lead_next_action(lead_dict, quality, overlap_signals, live_lookup)
+    return {
+        "next_action": action,
+        "priority": priority,
+        "reasons": reasons,
+    }
+
+
 def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]], limit: int = 14) -> dict[str, Any]:
     live_lookup = {str(row.get("sourceLeadKey") or "").strip() for row in live_rows if str(row.get("sourceLeadKey") or "").strip()}
     attom_map = _latest_attom_map(con)
@@ -350,6 +403,7 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
           score_updated_at
         FROM leads
         WHERE sale_status='pre_foreclosure'
+           OR UPPER(COALESCE(distress_type, '')) = 'FSBO'
         ORDER BY COALESCE(falco_score_internal, 0) DESC, COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
         LIMIT 40
         """
@@ -375,6 +429,7 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
                 "debt_reconstruction_confidence": fields.get("debt_reconstruction_confidence"),
                 "debt_reconstruction_source_mix": fields.get("debt_reconstruction_source_mix"),
                 "debt_reconstruction_missing_reason": fields.get("debt_reconstruction_missing_reason"),
+                "debt_reconstruction_blocker_type": fields.get("debt_reconstruction_blocker_type"),
                 "debt_reconstruction_summary": fields.get("debt_reconstruction_summary"),
                 "mortgage_record_book": fields.get("mortgage_record_book"),
                 "mortgage_record_page": fields.get("mortgage_record_page"),

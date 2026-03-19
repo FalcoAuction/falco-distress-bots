@@ -33,6 +33,10 @@ _LAST_ASSIGNED_RX = re.compile(
     r"was last assigned to\s+(.+?)(?:\(|, c/o|, its attorney|, the entire indebtedness|;|\n)",
     re.IGNORECASE | re.DOTALL,
 )
+_ASSIGNED_TO_RX = re.compile(
+    r"(?:assigned to|assignee:?|current holder:?|holder:?|for the benefit of)\s+(.+?)(?:\(|, c/o|, its attorney|, the entire indebtedness|;|\n| of record)",
+    re.IGNORECASE | re.DOTALL,
+)
 _PROPERTY_CONVEYED_RX = re.compile(
     r"same property conveyed .*? by deed dated\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})\s+recorded\s+([A-Za-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{2,4})\s+in\s+(?:book|vol\.?)\s+([A-Za-z0-9-]+),\s*(?:page|image)\s+([A-Za-z0-9-]+)",
     re.IGNORECASE | re.DOTALL,
@@ -277,6 +281,12 @@ def _parse_notice_debt_details(raw: str | None) -> dict[str, Any]:
         current_holder = _clean_party_name(assigned_match.group(1))
         if current_holder:
             out["current_holder"] = current_holder
+    elif "current_holder" not in out:
+        generic_assignee_match = _ASSIGNED_TO_RX.search(text)
+        if generic_assignee_match:
+            current_holder = _clean_party_name(generic_assignee_match.group(1))
+            if current_holder:
+                out["current_holder"] = current_holder
 
     conveyed_match = _PROPERTY_CONVEYED_RX.search(text)
     if conveyed_match:
@@ -445,15 +455,29 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         confidence = "PARTIAL"
 
     missing_reason = ""
+    blocker_type = ""
     if canonical_amount is None:
         if payload and not batchdata_info.get("mortgage_amount"):
             missing_reason = "No loan amount in BatchData debt fields"
+            blocker_type = "missing_amount_batchdata"
         elif notice_payload and not notice_details.get("mortgage_amount"):
             missing_reason = "No principal amount stated in notice text"
+            blocker_type = "missing_amount_notice"
         else:
             missing_reason = "Loan amount could not be reconstructed from current sources"
+            blocker_type = "missing_amount_generic"
     elif not canonical_lender:
         missing_reason = "Current lender could not be reconstructed from current sources"
+        blocker_type = "missing_lender"
+    elif not canonical_last_sale_date and (record_book or record_page or record_instrument):
+        blocker_type = "missing_transfer_with_refs"
+    elif not canonical_last_sale_date:
+        blocker_type = "missing_transfer"
+    else:
+        blocker_type = "resolved"
+
+    if canonical_amount is None and (record_book or record_page or record_instrument):
+        blocker_type = "missing_amount_with_refs"
 
     summary_parts = []
     if canonical_lender:
@@ -492,6 +516,7 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         "debt_reconstruction_confidence": confidence,
         "debt_reconstruction_source_mix": ", ".join(source_mix) if source_mix else "NONE",
         "debt_reconstruction_missing_reason": missing_reason,
+        "debt_reconstruction_blocker_type": blocker_type,
         "debt_reconstruction_summary": " | ".join(summary_parts) if summary_parts else "No durable debt reconstruction found",
     }
 
