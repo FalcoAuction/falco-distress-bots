@@ -199,6 +199,11 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             confidence = str(lane_suggestion.get("confidence") or "LOW").upper()
             blockers = list(quality.get("pre_foreclosure_review_blockers") or [])
             batchdata_targets = list(quality.get("batchdata_fallback_targets") or [])
+            packetability_band = str(quality.get("packetability_band") or "LOW").upper()
+            packetability_score = int(quality.get("packetability_score") or 0)
+            recoverable_partial = bool(quality.get("recoverable_partial"))
+            recoverable_next_step = str(quality.get("recoverable_partial_next_step") or "").strip().lower()
+            suppress_early = bool(quality.get("suppress_early"))
             missing_valuation = "Valuation anchors missing" in blockers or str(lead["equity_band"] or "").upper() in {"", "UNKNOWN"}
             debt_ready = bool(
                 hydrated.get("mortgage_lender")
@@ -232,13 +237,17 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
 
             if quality.get("pre_foreclosure_review_ready") and not strong_staged_contact_retry:
                 continue
+            if suppress_early:
+                continue
             if owner_agency == "LOW" or intervention_window == "COMPRESSED" or lender_control == "HIGH":
                 continue
             if influenceability == "LOW" or lane == "unclear" or confidence == "LOW":
                 continue
             if len(blockers) > 5:
                 continue
-            if not (missing_valuation or batchdata_targets or contact_gap or special_situation):
+            if packetability_band == "LOW" and not recoverable_partial:
+                continue
+            if not (missing_valuation or batchdata_targets or contact_gap or special_situation or recoverable_partial):
                 continue
 
             decision = determine_lead_action(hydrated, quality, overlap_signals, [])
@@ -247,6 +256,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             targets.append(
                 {
                     "lead_key": lead_key,
+                    "county": county,
                     "needs_attom": bool(missing_valuation and debt_ready),
                     "needs_batchdata": bool(batchdata_targets or contact_gap),
                     "needs_debt_reconstruction": next_action in {"reconstruct_debt", "county_record_lookup"},
@@ -254,6 +264,10 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                     "needs_contact_recovery": next_action == "enrich_contact" or hard_contact_gap,
                     "next_action": next_action,
                     "blocker_type": str(hydrated.get("debt_reconstruction_blocker_type") or "").strip().lower(),
+                    "packetability_band": packetability_band,
+                    "packetability_score": packetability_score,
+                    "recoverable_partial": recoverable_partial,
+                    "recoverable_next_step": recoverable_next_step,
                     "score": float(lead["falco_score_internal"] or 0),
                     "confidence": confidence,
                     "owner_agency": owner_agency,
@@ -272,10 +286,13 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
         key=lambda row: (
             0 if row["next_action"] in {"county_record_lookup", "reconstruct_debt"} else 1,
             0 if row["next_action"] == "reconstruct_transfer" else 1,
+            0 if row["recoverable_partial"] else 1,
             row["county_priority"],
             prefc_overlap_priority(row["overlap_signals"]),
             0 if row["special_situation"] else 1,
             0 if row["blocker_type"] == "missing_amount_with_refs" else 1,
+            0 if row["packetability_band"] == "HIGH" else 1 if row["packetability_band"] == "MEDIUM" else 2,
+            -row["packetability_score"],
             0 if row["needs_attom"] else 1,
             row["source_priority"],
             0 if row["confidence"] == "HIGH" else 1,
@@ -284,6 +301,45 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
         )
     )
     return targets[:limit]
+
+
+def _apply_recovery_budget(targets: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    if not targets or limit <= 0:
+        return []
+
+    county_caps = {0: 4, 1: 3, 2: 2, 3: 1}
+    selected: list[dict[str, Any]] = []
+    county_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    action_caps = {
+        "county_record_lookup": max(2, limit // 2),
+        "reconstruct_debt": max(3, limit),
+        "reconstruct_transfer": max(2, limit // 2),
+        "enrich_contact": max(2, limit // 2),
+        "special_situations_review": max(2, limit // 3),
+    }
+
+    for row in targets:
+        county = str(row.get("county") or "")
+        county_priority = int(row.get("county_priority") or 3)
+        county_cap = county_caps.get(county_priority, 1)
+        if row.get("special_situation") or row.get("source_priority") == 0:
+            county_cap += 1
+        if county_counts.get(county, 0) >= county_cap:
+            continue
+
+        next_action = str(row.get("next_action") or "")
+        if next_action and action_counts.get(next_action, 0) >= action_caps.get(next_action, limit):
+            continue
+
+        selected.append(row)
+        county_counts[county] = county_counts.get(county, 0) + 1
+        if next_action:
+            action_counts[next_action] = action_counts.get(next_action, 0) + 1
+        if len(selected) >= limit:
+            break
+
+    return selected
 
 
 def _prune_weak_live_prefc(limit: int) -> dict[str, Any]:
@@ -318,7 +374,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_PREFC_ENRICH disabled"}
 
     limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "6")), 0)
-    targets = _prefc_retry_targets(limit)
+    targets = _apply_recovery_budget(_prefc_retry_targets(limit * 3), limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
 
@@ -380,6 +436,16 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
         "attomTargets": attom_keys,
         "batchdataTargets": batchdata_keys,
         "debtReconTargets": debt_recon_keys,
+        "targetActions": [
+            {
+                "lead_key": row["lead_key"],
+                "county": row["county"],
+                "next_action": row["next_action"],
+                "packetability_band": row["packetability_band"],
+                "recoverable_partial": row["recoverable_partial"],
+            }
+            for row in targets
+        ],
         "attom": attom_result,
         "batchdata": batchdata_result,
     }

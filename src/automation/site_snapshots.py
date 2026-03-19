@@ -13,6 +13,7 @@ from urllib import request as urllib_request
 
 from ..packaging.data_quality import assess_packet_data
 from ..storage.sqlite_store import init_db
+from .autonomy_agents import determine_lead_action
 from .prefc_policy import (
     prefc_county_priority,
     prefc_county_tier,
@@ -137,6 +138,12 @@ def _build_summary(
     readiness: str,
     contact_ready: bool,
 ) -> str:
+    if distress_type == "Seller-Direct Review":
+        contact_text = "direct seller contact ready" if contact_ready else "direct seller contact pending"
+        return (
+            f"Seller-direct opportunity in {county or 'target market'} with "
+            f"{readiness or 'review'} actionability and {contact_text}."
+        )
     dts_text = f"{int(dts_days)} days" if dts_days is not None else "early-stage timing"
     contact_text = "contact ready" if contact_ready else "contact pending"
     return (
@@ -146,6 +153,13 @@ def _build_summary(
 
 
 def _build_teaser(county: str, readiness: str, dts_days: int | None) -> str:
+    if readiness in {"ACTIONABLE_NOW", "REVIEW", "WATCH"}:
+        return " • ".join(
+            [
+                f"County: {county or 'Unknown'}",
+                f"Actionability: {readiness}",
+            ]
+        )
     parts = [
         f"County: {county or 'Unknown'}",
         f"Readiness: {readiness or 'Unknown'}",
@@ -198,6 +212,17 @@ def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str)
     workability_band = str(execution_reality.get("workability_band") or "LIMITED").upper()
     blockers = quality.get("execution_blockers") or []
     normalized_status = str(sale_status or "").strip().lower()
+
+    if lane == "seller_direct":
+        return bool(
+            quality.get("fsbo_vault_ready")
+            and quality.get("fsbo_review_ready")
+            and workability_band in {"STRONG", "MODERATE"}
+            and contact_path_quality == "STRONG"
+            and owner_agency in {"HIGH", "MEDIUM"}
+            and influenceability in {"HIGH", "MEDIUM"}
+            and len(blockers) <= 1
+        )
 
     if lane == "unclear" or confidence == "LOW":
         return False
@@ -310,6 +335,10 @@ def _build_vault_candidates(
             "last_sale_date",
             "mortgage_lender",
             "property_identifier",
+            "fsbo_listing_title",
+            "fsbo_listing_description",
+            "fsbo_signal_labels",
+            "fsbo_listing_source",
         ):
             row = con.execute(
                 """
@@ -323,7 +352,7 @@ def _build_vault_candidates(
             ).fetchone()
             if row and row[0]:
                 fields[field_name] = row[0]
-        for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount"):
+        for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount", "list_price", "fsbo_signal_score"):
             row = con.execute(
                 """
                 SELECT field_value_num
@@ -338,9 +367,10 @@ def _build_vault_candidates(
                 fields[field_name] = float(row[0])
 
         quality = assess_packet_data(fields)
-        readiness = str(lead["auction_readiness"] or "").upper()
         publish_ready = bool(quality["vault_publish_ready"])
         if not publish_ready:
+            continue
+        if bool(quality.get("suppress_early")):
             continue
         if not _meets_high_confidence_review_bar(quality, str(dict(lead).get("sale_status") or "")):
             continue
@@ -374,14 +404,20 @@ def _build_vault_candidates(
                 "influenceability": quality["execution_reality"]["influenceability"],
                 "executionPosture": quality["execution_reality"]["execution_posture"],
                 "workabilityBand": quality["execution_reality"]["workability_band"],
+                "packetabilityScore": quality.get("packetability_score"),
+                "packetabilityBand": quality.get("packetability_band"),
+                "recoverablePartial": bool(quality.get("recoverable_partial")),
+                "recoverablePartialNextStep": quality.get("recoverable_partial_next_step"),
             }
         )
 
     candidates.sort(
         key=lambda row: (
             0 if row["vaultPublishReady"] else 1,
+            0 if str(row.get("packetabilityBand") or "").upper() == "HIGH" else 1 if str(row.get("packetabilityBand") or "").upper() == "MEDIUM" else 2,
             0 if str(row.get("suggestedLaneConfidence") or "").upper() == "HIGH" else 1,
             0 if str(row.get("auction_readiness") or "").upper() == "GREEN" else 1,
+            -(row.get("packetabilityScore") or 0),
             -(row.get("falco_score_internal") or 0),
             row.get("dts_days") or 9999,
         )
@@ -403,7 +439,7 @@ def _hydrate_quality_fields(
         FROM lead_field_provenance
         WHERE lead_key=?
           AND field_name='contact_ready'
-          AND field_value_text='1'
+          AND LOWER(COALESCE(field_value_text, '')) IN ('1', 'true', 'yes', 'y')
         """,
         (lead_key,),
     ) > 0
@@ -430,7 +466,12 @@ def _hydrate_quality_fields(
         "debt_reconstruction_confidence",
         "debt_reconstruction_source_mix",
         "debt_reconstruction_missing_reason",
+        "debt_reconstruction_blocker_type",
         "debt_reconstruction_summary",
+        "fsbo_listing_title",
+        "fsbo_listing_description",
+        "fsbo_signal_labels",
+        "fsbo_listing_source",
     ):
         row = con.execute(
             """
@@ -445,7 +486,7 @@ def _hydrate_quality_fields(
         if row and row[0]:
             fields[field_name] = row[0]
 
-    for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount"):
+    for field_name in ("year_built", "building_area_sqft", "beds", "baths", "mortgage_amount", "list_price", "fsbo_signal_score"):
         row = con.execute(
             """
             SELECT field_value_num
@@ -473,13 +514,18 @@ def _build_candidate_listing_payload(
     county = str(lead_data.get("county") or "")
     state = "TN"
     distress_type = str(lead_data.get("distress_type") or "")
+    is_fsbo = distress_type.upper() == "FSBO"
     display_distress_type = (
-        "Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "Distress Opportunity")
+        "Seller-Direct Review"
+        if is_fsbo
+        else ("Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "Distress Opportunity"))
     )
     title = _masked_title(county, display_distress_type)
     slug = f"{_slugify(title)}-{str(lead['lead_key'] or '')[:8]}"
     enriched_fields = quality.get("enriched_fields", {})
     readiness = str(lead["auction_readiness"] or "")
+    if is_fsbo:
+        readiness = str(quality.get("fsbo_actionability_band") or "REVIEW")
     if readiness == "GREEN" and not quality["top_tier_ready"]:
         readiness = "YELLOW"
     if sale_status == "pre_foreclosure" and readiness not in {"GREEN", "YELLOW", "PARTIAL"}:
@@ -516,11 +562,11 @@ def _build_candidate_listing_payload(
         "state": state,
         "status": "active",
         "distressType": display_distress_type,
-        "auctionWindow": "Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{dts_days} Days" if dts_days is not None else "Confidential"),
+        "auctionWindow": "Seller-Direct" if is_fsbo else ("Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{dts_days} Days" if dts_days is not None else "Confidential")),
         "summary": _build_summary(county, display_distress_type, dts_days, readiness, contact_ready),
         "publicTeaser": _build_teaser(county, readiness, dts_days),
         "packetUrl": f"/api/vault/packet?slug={slug}",
-        "packetLabel": "Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief",
+        "packetLabel": "Seller-Direct Review Brief" if is_fsbo else ("Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief"),
         "packetFileName": packet_file_name,
         "sourceLeadKey": lead_data["lead_key"],
         "createdAt": created_at,
@@ -546,8 +592,21 @@ def _build_candidate_listing_payload(
         "mortgageDate": _field("mortgage_date"),
         "mortgageLender": _field("mortgage_lender"),
         "mortgageAmount": _field("mortgage_amount"),
+        "listPrice": _field("list_price"),
+        "fsboListingTitle": _field("fsbo_listing_title"),
+        "fsboListingDescription": _field("fsbo_listing_description"),
+        "fsboSignalScore": _field("fsbo_signal_score"),
+        "fsboSignalLabels": quality.get("fsbo_signal_labels") or _parse_fsbo_signal_labels(_field("fsbo_signal_labels")),
+        "fsboActionabilityBand": quality.get("fsbo_actionability_band") or "",
+        "fsboActionabilityReasons": quality.get("fsbo_actionability_reasons") or [],
+        "fsboReviewReady": bool(quality.get("fsbo_review_ready")),
+        "fsboVaultReady": bool(quality.get("fsbo_vault_ready")),
+        "fsboPriceGapPct": quality.get("fsbo_price_gap_pct"),
+        "fsboDaysTracked": quality.get("fsbo_days_tracked"),
+        "fsboListingSource": _field("fsbo_listing_source"),
         "debtReconstructionConfidence": _field("debt_reconstruction_confidence"),
         "debtReconstructionSourceMix": _field("debt_reconstruction_source_mix"),
+        "debtReconstructionBlockerType": _field("debt_reconstruction_blocker_type"),
         "debtReconstructionMissingReason": _field("debt_reconstruction_missing_reason"),
         "debtReconstructionSummary": _field("debt_reconstruction_summary"),
         "yearBuilt": _field("year_built"),
@@ -569,6 +628,15 @@ def _build_candidate_listing_payload(
         "vaultPublishReady": bool(quality["vault_publish_ready"]),
         "preForeclosureReviewReady": bool(quality.get("pre_foreclosure_review_ready")),
         "debtConfidence": quality.get("debt_confidence") or "",
+        "packetabilityScore": quality.get("packetability_score"),
+        "packetabilityBand": quality.get("packetability_band"),
+        "packetabilityReasons": quality.get("packetability_reasons") or [],
+        "packetabilityBlockers": quality.get("packetability_blockers") or [],
+        "recoverablePartial": bool(quality.get("recoverable_partial")),
+        "recoverablePartialNextStep": quality.get("recoverable_partial_next_step") or "",
+        "recoverablePartialReasons": quality.get("recoverable_partial_reasons") or [],
+        "suppressEarly": bool(quality.get("suppress_early")),
+        "earlyNoiseReasons": quality.get("early_noise_reasons") or [],
         "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
         "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
         "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
@@ -632,6 +700,7 @@ def _build_publish_candidates(
         FROM leads
         WHERE COALESCE(dts_days, 9999) <= 90
            OR sale_status = 'pre_foreclosure'
+           OR UPPER(COALESCE(distress_type, '')) = 'FSBO'
         ORDER BY
           CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
           COALESCE(dts_days, 9999) ASC,
@@ -649,7 +718,24 @@ def _build_publish_candidates(
 
         hydrated = _hydrate_quality_fields(con, lead, attom_map)
         quality = assess_packet_data(hydrated)
-        publish_ready = bool(quality["vault_publish_ready"])
+        overlap_signals = []
+        source_rows = con.execute(
+            """
+            SELECT DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))
+            FROM ingest_events
+            WHERE lead_key=?
+            """,
+            (lead_key,),
+        ).fetchall()
+        source_mix = [str(row[0] or "").strip() for row in source_rows if str(row[0] or "").strip()]
+        if "SUBSTITUTION_OF_TRUSTEE" in source_mix and "LIS_PENDENS" in source_mix:
+            overlap_signals.append("stacked_notice_path")
+        if any(source in source_mix for source in ("API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES")):
+            overlap_signals.append("tax_overlap")
+        if lead["current_sale_date"] and lead["original_sale_date"] and lead["current_sale_date"] != lead["original_sale_date"]:
+            overlap_signals.append("reopened_timing")
+        decision = determine_lead_action(lead, quality, overlap_signals, [])
+        publish_ready = decision["next_action"] == "publish"
         if not publish_ready:
             continue
         if str(dict(lead).get("sale_status") or "").strip().lower() == "pre_foreclosure" and not bool(quality.get("prefc_live_quality")):
@@ -677,6 +763,8 @@ def _build_publish_candidates(
                 "slug": listing_payload["slug"],
                 "packetFileName": packet_file_name,
                 "listingPayload": listing_payload,
+                "recommendedAction": decision["next_action"],
+                "recommendedActionReasons": decision["reasons"],
                 "supabaseRow": {
                     "slug": listing_payload["slug"],
                     "title": listing_payload["title"],
@@ -703,6 +791,132 @@ def _build_publish_candidates(
         )
     )
     return candidates[:limit]
+
+
+def _parse_fsbo_signal_labels(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
+def _build_fsbo_lane(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 12,
+) -> dict[str, Any]:
+    attom_map: dict[str, dict[str, Any]] = {}
+    for row in con.execute(
+        """
+        WITH latest_attom AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+        FROM latest_attom
+        WHERE rn = 1
+        """
+    ).fetchall():
+        attom_map[row["lead_key"]] = dict(row)
+
+    tracked: list[dict[str, Any]] = []
+    review_ready: list[dict[str, Any]] = []
+    vault_ready: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+
+    lead_rows = con.execute(
+        """
+        SELECT
+          lead_key,
+          address,
+          county,
+          distress_type,
+          sale_status,
+          falco_score_internal,
+          auction_readiness,
+          equity_band,
+          dts_days,
+          COALESCE(uw_ready, 0) AS uw_ready,
+          first_seen_at,
+          last_seen_at,
+          score_updated_at,
+          current_sale_date,
+          original_sale_date
+        FROM leads
+        WHERE UPPER(COALESCE(distress_type, '')) = 'FSBO'
+        ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
+        LIMIT 40
+        """
+    ).fetchall()
+
+    for lead in lead_rows:
+        hydrated = _hydrate_quality_fields(con, lead, attom_map)
+        quality = assess_packet_data(hydrated)
+        row = {
+            **dict(lead),
+            "suggestedExecutionLane": quality["lane_suggestion"]["suggested_execution_lane"],
+            "suggestedLaneConfidence": quality["lane_suggestion"]["confidence"],
+            "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
+            "ownerAgency": quality["execution_reality"]["owner_agency"],
+            "influenceability": quality["execution_reality"]["influenceability"],
+            "workabilityBand": quality["execution_reality"]["workability_band"],
+            "listPrice": hydrated.get("list_price"),
+            "fsboListingTitle": hydrated.get("fsbo_listing_title"),
+            "fsboSignalScore": quality.get("fsbo_signal_score"),
+            "fsboSignalLabels": quality.get("fsbo_signal_labels") or [],
+            "fsboActionabilityBand": quality.get("fsbo_actionability_band"),
+            "fsboActionabilityReasons": quality.get("fsbo_actionability_reasons") or [],
+            "fsboReviewReady": bool(quality.get("fsbo_review_ready")),
+            "fsboVaultReady": bool(quality.get("fsbo_vault_ready")),
+            "fsboPriceGapPct": quality.get("fsbo_price_gap_pct"),
+            "fsboDaysTracked": quality.get("fsbo_days_tracked"),
+            "fsboListingSource": hydrated.get("fsbo_listing_source"),
+            "executionBlockers": quality.get("vault_publish_blockers") or quality.get("execution_blockers") or [],
+        }
+        tracked.append(row)
+        if row["fsboVaultReady"]:
+            vault_ready.append(row)
+        elif row["fsboReviewReady"]:
+            review_ready.append(row)
+        else:
+            blocked.append(row)
+
+    tracked = _attach_vault_state(tracked, live_slugs)
+    review_ready = _attach_vault_state(review_ready, live_slugs)
+    vault_ready = _attach_vault_state(vault_ready, live_slugs)
+    blocked = _attach_vault_state(blocked, live_slugs)
+
+    def _sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        band = str(row.get("fsboActionabilityBand") or "")
+        return (
+            0 if band == "ACTIONABLE_NOW" else 1 if band == "REVIEW" else 2,
+            0 if str(row.get("contactPathQuality") or "").upper() == "STRONG" else 1,
+            -float(row.get("fsboSignalScore") or 0),
+            -(float(row.get("fsboPriceGapPct") or 0)),
+            -int(row.get("fsboDaysTracked") or 0),
+        )
+
+    review_ready.sort(key=_sort_key)
+    vault_ready.sort(key=_sort_key)
+    blocked.sort(key=_sort_key)
+
+    return {
+        "trackedCount": len(tracked),
+        "reviewReadyCount": len(review_ready),
+        "vaultReadyCount": len(vault_ready),
+        "tracked": tracked[:limit],
+        "reviewReady": review_ready[:limit],
+        "vaultReady": vault_ready[:limit],
+        "blocked": blocked[:limit],
+    }
 
 
 def _build_pre_foreclosure_promotion(
@@ -789,6 +1003,14 @@ def _build_pre_foreclosure_promotion(
             "topTierReady": bool(quality["top_tier_ready"]),
             "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
             "debtConfidence": quality.get("debt_confidence") or "",
+            "packetabilityScore": quality.get("packetability_score"),
+            "packetabilityBand": quality.get("packetability_band"),
+            "packetabilityReasons": quality.get("packetability_reasons") or [],
+            "recoverablePartial": bool(quality.get("recoverable_partial")),
+            "recoverablePartialNextStep": quality.get("recoverable_partial_next_step") or "",
+            "recoverablePartialReasons": quality.get("recoverable_partial_reasons") or [],
+            "suppressEarly": bool(quality.get("suppress_early")),
+            "earlyNoiseReasons": quality.get("early_noise_reasons") or [],
             "prefcLiveQuality": bool(quality.get("prefc_live_quality")),
             "prefcLiveReviewReasons": quality.get("prefc_live_review_reasons") or [],
             "packetCompletenessPct": quality["packet_completeness_pct"],
@@ -822,6 +1044,7 @@ def _build_pre_foreclosure_promotion(
                 "mortgageRecordInstrument": hydrated.get("mortgage_record_instrument"),
                 "debtReconstructionConfidence": hydrated.get("debt_reconstruction_confidence"),
                 "debtReconstructionSourceMix": hydrated.get("debt_reconstruction_source_mix"),
+                "debtReconstructionBlockerType": hydrated.get("debt_reconstruction_blocker_type"),
                 "debtReconstructionMissingReason": hydrated.get("debt_reconstruction_missing_reason"),
                 "debtReconstructionSummary": hydrated.get("debt_reconstruction_summary"),
                 "propertyIdentifier": hydrated.get("property_identifier"),
@@ -1020,6 +1243,7 @@ def _operator_snapshot() -> dict[str, Any]:
         live_slugs = _load_live_slugs()
         vault_candidates = _build_vault_candidates(con, live_slugs)
         pre_foreclosure_promotion = _build_pre_foreclosure_promotion(con, live_slugs)
+        fsbo_lane = _build_fsbo_lane(con, live_slugs)
         lifecycle_events = _build_lifecycle_events(con, live_slugs)
 
         foreclosure_overview = dict(
@@ -1124,6 +1348,7 @@ def _operator_snapshot() -> dict[str, Any]:
         "preForeclosurePromotion": {
             **pre_foreclosure_promotion,
         },
+        "fsboLane": fsbo_lane,
     }
 
 

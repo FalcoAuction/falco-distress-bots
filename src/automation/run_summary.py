@@ -181,6 +181,8 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
     blocker_counts: Counter[str] = Counter()
     batchdata_targets: Counter[str] = Counter()
     readiness_counts: Counter[str] = Counter()
+    packetability_counts: Counter[str] = Counter()
+    recoverable_counts: Counter[str] = Counter()
     reviewed: List[Dict[str, Any]] = []
 
     for lead in leads:
@@ -209,6 +211,9 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
         quality = assess_packet_data(fields)
         readiness = str(fields.get("auction_readiness") or "UNKNOWN").upper()
         readiness_counts[readiness] += 1
+        packetability_counts[str(quality.get("packetability_band") or "UNKNOWN").upper()] += 1
+        if bool(quality.get("recoverable_partial")):
+            recoverable_counts[str(quality.get("recoverable_partial_next_step") or "review").lower()] += 1
         blocker_counts.update(quality["vault_publish_blockers"])
         batchdata_targets.update(quality["batchdata_fallback_targets"])
         reviewed.append(
@@ -221,6 +226,10 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
                 "auction_readiness": readiness,
                 "dts_days": fields.get("dts_days"),
                 "packet_completeness_pct": quality["packet_completeness_pct"],
+                "packetability_band": quality.get("packetability_band"),
+                "packetability_score": quality.get("packetability_score"),
+                "recoverable_partial": bool(quality.get("recoverable_partial")),
+                "recoverable_partial_next_step": quality.get("recoverable_partial_next_step"),
                 "vault_publish_ready": quality["vault_publish_ready"],
                 "top_tier_ready": quality["top_tier_ready"],
                 "execution_blockers": quality["execution_blockers"],
@@ -235,6 +244,8 @@ def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> 
         "vault_ready_count": sum(1 for row in reviewed if row["vault_publish_ready"]),
         "top_tier_ready_count": sum(1 for row in reviewed if row["top_tier_ready"]),
         "readiness_counts": dict(readiness_counts),
+        "packetability_counts": dict(packetability_counts),
+        "recoverable_partial_counts": dict(recoverable_counts),
         "top_blockers": blocker_counts.most_common(10),
         "top_batchdata_targets": batchdata_targets.most_common(10),
         "leads": reviewed,

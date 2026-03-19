@@ -279,6 +279,8 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
     sale_status = str(lead["sale_status"] or "").strip().lower()
     distress_type = str(lead["distress_type"] or "").strip().upper()
     execution = quality.get("execution_reality") or {}
+    packetability_band = str(quality.get("packetability_band") or "LOW").upper()
+    packetability_score = int(quality.get("packetability_score") or 0)
     reasons: List[str] = []
 
     if distress_type == "FSBO":
@@ -305,6 +307,10 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         reasons.append("Clears strong live pre-foreclosure bar")
         return "publish", "high", reasons
 
+    if bool(quality.get("suppress_early")):
+        reasons.extend((quality.get("early_noise_reasons") or ["Lead is low-signal noise relative to the current lane"])[:2])
+        return "hold_or_suppress", "high", reasons
+
     has_record_refs = bool(
         lead.get("mortgage_record_book")
         or lead.get("mortgage_record_page")
@@ -312,6 +318,8 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
     )
     debt_missing_reason = str(lead.get("debt_reconstruction_missing_reason") or "").strip()
     blocker_type = str(lead.get("debt_reconstruction_blocker_type") or "").strip().lower()
+    recoverable_partial = bool(quality.get("recoverable_partial"))
+    recoverable_next_step = str(quality.get("recoverable_partial_next_step") or "").strip().lower()
 
     if prefc_is_special_situation(overlap_signals):
         reasons.append("Overlap signals increase upside versus ordinary notice flow")
@@ -327,6 +335,10 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
             reasons.append("Transfer support still missing on a special-situations lead")
             return "reconstruct_transfer", "high", reasons
         return "special_situations_review", "high", reasons
+
+    if recoverable_partial and recoverable_next_step:
+        reasons.extend((quality.get("recoverable_partial_reasons") or ["Lead is close enough to justify another recovery pass"])[:2])
+        return recoverable_next_step, "high" if packetability_band == "HIGH" else "medium", reasons
 
     if not lead.get("mortgage_lender") or lead.get("mortgage_amount") is None:
         if has_record_refs:
@@ -357,6 +369,10 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
     if str(execution.get("lender_control_intensity") or "HIGH").upper() == "HIGH" or str(lead.get("equity_band") or "").upper() == "LOW":
         reasons.append("Control or equity makes the file weak for live vault")
         return "hold_or_suppress", "medium", reasons
+
+    if packetability_band == "HIGH" or packetability_score >= 10:
+        reasons.extend((quality.get("packetability_reasons") or ["This file is close enough to stay in the active review queue"])[:2])
+        return "hold_for_review", "medium", reasons
 
     reasons.append("Worth keeping on review shelf after current pass")
     return "hold_for_review", "low", reasons
@@ -431,6 +447,11 @@ def _build_lead_actions(con: sqlite3.Connection, live_rows: list[dict[str, Any]]
                 "debt_reconstruction_missing_reason": fields.get("debt_reconstruction_missing_reason"),
                 "debt_reconstruction_blocker_type": fields.get("debt_reconstruction_blocker_type"),
                 "debt_reconstruction_summary": fields.get("debt_reconstruction_summary"),
+                "packetability_score": quality.get("packetability_score"),
+                "packetability_band": quality.get("packetability_band"),
+                "recoverable_partial": bool(quality.get("recoverable_partial")),
+                "recoverable_partial_next_step": quality.get("recoverable_partial_next_step"),
+                "suppress_early": bool(quality.get("suppress_early")),
                 "mortgage_record_book": fields.get("mortgage_record_book"),
                 "mortgage_record_page": fields.get("mortgage_record_page"),
                 "mortgage_record_instrument": fields.get("mortgage_record_instrument"),
