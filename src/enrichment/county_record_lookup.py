@@ -6,6 +6,9 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
+from urllib.error import URLError, HTTPError
 
 from ..automation.prefc_policy import prefc_county_is_active
 from ..storage import sqlite_store as _store
@@ -50,6 +53,8 @@ _COUNTY_LOOKUP_CONFIG: dict[str, dict[str, str]] = {
         "notes": "Use register office search guidance and recorded references from the notice.",
     },
 }
+
+_USTITLESEARCH_LOGIN_URL = "https://www.ustitlesearch.net/logon.asp"
 
 
 def _db_path() -> str:
@@ -107,7 +112,54 @@ def _target_keys() -> set[str] | None:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row) -> dict[str, Any] | None:
+def _ustsn_username() -> str:
+    return str(
+        os.environ.get("FALCO_USTITLESEARCH_USERNAME")
+        or os.environ.get("USTITLESEARCH_USERNAME")
+        or ""
+    ).strip()
+
+
+def _ustsn_password() -> str:
+    return str(
+        os.environ.get("FALCO_USTITLESEARCH_PASSWORD")
+        or os.environ.get("USTITLESEARCH_PASSWORD")
+        or ""
+    ).strip()
+
+
+def _login_ustsn() -> tuple[bool, str]:
+    username = _ustsn_username()
+    password = _ustsn_password()
+    if not username or not password:
+        return False, "auth_required"
+
+    qs = urllib_parse.urlencode(
+        {
+            "AAABBBCCC": "123",
+            "action": "logon",
+            "username": username,
+            "password": password,
+            "savepassword": "false",
+        }
+    )
+    url = f"{_USTITLESEARCH_LOGIN_URL}?{qs}"
+    req = urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib_request.urlopen(req, timeout=20) as response:
+            body = response.read().decode("cp1252", errors="ignore")
+    except (HTTPError, URLError):
+        return False, "site_unavailable"
+
+    lowered = body.lower()
+    if "invalid login" in lowered:
+        return False, "auth_failed"
+    if "logon to the us title search network" in lowered and "invalid login" not in lowered:
+        return False, "auth_uncertain"
+    return True, "authenticated"
+
+
+def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row, login_status: str) -> dict[str, Any] | None:
     lead_key = str(lead["lead_key"] or "").strip()
     county = str(lead["county"] or "").strip()
     if not lead_key or not county:
@@ -160,7 +212,7 @@ def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row) -> dict[str, 
         "owner_name": owner_name,
         "debt_blocker": debt_reason,
         "debt_summary": summary,
-        "status": "queued",
+        "status": "queued" if login_status == "authenticated" else login_status,
         "notes": config["notes"],
         "generated_at": _now_iso(),
     }
@@ -191,6 +243,7 @@ def _persist_task(task: dict[str, Any]) -> None:
 def run() -> dict[str, Any]:
     targets = _target_keys()
     queued: list[dict[str, Any]] = []
+    login_ok, login_status = _login_ustsn()
 
     with _connect() as con:
         rows = con.execute(
@@ -207,7 +260,7 @@ def run() -> dict[str, Any]:
             lead_key = str(lead["lead_key"] or "").strip()
             if targets is not None and lead_key not in targets:
                 continue
-            task = _build_lookup_task(con, lead)
+            task = _build_lookup_task(con, lead, "authenticated" if login_ok else login_status)
             if not task:
                 continue
             _persist_task(task)
@@ -215,6 +268,7 @@ def run() -> dict[str, Any]:
 
     report = {
         "generated_at": _now_iso(),
+        "login_status": "authenticated" if login_ok else login_status,
         "queued_count": len(queued),
         "tasks": queued,
     }
@@ -222,6 +276,7 @@ def run() -> dict[str, Any]:
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {
         "ok": True,
+        "login_status": "authenticated" if login_ok else login_status,
         "queued": len(queued),
         "path": str(report_path),
     }
