@@ -1,6 +1,8 @@
 import json
+import os
 import shutil
 import sqlite3
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,9 +17,11 @@ PACKETS_ROOT = MAIN_REPO / "out" / "packets"
 SITE_PACKET_DIR = SITE_REPO / "private" / "vault" / "packets"
 SITE_DATA_DIR = SITE_REPO / "data"
 SITE_LISTINGS_FILE = SITE_DATA_DIR / "vault_listings.ndjson"
+SITE_HISTORY_FILE = SITE_DATA_DIR / "vault_history.json"
 
 MAX_LISTINGS = 100
 _PREFERRED_COUNTIES = {"rutherford county", "davidson county"}
+_DEFAULT_RELIST_GRACE_DAYS = 21
 
 
 def slugify(text: str) -> str:
@@ -41,6 +45,8 @@ def ensure_dirs() -> None:
     SITE_DATA_DIR.mkdir(parents=True, exist_ok=True)
     if not SITE_LISTINGS_FILE.exists():
         SITE_LISTINGS_FILE.write_text("", encoding="utf-8")
+    if not SITE_HISTORY_FILE.exists():
+        SITE_HISTORY_FILE.write_text(json.dumps({"sourceLeadKeys": [], "identityKeys": []}, indent=2), encoding="utf-8")
 
 
 def load_existing_listings() -> dict[str, dict]:
@@ -64,6 +70,99 @@ def load_existing_listings() -> dict[str, dict]:
 def write_listings(rows: list[dict]) -> None:
     payload = "\n".join(json.dumps(r) for r in rows)
     SITE_LISTINGS_FILE.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+
+
+def _identity_key(county: str | None, address: str | None) -> str:
+    return f"{str(county or '').strip().lower()}|{' '.join(str(address or '').strip().lower().split())}"
+
+
+def _parse_iso_date(value: str | None) -> datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
+def load_history() -> dict[str, set[str]]:
+    try:
+        data = json.loads(SITE_HISTORY_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        data = {}
+    source_keys = {str(item).strip() for item in (data.get("sourceLeadKeys") or []) if str(item).strip()}
+    identity_keys = {str(item).strip() for item in (data.get("identityKeys") or []) if str(item).strip()}
+    if source_keys or identity_keys:
+        return {"sourceLeadKeys": source_keys, "identityKeys": identity_keys}
+
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(SITE_REPO), "log", "--format=%H", "--", str(SITE_LISTINGS_FILE)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        for commit in [line.strip() for line in result.stdout.splitlines() if line.strip()][:25]:
+            show = subprocess.run(
+                ["git", "-C", str(SITE_REPO), "show", f"{commit}:data/vault_listings.ndjson"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if show.returncode != 0:
+                continue
+            for line in show.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                lead_key = str(row.get("sourceLeadKey") or "").strip()
+                if lead_key:
+                    source_keys.add(lead_key)
+                identity = _identity_key(row.get("county"), row.get("address") or row.get("title"))
+                if identity.strip("|"):
+                    identity_keys.add(identity)
+    except Exception:
+        pass
+
+    SITE_HISTORY_FILE.write_text(
+        json.dumps(
+            {
+                "sourceLeadKeys": sorted(source_keys),
+                "identityKeys": sorted(identity_keys),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return {"sourceLeadKeys": source_keys, "identityKeys": identity_keys}
+
+
+def update_history(rows: list[dict]) -> None:
+    history = load_history()
+    for row in rows:
+        lead_key = str(row.get("sourceLeadKey") or "").strip()
+        if lead_key:
+            history["sourceLeadKeys"].add(lead_key)
+        identity = _identity_key(row.get("county"), row.get("address") or row.get("title"))
+        if identity.strip("|"):
+            history["identityKeys"].add(identity)
+    SITE_HISTORY_FILE.write_text(
+        json.dumps(
+            {
+                "sourceLeadKeys": sorted(history["sourceLeadKeys"]),
+                "identityKeys": sorted(history["identityKeys"]),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 def packet_for_lead(lead_key: str) -> Path | None:
@@ -267,6 +366,9 @@ def _vault_sort_key(row: dict) -> tuple:
 def main() -> None:
     ensure_dirs()
     existing = load_existing_listings()
+    history = load_history()
+    allow_relist = str(os.environ.get("FALCO_ALLOW_VAULT_RELIST", "")).strip().lower() in {"1", "true", "yes", "y"}
+    relist_grace_days = max(int(os.environ.get("FALCO_VAULT_RELIST_GRACE_DAYS", str(_DEFAULT_RELIST_GRACE_DAYS))), 0)
 
     con = sqlite3.connect(DB_PATH)
     cur = con.cursor()
@@ -344,6 +446,18 @@ def main() -> None:
         title = masked_title(county or "", display_distress_type or distress_type or "")
         slug = f"{slugify(title)}-{lead_key[:8]}"
         base = existing.get(slug, {})
+        identity_key = _identity_key(county, address)
+        was_live_before = (
+            lead_key in history["sourceLeadKeys"]
+            or (identity_key.strip("|") and identity_key in history["identityKeys"])
+        )
+        first_seen_dt = _parse_iso_date(first_seen_at)
+        is_recent_candidate = False
+        if first_seen_dt is not None:
+            age_days = (datetime.now(UTC) - first_seen_dt.astimezone(UTC)).days
+            is_recent_candidate = age_days <= relist_grace_days
+        if was_live_before and not base and not allow_relist and not is_recent_candidate:
+            continue
 
         lead_fields = {
             "lead_key": lead_key,
@@ -524,6 +638,7 @@ def main() -> None:
         out_rows.append(row)
 
     con.close()
+    update_history(out_rows)
     out_rows.sort(key=_vault_sort_key)
     out_rows = out_rows[:MAX_LISTINGS]
     write_listings(out_rows)

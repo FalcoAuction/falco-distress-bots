@@ -4,9 +4,12 @@ import os
 import sqlite3
 from typing import Any
 
+from ..automation.autonomy_agents import determine_lead_action
 from ..enrichment.attom_enricher import run as run_attom_enrichment
 from ..enrichment.batchdata_fallback import run as run_batchdata_fallback
 from ..enrichment.debt_reconstruction import run as run_debt_reconstruction
+from ..packaging.data_quality import assess_packet_data
+from ..packaging.packager import run as run_packager
 from ..scoring.scorer import score_leads_by_keys
 
 _EXPANSION_COUNTIES = (
@@ -18,6 +21,12 @@ _EXPANSION_COUNTIES = (
     "Robertson County",
     "Dickson County",
 )
+_CORE_HIGH_SIGNAL_COUNTIES = (
+    "Rutherford County",
+    "Davidson County",
+    "Montgomery County",
+)
+_BACKFILL_COUNTIES = _CORE_HIGH_SIGNAL_COUNTIES + _EXPANSION_COUNTIES
 
 
 def _connect() -> sqlite3.Connection:
@@ -29,7 +38,7 @@ def _connect() -> sqlite3.Connection:
 
 def _target_keys(limit: int) -> list[dict[str, Any]]:
     with _connect() as con:
-        placeholders = ",".join("?" for _ in _EXPANSION_COUNTIES)
+        placeholders = ",".join("?" for _ in _BACKFILL_COUNTIES)
         rows = con.execute(
             f"""
             SELECT
@@ -46,41 +55,158 @@ def _target_keys(limit: int) -> list[dict[str, Any]]:
               AND sale_status IN ('pre_foreclosure', 'scheduled')
               AND address IS NOT NULL
               AND TRIM(address) <> ''
-              AND UPPER(COALESCE(equity_band, '')) IN ('', 'UNKNOWN')
+              AND (
+                    UPPER(COALESCE(equity_band, '')) IN ('', 'UNKNOWN')
+                 OR sale_status = 'pre_foreclosure'
+                 OR (
+                      sale_status = 'scheduled'
+                      AND UPPER(COALESCE(equity_band, '')) IN ('MED', 'HIGH')
+                    )
+              )
             ORDER BY
               CASE county
-                WHEN 'Williamson County' THEN 0
-                WHEN 'Wilson County' THEN 1
-                WHEN 'Sumner County' THEN 2
-                WHEN 'Maury County' THEN 3
-                WHEN 'Cheatham County' THEN 4
-                WHEN 'Robertson County' THEN 5
-                WHEN 'Dickson County' THEN 6
-                ELSE 7
+                WHEN 'Rutherford County' THEN 0
+                WHEN 'Davidson County' THEN 1
+                WHEN 'Montgomery County' THEN 2
+                WHEN 'Williamson County' THEN 3
+                WHEN 'Wilson County' THEN 4
+                WHEN 'Sumner County' THEN 5
+                WHEN 'Maury County' THEN 6
+                WHEN 'Cheatham County' THEN 7
+                WHEN 'Robertson County' THEN 8
+                WHEN 'Dickson County' THEN 9
+                ELSE 10
               END,
-              CASE sale_status WHEN 'pre_foreclosure' THEN 0 ELSE 1 END,
+              CASE
+                WHEN sale_status = 'pre_foreclosure' THEN 0
+                WHEN UPPER(COALESCE(equity_band, '')) IN ('MED', 'HIGH') THEN 1
+                ELSE 2
+              END,
               freshness DESC,
               falco_score_internal DESC
             LIMIT ?
             """,
-            (*_EXPANSION_COUNTIES, limit),
+            (*_BACKFILL_COUNTIES, limit),
         ).fetchall()
     return [dict(row) for row in rows]
 
 
+def _latest_text(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> str | None:
+    row = cur.execute(
+        """
+        SELECT field_value_text
+        FROM lead_field_provenance
+        WHERE lead_key = ? AND field_name = ?
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def _latest_num(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> float | None:
+    row = cur.execute(
+        """
+        SELECT field_value_num
+        FROM lead_field_provenance
+        WHERE lead_key = ? AND field_name = ?
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return float(row[0]) if row and row[0] is not None else None
+
+
+def _latest_attom(cur: sqlite3.Cursor, lead_key: str) -> dict[str, Any]:
+    row = cur.execute(
+        """
+        SELECT attom_raw_json, avm_value, avm_low, avm_high
+        FROM attom_enrichments
+        WHERE lead_key = ?
+        ORDER BY enriched_at DESC, id DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    return {
+        "attom_raw_json": row[0] if row and row[0] is not None else None,
+        "value_anchor_mid": float(row[1]) if row and row[1] is not None else None,
+        "value_anchor_low": float(row[2]) if row and row[2] is not None else None,
+        "value_anchor_high": float(row[3]) if row and row[3] is not None else None,
+    }
+
+
+def _publishable_pack_targets(lead_keys: list[str]) -> list[str]:
+    if not lead_keys:
+        return []
+    with _connect() as con:
+        placeholders = ",".join("?" for _ in lead_keys)
+        rows = con.execute(
+            f"""
+            SELECT lead_key, address, county, distress_type, falco_score_internal,
+                   auction_readiness, equity_band, dts_days, sale_status,
+                   current_sale_date, original_sale_date, first_seen_at, last_seen_at
+            FROM leads
+            WHERE lead_key IN ({placeholders})
+            """,
+            lead_keys,
+        ).fetchall()
+        out: list[str] = []
+        for row in rows:
+            lead = dict(row)
+            lead_key = str(lead.get("lead_key") or "").strip()
+            if not lead_key:
+                continue
+            attom = _latest_attom(con.cursor(), lead_key)
+            lead_fields = {
+                **lead,
+                "contact_ready": _latest_text(con.cursor(), lead_key, "contact_ready") == "1",
+                "attom_raw_json": attom["attom_raw_json"],
+                "value_anchor_mid": attom["value_anchor_mid"],
+                "value_anchor_low": attom["value_anchor_low"],
+                "value_anchor_high": attom["value_anchor_high"],
+                "property_identifier": _latest_text(con.cursor(), lead_key, "property_identifier"),
+                "owner_name": _latest_text(con.cursor(), lead_key, "owner_name"),
+                "owner_mail": _latest_text(con.cursor(), lead_key, "owner_mail"),
+                "last_sale_date": _latest_text(con.cursor(), lead_key, "last_sale_date"),
+                "mortgage_date": _latest_text(con.cursor(), lead_key, "mortgage_date"),
+                "mortgage_lender": _latest_text(con.cursor(), lead_key, "mortgage_lender"),
+                "mortgage_amount": _latest_num(con.cursor(), lead_key, "mortgage_amount"),
+                "trustee_phone_public": _latest_text(con.cursor(), lead_key, "trustee_phone_public"),
+                "owner_phone_primary": _latest_text(con.cursor(), lead_key, "owner_phone_primary"),
+                "owner_phone_secondary": _latest_text(con.cursor(), lead_key, "owner_phone_secondary"),
+                "notice_phone": _latest_text(con.cursor(), lead_key, "notice_phone"),
+            }
+            quality = assess_packet_data(lead_fields)
+            decision = determine_lead_action(lead_fields, quality, [], [])
+            sale_status = str(lead.get("sale_status") or "").strip().lower()
+            if sale_status == "pre_foreclosure":
+                if bool(quality.get("prefc_live_quality")) and decision.get("next_action") == "publish":
+                    out.append(lead_key)
+            elif bool(quality.get("vault_publish_ready")) and decision.get("next_action") == "publish":
+                out.append(lead_key)
+        return out
+
+
 def run(run_id: str) -> dict[str, Any]:
-    limit = max(int(os.environ.get("FALCO_EXPANSION_ATTOM_LIMIT", "12")), 0)
+    limit = max(int(os.environ.get("FALCO_EXPANSION_ATTOM_LIMIT", "20")), 0)
     targets = _target_keys(limit)
     if not targets:
         return {
             "attempted": True,
             "requested": 0,
             "processed": 0,
-            "counties": list(_EXPANSION_COUNTIES),
+            "counties": list(_BACKFILL_COUNTIES),
         }
 
     lead_keys = [str(row["lead_key"]) for row in targets if str(row.get("lead_key") or "").strip()]
-    prefc_keys = [str(row["lead_key"]) for row in targets if str(row.get("sale_status") or "").strip().lower() == "pre_foreclosure"]
+    debt_keys = [
+        str(row["lead_key"])
+        for row in targets
+        if str(row.get("sale_status") or "").strip().lower() in {"pre_foreclosure", "scheduled"}
+    ]
 
     env_backup = {
         key: os.environ.get(key)
@@ -96,6 +222,7 @@ def run(run_id: str) -> dict[str, Any]:
 
     attom_result: dict[str, Any] | None = None
     batchdata_result: dict[str, Any] | None = None
+    packaged_keys: list[str] = []
     try:
         os.environ["FALCO_STAGE2_SOURCE"] = "sqlite"
         os.environ["FALCO_ATTOM_TARGET_LEAD_KEYS"] = ",".join(lead_keys)
@@ -103,14 +230,21 @@ def run(run_id: str) -> dict[str, Any]:
         os.environ["FALCO_MAX_ATTOM_CALLS_PER_RUN"] = str(max(len(lead_keys) * 4, 4))
         attom_result = run_attom_enrichment()
 
-        if prefc_keys:
-            os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(prefc_keys)
+        if debt_keys and os.environ.get("FALCO_BATCHDATA_API_KEY", "").strip():
+            os.environ["FALCO_ENABLE_BATCHDATA_FALLBACK"] = "1"
+            os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(debt_keys)
             batchdata_result = run_batchdata_fallback()
-            os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(prefc_keys)
+        if debt_keys:
+            os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(debt_keys)
             run_debt_reconstruction()
 
         score_leads_by_keys(lead_keys, run_id=f"{run_id}_expansion")
+        packaged_keys = _publishable_pack_targets(lead_keys)
+        for lead_key in packaged_keys:
+            os.environ["FALCO_REPACK_LEAD_KEY"] = lead_key
+            run_packager()
     finally:
+        os.environ.pop("FALCO_REPACK_LEAD_KEY", None)
         for key, value in env_backup.items():
             if value is None:
                 os.environ.pop(key, None)
@@ -121,8 +255,9 @@ def run(run_id: str) -> dict[str, Any]:
         "attempted": True,
         "requested": len(lead_keys),
         "processed": len(lead_keys),
-        "counties": list(_EXPANSION_COUNTIES),
+        "counties": list(_BACKFILL_COUNTIES),
         "targets": targets,
         "attom": attom_result,
         "batchdata": batchdata_result,
+        "packaged": packaged_keys,
     }
