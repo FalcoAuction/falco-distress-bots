@@ -620,7 +620,7 @@ def run(run_id: str) -> dict[str, Any]:
     foreclosure_prune_limit = max(int(os.environ.get("FALCO_AUTO_FORECLOSURE_PRUNE_LIMIT", "2")), 0)
     foreclosure_prune_result = _prune_moderate_live_foreclosures(foreclosure_prune_limit)
 
-    publish_enabled = _truthy(os.environ.get("FALCO_AUTO_PUBLISH_VAULT"))
+    publish_enabled = _truthy(os.environ.get("FALCO_AUTO_PUBLISH_VAULT", "1"))
     if not publish_enabled:
         return {
             "ok": True,

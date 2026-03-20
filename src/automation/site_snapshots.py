@@ -956,7 +956,9 @@ def _build_pre_foreclosure_promotion(
     ).fetchall():
         attom_map[row["lead_key"]] = dict(row)
 
-    ready_for_review: list[dict[str, Any]] = []
+    auto_publish: list[dict[str, Any]] = []
+    auto_enrich: list[dict[str, Any]] = []
+    monitor: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     blocker_counts: dict[str, int] = {}
 
@@ -1071,11 +1073,24 @@ def _build_pre_foreclosure_promotion(
                 "noticePhone": hydrated.get("notice_phone"),
             }
         )
+        decision = determine_lead_action(hydrated, quality, overlap_signals, [])
+        row["recommendedAction"] = decision.get("next_action")
+        row["recommendedActionReasons"] = decision.get("reasons") or []
+        row["recommendedActionPriority"] = decision.get("priority")
 
-        if row["preForeclosureReviewReady"] and not row["vaultLive"] and _meets_high_confidence_review_bar(quality, "pre_foreclosure"):
-            ready_for_review.append(row)
-        elif bool(row.get("recoverablePartial")) and not bool(row.get("suppressEarly")):
-            ready_for_review.append(row)
+        next_action = str(row.get("recommendedAction") or "").strip().lower()
+        if not row["vaultLive"] and next_action == "publish" and _meets_high_confidence_review_bar(quality, "pre_foreclosure"):
+            auto_publish.append(row)
+        elif not row["vaultLive"] and next_action in {
+            "county_record_lookup",
+            "reconstruct_debt",
+            "reconstruct_transfer",
+            "enrich_contact",
+            "special_situations_review",
+        }:
+            auto_enrich.append(row)
+        elif not row["vaultLive"] and next_action == "monitor":
+            monitor.append(row)
         else:
             blocked.append(row)
             for blocker in row["executionBlockers"]:
@@ -1088,16 +1103,18 @@ def _build_pre_foreclosure_promotion(
             len(row.get("executionBlockers") or []),
         )
     )
-    ready_for_review.sort(key=_prefc_strength_sort_key)
+    auto_publish.sort(key=_prefc_strength_sort_key)
+    auto_enrich.sort(key=_prefc_strength_sort_key)
+    monitor.sort(key=_prefc_strength_sort_key)
 
     strongest_candidates = [
         row
-        for row in ready_for_review
+        for row in auto_publish
         if bool(row.get("prefcLiveQuality")) and str(row.get("debtConfidence") or "").upper() == "FULL"
     ]
     recoverable_candidates = [
         row
-        for row in ready_for_review
+        for row in auto_enrich
         if bool(row.get("recoverablePartial")) and not bool(row.get("prefcLiveQuality"))
     ]
     weak_live_review = [
@@ -1107,10 +1124,16 @@ def _build_pre_foreclosure_promotion(
     ]
 
     return {
-        "readyCount": len(ready_for_review),
+        "readyCount": len(auto_publish) + len(auto_enrich) + len(monitor),
         "blockedCount": len(blocked),
-        "readyForReview": ready_for_review[:limit],
+        "readyForReview": (auto_publish + auto_enrich + monitor)[:limit],
         "blocked": blocked[:limit],
+        "autoPublishCount": len(auto_publish),
+        "autoEnrichCount": len(auto_enrich),
+        "monitorCount": len(monitor),
+        "autoPublishCandidates": auto_publish[:limit],
+        "autoEnrichCandidates": auto_enrich[:limit],
+        "monitorCandidates": monitor[:limit],
         "strongestCandidates": strongest_candidates[:limit],
         "recoverableCandidates": recoverable_candidates[:limit],
         "weakLiveReview": weak_live_review[:limit],

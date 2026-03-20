@@ -297,12 +297,12 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
             return "publish", "high", reasons
         if bool(quality.get("fsbo_review_ready")):
             reasons.extend((quality.get("fsbo_actionability_reasons") or ["Seller-direct file is worth operator review"])[:2])
-            return "hold_for_review", "medium", reasons
+            return "monitor", "medium", reasons
         if str(execution.get("contact_path_quality") or "THIN").upper() == "THIN":
             reasons.append("Direct seller contact is missing")
-            return "hold_or_suppress", "medium", reasons
+            return "suppress", "medium", reasons
         reasons.extend((quality.get("vault_publish_blockers") or quality.get("execution_blockers") or ["Seller-direct opportunity is not actionable enough yet"])[:2])
-        return "hold_or_suppress", "low", reasons
+        return "suppress", "low", reasons
 
     if lead_key in live_lookup and sale_status == "pre_foreclosure" and not bool(quality.get("prefc_live_quality")):
         reasons.extend(quality.get("prefc_live_review_reasons") or ["Live quality slipped below target"])
@@ -314,7 +314,7 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
 
     if bool(quality.get("suppress_early")):
         reasons.extend((quality.get("early_noise_reasons") or ["Lead is low-signal noise relative to the current lane"])[:2])
-        return "hold_or_suppress", "high", reasons
+        return "suppress", "high", reasons
 
     has_record_refs = bool(
         lead.get("mortgage_record_book")
@@ -373,14 +373,14 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
 
     if str(execution.get("lender_control_intensity") or "HIGH").upper() == "HIGH" or str(lead.get("equity_band") or "").upper() == "LOW":
         reasons.append("Control or equity makes the file weak for live vault")
-        return "hold_or_suppress", "medium", reasons
+        return "monitor", "medium", reasons
 
     if packetability_band == "HIGH" or packetability_score >= 10:
         reasons.extend((quality.get("packetability_reasons") or ["This file is close enough to stay in the active review queue"])[:2])
-        return "hold_for_review", "medium", reasons
+        return "monitor", "medium", reasons
 
-    reasons.append("Worth keeping on review shelf after current pass")
-    return "hold_for_review", "low", reasons
+    reasons.append("Keep tracking automatically after the current pass")
+    return "monitor", "low", reasons
 
 
 def determine_lead_action(
