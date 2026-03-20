@@ -185,7 +185,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             FROM leads
             WHERE sale_status='pre_foreclosure'
             ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
-            LIMIT 40
+            LIMIT 80
             """
         ).fetchall()
 
@@ -255,17 +255,19 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                 and hard_contact_gap
             )
 
-            if quality.get("pre_foreclosure_review_ready") and not strong_staged_contact_retry:
+            if quality.get("pre_foreclosure_review_ready") and not strong_staged_contact_retry and not recoverable_partial:
                 continue
-            if suppress_early:
+            if suppress_early and not recoverable_partial and not special_situation:
                 continue
-            if owner_agency == "LOW" or intervention_window == "COMPRESSED" or lender_control == "HIGH":
+            if owner_agency == "LOW" and not recoverable_partial:
                 continue
-            if influenceability == "LOW" or lane == "unclear" or confidence == "LOW":
+            if intervention_window == "COMPRESSED" and lender_control == "HIGH" and not recoverable_partial:
+                continue
+            if (influenceability == "LOW" or lane == "unclear" or confidence == "LOW") and not recoverable_partial and not special_situation:
                 continue
             if len(blockers) > 5:
                 continue
-            if packetability_band == "LOW" and not recoverable_partial:
+            if packetability_band == "LOW" and packetability_score < 6 and not recoverable_partial:
                 continue
             if not (missing_valuation or batchdata_targets or contact_gap or special_situation or recoverable_partial):
                 continue
@@ -437,7 +439,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_PREFC_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_PREFC_ENRICH disabled"}
 
-    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "6")), 0)
+    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "10")), 0)
     targets = _apply_recovery_budget(_prefc_retry_targets(limit * 3), limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}

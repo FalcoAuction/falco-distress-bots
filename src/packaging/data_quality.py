@@ -897,7 +897,10 @@ def _derive_recoverable_partial(
     reasons: List[str] = []
     next_step = ""
 
-    if packetability.get("band") == "LOW":
+    packetability_score = int(packetability.get("score") or 0)
+    packetability_band = str(packetability.get("band") or "LOW").upper()
+
+    if packetability_band == "LOW" and packetability_score < 6:
         return {"recoverable": False, "next_step": "", "reasons": []}
 
     if is_pre_foreclosure and debt_confidence in {"PARTIAL", "PROXY", "THIN"}:
@@ -910,15 +913,25 @@ def _derive_recoverable_partial(
             next_step = "reconstruct_debt" if "amount" in blocker_type else "reconstruct_transfer"
             reasons.append("The file is close enough that a focused reconstruction pass could convert it")
 
-    if not recoverable and contact_quality in {"PARTIAL", "THIN"} and packetability.get("score", 0) >= 8:
+    if not recoverable and contact_quality in {"PARTIAL", "THIN"} and packetability_score >= 7:
         recoverable = True
         next_step = "enrich_contact"
         reasons.append("Everything else is close enough that contact recovery is worth spending on")
 
-    if not recoverable and special_situation and packetability.get("score", 0) >= 8:
+    if not recoverable and special_situation and packetability_score >= 7:
         recoverable = True
         next_step = "special_situations_review"
         reasons.append("Overlap signals justify keeping this on a tighter recovery loop")
+
+    if (
+        not recoverable
+        and is_pre_foreclosure
+        and packetability_band in {"HIGH", "MEDIUM"}
+        and packetability_score >= 7
+    ):
+        recoverable = True
+        next_step = "reconstruct_debt" if debt_confidence != "FULL" else "enrich_contact"
+        reasons.append("Pre-foreclosure is close enough to keep in the active recovery lane")
 
     return {
         "recoverable": recoverable,
@@ -948,9 +961,20 @@ def _derive_early_noise_suppression(
     if distress_type in _EARLY_NOISE_DISTRESS_TYPES and not is_pre_foreclosure:
         if contact_quality == "THIN" and owner_agency == "LOW":
             reasons.append("Late-stage notice with no meaningful owner-side path")
-    if is_pre_foreclosure and equity_band == "LOW" and contact_quality == "THIN":
+    if (
+        is_pre_foreclosure
+        and equity_band == "LOW"
+        and contact_quality == "THIN"
+        and owner_agency == "LOW"
+        and intervention_window in {"TIGHT", "COMPRESSED"}
+    ):
         reasons.append("Low-equity pre-foreclosure with no usable contact path")
-    if is_pre_foreclosure and debt_confidence == "NONE" and intervention_window in {"TIGHT", "COMPRESSED"}:
+    if (
+        is_pre_foreclosure
+        and debt_confidence == "NONE"
+        and intervention_window in {"TIGHT", "COMPRESSED"}
+        and contact_quality == "THIN"
+    ):
         reasons.append("Compressed timing with no usable debt stack")
 
     return {

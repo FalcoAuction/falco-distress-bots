@@ -1074,6 +1074,8 @@ def _build_pre_foreclosure_promotion(
 
         if row["preForeclosureReviewReady"] and not row["vaultLive"] and _meets_high_confidence_review_bar(quality, "pre_foreclosure"):
             ready_for_review.append(row)
+        elif bool(row.get("recoverablePartial")) and not bool(row.get("suppressEarly")):
+            ready_for_review.append(row)
         else:
             blocked.append(row)
             for blocker in row["executionBlockers"]:
@@ -1093,6 +1095,11 @@ def _build_pre_foreclosure_promotion(
         for row in ready_for_review
         if bool(row.get("prefcLiveQuality")) and str(row.get("debtConfidence") or "").upper() == "FULL"
     ]
+    recoverable_candidates = [
+        row
+        for row in ready_for_review
+        if bool(row.get("recoverablePartial")) and not bool(row.get("prefcLiveQuality"))
+    ]
     weak_live_review = [
         row
         for row in blocked
@@ -1105,6 +1112,7 @@ def _build_pre_foreclosure_promotion(
         "readyForReview": ready_for_review[:limit],
         "blocked": blocked[:limit],
         "strongestCandidates": strongest_candidates[:limit],
+        "recoverableCandidates": recoverable_candidates[:limit],
         "weakLiveReview": weak_live_review[:limit],
         "blockerCounts": [
             {"label": label, "count": count}
