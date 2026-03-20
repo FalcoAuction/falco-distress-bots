@@ -79,6 +79,7 @@ def _lead_key_prefix(lead_key: str) -> str:
 
 def _prefc_strength_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
+        0 if str(row.get("county") or "").strip() in {"Rutherford County", "Davidson County"} else 1,
         prefc_county_priority(row.get("county")),
         prefc_overlap_priority(row.get("overlapSignals") or []),
         0 if bool(row.get("specialSituation")) else 1,
@@ -792,6 +793,7 @@ def _build_publish_candidates(
 
     candidates.sort(
         key=lambda row: (
+            0 if str(row["listingPayload"].get("county") or "").strip() in {"Rutherford County", "Davidson County"} else 1,
             0 if row["listingPayload"].get("topTierReady") else 1,
             prefc_overlap_priority(row["listingPayload"].get("overlapSignals") or []),
             0 if row["listingPayload"].get("specialSituation") else 1,

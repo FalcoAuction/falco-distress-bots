@@ -30,9 +30,18 @@ from .site_snapshots import (
     _load_live_slugs,
 )
 
+_PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county"}
+
 
 def _truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _county_budget_boost(county: str | None) -> int:
+    normalized = str(county or "").strip().lower()
+    if normalized in _PUSH_HARDER_BUDGET_COUNTIES:
+        return 2
+    return 0
 
 
 def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
@@ -285,6 +294,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
 
     targets.sort(
         key=lambda row: (
+            -_county_budget_boost(row.get("county")),
             0 if row["next_action"] in {"county_record_lookup", "reconstruct_debt"} else 1,
             0 if row["next_action"] == "reconstruct_transfer" else 1,
             0 if row["recoverable_partial"] else 1,
@@ -324,6 +334,7 @@ def _apply_recovery_budget(targets: list[dict[str, Any]], limit: int) -> list[di
         county = str(row.get("county") or "")
         county_priority = int(row.get("county_priority") or 3)
         county_cap = county_caps.get(county_priority, 1)
+        county_cap += _county_budget_boost(county)
         if row.get("special_situation") or row.get("source_priority") == 0:
             county_cap += 1
         if county_counts.get(county, 0) >= county_cap:
@@ -358,6 +369,45 @@ def _prune_weak_live_prefc(limit: int) -> dict[str, Any]:
         live_quality = bool(row.get("prefcLiveQuality"))
         equity_band = str(row.get("equityBand") or "").strip().upper()
         if debt_confidence != "FULL" or not live_quality or equity_band == "LOW":
+            prune_slugs.append(slug)
+
+    if not prune_slugs:
+        return {"attempted": True, "pruned": 0, "slugs": []}
+
+    prune_slugs = prune_slugs[:limit]
+    for slug in prune_slugs:
+        existing.pop(slug, None)
+    _write_site_rows(existing)
+    return {"attempted": True, "pruned": len(prune_slugs), "slugs": prune_slugs}
+
+
+def _prune_moderate_live_foreclosures(limit: int) -> dict[str, Any]:
+    if limit <= 0:
+        return {"attempted": True, "pruned": 0, "slugs": []}
+
+    existing = _load_existing_site_rows()
+    prune_slugs: list[str] = []
+    for slug, row in existing.items():
+        if str(row.get("saleStatus") or "").strip().lower() != "scheduled":
+            continue
+        if str(row.get("status") or "").strip().lower() != "active":
+            continue
+        if bool(row.get("topTierReady")):
+            continue
+
+        readiness = str(row.get("auctionReadiness") or "").strip().upper()
+        equity_band = str(row.get("equityBand") or "").strip().upper()
+        workability = str(row.get("workabilityBand") or "").strip().upper()
+        contact_quality = str(row.get("contactPathQuality") or "").strip().upper()
+
+        if (
+            readiness != "GREEN"
+            and (
+                equity_band in {"LOW", "UNKNOWN", ""}
+                or workability not in {"STRONG"}
+                or contact_quality not in {"GOOD", "STRONG"}
+            )
+        ):
             prune_slugs.append(slug)
 
     if not prune_slugs:
@@ -498,6 +548,7 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
 
     filtered.sort(
         key=lambda row: (
+            -_county_budget_boost((row.get("listingPayload") or {}).get("county")),
             prefc_county_priority(str((row.get("listingPayload") or {}).get("county") or "")),
             prefc_overlap_priority((row.get("listingPayload") or {}).get("overlapSignals") or []),
             0 if bool((row.get("listingPayload") or {}).get("specialSituation")) else 1,
@@ -551,6 +602,8 @@ def run(run_id: str) -> dict[str, Any]:
     enrichment_result = _run_targeted_enrichment(run_id)
     prune_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PRUNE_LIMIT", "3")), 0)
     prune_result = _prune_weak_live_prefc(prune_limit)
+    foreclosure_prune_limit = max(int(os.environ.get("FALCO_AUTO_FORECLOSURE_PRUNE_LIMIT", "2")), 0)
+    foreclosure_prune_result = _prune_moderate_live_foreclosures(foreclosure_prune_limit)
 
     publish_enabled = _truthy(os.environ.get("FALCO_AUTO_PUBLISH_VAULT"))
     if not publish_enabled:
@@ -558,6 +611,7 @@ def run(run_id: str) -> dict[str, Any]:
             "ok": True,
             "enrichment": enrichment_result,
             "prune": prune_result,
+            "foreclosurePrune": foreclosure_prune_result,
             "publish": {
                 "attempted": False,
                 "enabled": False,
@@ -572,6 +626,7 @@ def run(run_id: str) -> dict[str, Any]:
         "ok": bool(publish_result.get("ok", True)),
         "enrichment": enrichment_result,
         "prune": prune_result,
+        "foreclosurePrune": foreclosure_prune_result,
         "publish": {
             **publish_result,
             "enabled": True,

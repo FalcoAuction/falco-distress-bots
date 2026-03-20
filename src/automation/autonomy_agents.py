@@ -501,22 +501,46 @@ def _build_vault_quality(live_rows: list[dict[str, Any]]) -> dict[str, Any]:
     watch_count = 0
     remove_count = 0
     for row in live_rows:
-        if str(row.get("saleStatus") or "").strip().lower() != "pre_foreclosure":
-            continue
+        sale_status = str(row.get("saleStatus") or "").strip().lower()
         reasons = list(row.get("prefcLiveReviewReasons") or [])
-        if bool(row.get("prefcLiveQuality")) and str(row.get("debtConfidence") or "").upper() == "FULL":
-            decision = "keep_live"
-            keep_count += 1
-        elif str(row.get("equityBand") or "").upper() == "LOW" or str(row.get("debtConfidence") or "").upper() != "FULL":
-            decision = "remove_from_vault"
-            remove_count += 1
-            if not reasons:
-                reasons = ["Live pre-foreclosure no longer clears the strong-live bar"]
+
+        if sale_status == "pre_foreclosure":
+            if bool(row.get("prefcLiveQuality")) and str(row.get("debtConfidence") or "").upper() == "FULL":
+                decision = "keep_live"
+                keep_count += 1
+            elif str(row.get("equityBand") or "").upper() == "LOW" or str(row.get("debtConfidence") or "").upper() != "FULL":
+                decision = "remove_from_vault"
+                remove_count += 1
+                if not reasons:
+                    reasons = ["Live pre-foreclosure no longer clears the strong-live bar"]
+            else:
+                decision = "watch_live"
+                watch_count += 1
+                if not reasons:
+                    reasons = ["Needs operator watch until the next quality refresh"]
+        elif sale_status == "scheduled":
+            top_tier = bool(row.get("topTierReady"))
+            readiness = str(row.get("auctionReadiness") or "").strip().upper()
+            equity_band = str(row.get("equityBand") or "").strip().upper()
+            workability = str(row.get("workabilityBand") or "").strip().upper()
+            contact_quality = str(row.get("contactPathQuality") or "").strip().upper()
+            if top_tier:
+                decision = "keep_live"
+                keep_count += 1
+            elif readiness != "GREEN" and (
+                equity_band in {"LOW", "UNKNOWN", ""}
+                or workability not in {"STRONG"}
+                or contact_quality not in {"GOOD", "STRONG"}
+            ):
+                decision = "remove_from_vault"
+                remove_count += 1
+                reasons = ["Live foreclosure no longer clears the stronger vault bar"]
+            else:
+                decision = "watch_live"
+                watch_count += 1
+                reasons = ["Scheduled foreclosure is usable, but not strong enough to be treated as top shelf"]
         else:
-            decision = "watch_live"
-            watch_count += 1
-            if not reasons:
-                reasons = ["Needs operator watch until the next quality refresh"]
+            continue
 
         review.append(
             {
@@ -538,6 +562,7 @@ def _build_vault_quality(live_rows: list[dict[str, Any]]) -> dict[str, Any]:
             {"remove_from_vault": 0, "watch_live": 1, "keep_live": 2}.get(str(row["decision"]), 3),
             prefc_county_priority(row["county"]),
             0 if str(row.get("equityBand") or "").upper() in {"MED", "HIGH"} else 1,
+            0 if bool(row.get("topTierReady")) else 1,
         )
     )
 
