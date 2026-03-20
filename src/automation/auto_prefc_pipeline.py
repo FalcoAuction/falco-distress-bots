@@ -221,6 +221,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             batchdata_targets = list(quality.get("batchdata_fallback_targets") or [])
             packetability_band = str(quality.get("packetability_band") or "LOW").upper()
             packetability_score = int(quality.get("packetability_score") or 0)
+            quality_pattern_band = str(quality.get("quality_sourcing_pattern_band") or "LOW").upper()
+            quality_pattern_score = int(quality.get("quality_sourcing_pattern_score") or 0)
             recoverable_partial = bool(quality.get("recoverable_partial"))
             recoverable_next_step = str(quality.get("recoverable_partial_next_step") or "").strip().lower()
             suppress_early = bool(quality.get("suppress_early"))
@@ -267,7 +269,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                 continue
             if len(blockers) > 5:
                 continue
-            if packetability_band == "LOW" and packetability_score < 6 and not recoverable_partial:
+            if packetability_band == "LOW" and packetability_score < 6 and quality_pattern_score < 7 and not recoverable_partial:
                 continue
             if not (missing_valuation or batchdata_targets or contact_gap or special_situation or recoverable_partial):
                 continue
@@ -288,6 +290,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                     "blocker_type": str(hydrated.get("debt_reconstruction_blocker_type") or "").strip().lower(),
                     "packetability_band": packetability_band,
                     "packetability_score": packetability_score,
+                    "quality_pattern_band": quality_pattern_band,
+                    "quality_pattern_score": quality_pattern_score,
                     "recoverable_partial": recoverable_partial,
                     "recoverable_next_step": recoverable_next_step,
                     "score": float(lead["falco_score_internal"] or 0),
@@ -310,6 +314,8 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             -_source_quality_boost(row.get("distress_type")),
             0 if row["next_action"] in {"county_record_lookup", "reconstruct_debt"} else 1,
             0 if row["next_action"] == "reconstruct_transfer" else 1,
+            0 if row["quality_pattern_band"] == "HIGH" else 1 if row["quality_pattern_band"] == "MEDIUM" else 2,
+            -row["quality_pattern_score"],
             0 if row["recoverable_partial"] else 1,
             row["county_priority"],
             prefc_overlap_priority(row["overlap_signals"]),
@@ -516,6 +522,8 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
                 "county": row["county"],
                 "next_action": row["next_action"],
                 "packetability_band": row["packetability_band"],
+                "quality_pattern_band": row["quality_pattern_band"],
+                "quality_pattern_score": row["quality_pattern_score"],
                 "recoverable_partial": row["recoverable_partial"],
             }
             for row in targets

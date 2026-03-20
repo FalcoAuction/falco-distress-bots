@@ -884,6 +884,86 @@ def _derive_packetability(
     }
 
 
+def _derive_quality_sourcing_pattern(
+    enriched: Dict[str, Any],
+    execution_reality: Dict[str, Any],
+    lane_suggestion: Dict[str, Any],
+    debt_confidence: str,
+    is_pre_foreclosure: bool,
+    special_situation: bool,
+) -> Dict[str, Any]:
+    score = 0
+    reasons: List[str] = []
+
+    source_priority = prefc_source_priority(str(enriched.get("distress_type") or ""))
+    equity_band = str(enriched.get("equity_band") or "").strip().upper()
+    contact_quality = str(execution_reality.get("contact_path_quality") or "THIN").upper()
+    owner_agency = str(execution_reality.get("owner_agency") or "LOW").upper()
+    intervention_window = str(execution_reality.get("intervention_window") or "COMPRESSED").upper()
+    lender_control = str(execution_reality.get("lender_control_intensity") or "HIGH").upper()
+    influenceability = str(execution_reality.get("influenceability") or "LOW").upper()
+    lane_confidence = str(lane_suggestion.get("confidence") or "LOW").upper()
+
+    if not is_pre_foreclosure:
+        return {"score": 0, "band": "LOW", "reasons": []}
+
+    if source_priority == 0:
+        score += 3
+        reasons.append("Early pre-foreclosure source is a strong upstream signal")
+    elif source_priority == 1:
+        score += 2
+        reasons.append("Lis pendens source still gives an early enough signal")
+
+    if equity_band in {"MED", "HIGH"}:
+        score += 3
+        reasons.append("Equity profile is strong enough for vault-quality conversion")
+    elif equity_band == "LOW":
+        score += 1
+
+    if debt_confidence == "FULL":
+        score += 3
+        reasons.append("Debt picture is already complete")
+    elif debt_confidence in {"PARTIAL", "PROXY"}:
+        score += 1
+
+    if contact_quality in {"GOOD", "STRONG"}:
+        score += 2
+        reasons.append("Contact path is already actionable")
+    elif contact_quality == "PARTIAL":
+        score += 1
+
+    if owner_agency == "HIGH":
+        score += 2
+        reasons.append("Owner still appears able to influence outcome")
+    elif owner_agency == "MEDIUM":
+        score += 1
+
+    if intervention_window in {"WIDE", "MODERATE"}:
+        score += 1
+    if lender_control == "LOW":
+        score += 1
+    if influenceability == "HIGH":
+        score += 1
+    if lane_confidence == "HIGH":
+        score += 1
+    if special_situation:
+        score += 1
+        reasons.append("Overlap signals improve the chance of a strong conversion")
+
+    if score >= 11:
+        band = "HIGH"
+    elif score >= 7:
+        band = "MEDIUM"
+    else:
+        band = "LOW"
+
+    return {
+        "score": score,
+        "band": band,
+        "reasons": reasons[:5],
+    }
+
+
 def _derive_recoverable_partial(
     enriched: Dict[str, Any],
     packetability: Dict[str, Any],
@@ -1216,6 +1296,14 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         is_fsbo=is_fsbo,
         special_situation=special_situation,
     )
+    quality_sourcing_pattern = _derive_quality_sourcing_pattern(
+        enriched=enriched,
+        execution_reality=execution_reality,
+        lane_suggestion=lane_suggestion,
+        debt_confidence=debt_confidence,
+        is_pre_foreclosure=is_pre_foreclosure,
+        special_situation=special_situation,
+    )
     recoverable_partial = _derive_recoverable_partial(
         enriched=enriched,
         packetability=packetability,
@@ -1271,6 +1359,9 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         "packetability_band": packetability["band"],
         "packetability_reasons": packetability["reasons"],
         "packetability_blockers": packetability["blockers"],
+        "quality_sourcing_pattern_score": quality_sourcing_pattern["score"],
+        "quality_sourcing_pattern_band": quality_sourcing_pattern["band"],
+        "quality_sourcing_pattern_reasons": quality_sourcing_pattern["reasons"],
         "recoverable_partial": recoverable_partial["recoverable"],
         "recoverable_partial_next_step": recoverable_partial["next_step"],
         "recoverable_partial_reasons": recoverable_partial["reasons"],
