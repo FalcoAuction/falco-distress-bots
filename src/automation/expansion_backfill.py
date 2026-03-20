@@ -20,6 +20,9 @@ _EXPANSION_COUNTIES = (
     "Cheatham County",
     "Robertson County",
     "Dickson County",
+    "Blount County",
+    "Sevier County",
+    "Washington County",
 )
 _CORE_HIGH_SIGNAL_COUNTIES = (
     "Rutherford County",

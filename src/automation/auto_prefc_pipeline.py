@@ -30,7 +30,13 @@ from .site_snapshots import (
     _load_live_slugs,
 )
 
-_PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county", "montgomery county"}
+_PUSH_HARDER_BUDGET_COUNTIES = {
+    "rutherford county",
+    "davidson county",
+    "montgomery county",
+    "williamson county",
+    "sumner county",
+}
 _HIGH_EQUITY_EXPANSION_COUNTIES = {
     "williamson county",
     "wilson county",
@@ -39,6 +45,9 @@ _HIGH_EQUITY_EXPANSION_COUNTIES = {
     "cheatham county",
     "robertson county",
     "dickson county",
+    "blount county",
+    "sevier county",
+    "washington county",
 }
 _HIGH_QUALITY_SOURCE_TYPES = {"SOT", "SUBSTITUTION_OF_TRUSTEE", "LIS_PENDENS"}
 
@@ -196,7 +205,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             FROM leads
             WHERE sale_status='pre_foreclosure'
             ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
-            LIMIT 140
+            LIMIT 180
             """
         ).fetchall()
 
@@ -348,16 +357,16 @@ def _apply_recovery_budget(targets: list[dict[str, Any]], limit: int) -> list[di
     if not targets or limit <= 0:
         return []
 
-    county_caps = {0: 6, 1: 5, 2: 3, 3: 2}
+    county_caps = {0: 8, 1: 6, 2: 4, 3: 2}
     selected: list[dict[str, Any]] = []
     county_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
     action_caps = {
-        "county_record_lookup": max(3, limit // 2),
-        "reconstruct_debt": max(4, limit),
-        "reconstruct_transfer": max(3, limit // 2),
-        "enrich_contact": max(4, limit),
-        "special_situations_review": max(3, limit // 2),
+        "county_record_lookup": max(4, (limit * 2) // 3),
+        "reconstruct_debt": max(6, limit + 2),
+        "reconstruct_transfer": max(4, (limit * 2) // 3),
+        "enrich_contact": max(6, limit + 2),
+        "special_situations_review": max(4, (limit * 2) // 3),
     }
 
     for row in targets:
@@ -456,7 +465,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_PREFC_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_PREFC_ENRICH disabled"}
 
-    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "16")), 0)
+    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "22")), 0)
     targets = _apply_recovery_budget(_prefc_retry_targets(limit * 3), limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}

@@ -78,6 +78,9 @@ def prefc_county_tier(county: str | None) -> str:
         "dickson county",
         "maury county",
         "campbell county",
+        "blount county",
+        "sevier county",
+        "washington county",
     }:
         return "SECONDARY"
     if normalized in {"knox county"}:

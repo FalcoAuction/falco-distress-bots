@@ -45,6 +45,9 @@ DEFAULT_ALLOWED_COUNTIES_BASE = [
     "Dickson",
     "Knox",
     "Hamilton",
+    "Blount",
+    "Sevier",
+    "Washington",
 ]
 
 
@@ -57,7 +60,7 @@ SEED_URLS_PUBLIC_NOTICES = [
     "https://www.tnpublicnotice.com/Search.aspx",
 ]
 
-PUBLIC_NOTICES_MAX_LIST_PAGES = 10
+PUBLIC_NOTICES_MAX_LIST_PAGES = 16
 
 # Per-bot window (THIS is the important fix)
 # TNLegalPub etc can have sale dates that are much farther out than courthouse lists.
@@ -130,5 +133,5 @@ HOT_DAYS_THRESHOLD = 14
 # ============================================================
 # SAFETY LIMITS
 # ============================================================
-MAX_NOTICE_LINKS_PER_SOURCE = 200
+MAX_NOTICE_LINKS_PER_SOURCE = 350
 MAX_NOTICE_TEXT_CHARS = 8000
