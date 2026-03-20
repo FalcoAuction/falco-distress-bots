@@ -456,9 +456,6 @@ def main() -> None:
         if first_seen_dt is not None:
             age_days = (datetime.now(UTC) - first_seen_dt.astimezone(UTC)).days
             is_recent_candidate = age_days <= relist_grace_days
-        if was_live_before and not base and not allow_relist and not is_recent_candidate:
-            continue
-
         lead_fields = {
             "lead_key": lead_key,
             "address": address or "",
@@ -530,6 +527,8 @@ def main() -> None:
                 _scheduled_live_ready(quality, lead_fields)
                 or (bool(quality.get("vault_publish_ready")) and decision["next_action"] == "publish")
             )
+        if was_live_before and not base and not allow_relist and not is_recent_candidate and not publish_ready:
+            continue
         if not base:
             publish_ready = publish_ready and decision["next_action"] == "publish"
         if not publish_ready and not base:
