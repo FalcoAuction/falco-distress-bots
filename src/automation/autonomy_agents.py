@@ -312,6 +312,20 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
         reasons.append("Clears strong live pre-foreclosure bar")
         return "publish", "high", reasons
 
+    if sale_status == "scheduled" and bool(quality.get("vault_publish_ready")):
+        contact_quality = str(execution.get("contact_path_quality") or "THIN").upper()
+        workability = str(execution.get("workability_band") or "LIMITED").upper()
+        equity_band = str(lead.get("equity_band") or "").upper()
+        debt_confidence = str(quality.get("debt_confidence") or "").upper()
+        if (
+            debt_confidence == "FULL"
+            and equity_band in {"MED", "HIGH"}
+            and contact_quality in {"GOOD", "STRONG"}
+            and workability in {"MODERATE", "STRONG", "LIMITED"}
+        ):
+            reasons.append("Clears scheduled foreclosure publish bar")
+            return "publish", "high", reasons
+
     if bool(quality.get("suppress_early")):
         reasons.extend((quality.get("early_noise_reasons") or ["Lead is low-signal noise relative to the current lane"])[:2])
         return "suppress", "high", reasons

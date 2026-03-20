@@ -16,7 +16,7 @@ SITE_PACKET_DIR = SITE_REPO / "private" / "vault" / "packets"
 SITE_DATA_DIR = SITE_REPO / "data"
 SITE_LISTINGS_FILE = SITE_DATA_DIR / "vault_listings.ndjson"
 
-MAX_LISTINGS = 25
+MAX_LISTINGS = 100
 _PREFERRED_COUNTIES = {"rutherford county", "davidson county"}
 
 
