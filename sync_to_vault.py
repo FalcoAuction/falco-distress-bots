@@ -214,8 +214,24 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
     workability = str(execution.get("workability_band") or "").strip().upper()
     lane_confidence = str((quality.get("lane_suggestion") or {}).get("confidence") or "").strip().upper()
 
+    county = str(row.get("county") or "").strip().lower()
+
     if bool(quality.get("top_tier_ready")):
         return True
+
+    if county in _PREFERRED_COUNTIES:
+        return bool(
+            readiness in {"GREEN", "YELLOW"}
+            and equity_band in {"MED", "HIGH"}
+            and debt_confidence == "FULL"
+            and contact_quality in {"GOOD", "STRONG"}
+            and owner_agency in {"HIGH", "MEDIUM"}
+            and intervention_window in {"WIDE", "MODERATE"}
+            and lender_control != "HIGH"
+            and influenceability in {"HIGH", "MEDIUM"}
+            and workability in {"STRONG", "MODERATE"}
+            and lane_confidence == "HIGH"
+        )
 
     return bool(
         readiness == "GREEN"
@@ -226,7 +242,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
         and intervention_window in {"WIDE", "MODERATE"}
         and lender_control != "HIGH"
         and influenceability == "HIGH"
-        and workability == "STRONG"
+        and workability in {"STRONG", "MODERATE"}
         and lane_confidence == "HIGH"
     )
 

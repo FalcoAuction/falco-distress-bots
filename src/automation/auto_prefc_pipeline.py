@@ -31,6 +31,7 @@ from .site_snapshots import (
 )
 
 _PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county"}
+_HIGH_QUALITY_SOURCE_TYPES = {"SOT", "SUBSTITUTION_OF_TRUSTEE", "LIS_PENDENS"}
 
 
 def _truthy(value: str | None) -> bool:
@@ -42,6 +43,15 @@ def _county_budget_boost(county: str | None) -> int:
     if normalized in _PUSH_HARDER_BUDGET_COUNTIES:
         return 2
     return 0
+
+
+def _source_quality_boost(source_value: str | None) -> int:
+    normalized = str(source_value or "").strip().upper()
+    if normalized in _HIGH_QUALITY_SOURCE_TYPES:
+        return 2
+    if normalized in {"FORECLOSURE", "FORECLOSURE_TN"}:
+        return 0
+    return 1
 
 
 def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
@@ -295,6 +305,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
     targets.sort(
         key=lambda row: (
             -_county_budget_boost(row.get("county")),
+            -_source_quality_boost(row.get("distress_type")),
             0 if row["next_action"] in {"county_record_lookup", "reconstruct_debt"} else 1,
             0 if row["next_action"] == "reconstruct_transfer" else 1,
             0 if row["recoverable_partial"] else 1,
@@ -335,6 +346,8 @@ def _apply_recovery_budget(targets: list[dict[str, Any]], limit: int) -> list[di
         county_priority = int(row.get("county_priority") or 3)
         county_cap = county_caps.get(county_priority, 1)
         county_cap += _county_budget_boost(county)
+        if _source_quality_boost(row.get("distress_type")) >= 2:
+            county_cap += 1
         if row.get("special_situation") or row.get("source_priority") == 0:
             county_cap += 1
         if county_counts.get(county, 0) >= county_cap:
