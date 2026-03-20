@@ -40,6 +40,9 @@ DEFAULT_ALLOWED_COUNTIES_BASE = [
     "Wilson",
     "Maury",
     "Montgomery",
+    "Cheatham",
+    "Robertson",
+    "Dickson",
     "Knox",
     "Hamilton",
 ]

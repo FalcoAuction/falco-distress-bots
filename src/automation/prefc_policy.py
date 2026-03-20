@@ -70,6 +70,7 @@ def prefc_county_tier(county: str | None) -> str:
     if normalized in {
         "montgomery county",
         "davidson county",
+        "williamson county",
         "wilson county",
         "sumner county",
         "cheatham county",

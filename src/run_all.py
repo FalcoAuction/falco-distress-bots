@@ -10,6 +10,7 @@ from .bots import public_notices_bot
 from .bots import tax_pages_bot
 from .bots import tn_foreclosure_notices_bot
 from .bots import propstream_bot
+from .bots import fsbo_bot
 from .bots import api_tax_delinquent_bot
 from .bots import lis_pendens_bot
 from .bots import substitution_of_trustee_bot
@@ -27,6 +28,7 @@ from .automation import (
     write_agent_reports,
     write_run_summary,
 )
+from .automation.expansion_backfill import run as run_expansion_backfill
 from .automation.autonomy_agents import write_autonomy_report
 from .automation.auto_prefc_pipeline import run as run_auto_prefc_pipeline
 from .automation import foreclosure_lifecycle
@@ -86,6 +88,7 @@ def main():
         stage_results.append(run_bot("PublicNoticesBot", public_notices_bot.run))
         stage_results.append(run_bot("TaxPagesBot", tax_pages_bot.run))
         stage_results.append(run_bot("PropStreamBot", propstream_bot.run))
+        stage_results.append(run_bot("FSBOBot", fsbo_bot.run))
         stage_results.append(run_bot("API_TaxDelinquentBot", api_tax_delinquent_bot.run))
         stage_results.append(run_bot("OfficialTaxSalesBot", official_tax_sales_bot.run))
         stage_results.append(run_bot("SheriffSalesBot", sheriff_sales_bot.run))
@@ -112,6 +115,12 @@ def main():
             return _run()
 
         stage_results.append(run_bot("Stage2_ATTOMEnrichment", _run_attom_enrichment))
+        stage_results.append(
+            run_bot(
+                "Stage2_ExpansionValuationBackfill",
+                lambda: run_expansion_backfill(run_id),
+            )
+        )
         stage_results.append(run_bot("Stage2_CompsEngine", _run_comps))
         stage_results.append(run_bot("Stage2_BatchDataFallback", batchdata_fallback.run))
         stage_results.append(run_bot("Stage2_DebtReconstruction", debt_reconstruction.run))

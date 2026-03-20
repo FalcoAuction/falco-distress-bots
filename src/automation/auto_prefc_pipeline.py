@@ -31,6 +31,15 @@ from .site_snapshots import (
 )
 
 _PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county", "montgomery county"}
+_HIGH_EQUITY_EXPANSION_COUNTIES = {
+    "williamson county",
+    "wilson county",
+    "sumner county",
+    "maury county",
+    "cheatham county",
+    "robertson county",
+    "dickson county",
+}
 _HIGH_QUALITY_SOURCE_TYPES = {"SOT", "SUBSTITUTION_OF_TRUSTEE", "LIS_PENDENS"}
 
 
@@ -42,6 +51,8 @@ def _county_budget_boost(county: str | None) -> int:
     normalized = str(county or "").strip().lower()
     if normalized in _PUSH_HARDER_BUDGET_COUNTIES:
         return 2
+    if normalized in _HIGH_EQUITY_EXPANSION_COUNTIES:
+        return 1
     return 0
 
 

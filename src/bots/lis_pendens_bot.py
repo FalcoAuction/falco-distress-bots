@@ -38,8 +38,8 @@ _SEEDS = [
 
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
 
-_MAX_LIST_PAGES   = int(os.getenv("FALCO_LP_MAX_LIST_PAGES",   "6"))
-_MAX_NOTICE_LINKS = int(os.getenv("FALCO_LP_MAX_NOTICE_LINKS", "150"))
+_MAX_LIST_PAGES   = int(os.getenv("FALCO_LP_MAX_LIST_PAGES",   "12"))
+_MAX_NOTICE_LINKS = int(os.getenv("FALCO_LP_MAX_NOTICE_LINKS", "300"))
 _MAX_SNIPPET_LEN  = int(os.getenv("FALCO_LP_MAX_SNIPPET_LEN",  "1000"))
 
 # Keywords that qualify a notice as upstream LP/SOT (any match accepted)
