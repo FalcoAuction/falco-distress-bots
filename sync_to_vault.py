@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from src.packaging.data_quality import assess_packet_data
+from src.automation.autonomy_agents import determine_lead_action
 
 MAIN_REPO = Path(r"C:\code\falco-distress-bots")
 SITE_REPO = Path(r"C:\code\falco-site")
@@ -16,6 +17,7 @@ SITE_DATA_DIR = SITE_REPO / "data"
 SITE_LISTINGS_FILE = SITE_DATA_DIR / "vault_listings.ndjson"
 
 MAX_LISTINGS = 25
+_PREFERRED_COUNTIES = {"rutherford county", "davidson county"}
 
 
 def slugify(text: str) -> str:
@@ -168,6 +170,12 @@ def masked_title(county: str, distress_type: str) -> str:
 
 
 def build_summary(county: str, distress_type: str, dts_days, readiness: str, falco_score, contact_ready: bool) -> str:
+    if distress_type == "Seller-Direct Review":
+        contact_txt = "direct seller contact ready" if contact_ready else "direct seller contact pending"
+        return (
+            f"Seller-direct opportunity in {county or 'target market'} with "
+            f"{readiness or 'review'} actionability and {contact_txt}."
+        )
     dts_txt = f"{int(dts_days)} days" if dts_days is not None else "early-stage timing"
     contact_txt = "contact ready" if contact_ready else "contact pending"
     return (
@@ -177,6 +185,13 @@ def build_summary(county: str, distress_type: str, dts_days, readiness: str, fal
 
 
 def build_teaser(county: str, readiness: str, falco_score, dts_days) -> str:
+    if readiness in {"ACTIONABLE_NOW", "REVIEW", "WATCH"}:
+        return " • ".join(
+            [
+                f"County: {county or 'Unknown'}",
+                f"Actionability: {readiness}",
+            ]
+        )
     parts = [
         f"County: {county or 'Unknown'}",
         f"Readiness: {readiness or 'Unknown'}",
@@ -184,6 +199,53 @@ def build_teaser(county: str, readiness: str, falco_score, dts_days) -> str:
     if dts_days is not None:
         parts.append(f"Auction In: {int(dts_days)} days")
     return " • ".join(parts)
+
+
+def _scheduled_live_ready(quality: dict, row: dict) -> bool:
+    execution = quality.get("execution_reality") or {}
+    readiness = str(row.get("auction_readiness") or "").strip().upper()
+    equity_band = str(row.get("equity_band") or "").strip().upper()
+    debt_confidence = str(quality.get("debt_confidence") or "").strip().upper()
+    contact_quality = str(execution.get("contact_path_quality") or "").strip().upper()
+    owner_agency = str(execution.get("owner_agency") or "").strip().upper()
+    intervention_window = str(execution.get("intervention_window") or "").strip().upper()
+    lender_control = str(execution.get("lender_control_intensity") or "").strip().upper()
+    influenceability = str(execution.get("influenceability") or "").strip().upper()
+    workability = str(execution.get("workability_band") or "").strip().upper()
+    lane_confidence = str((quality.get("lane_suggestion") or {}).get("confidence") or "").strip().upper()
+
+    if bool(quality.get("top_tier_ready")):
+        return True
+
+    return bool(
+        readiness == "GREEN"
+        and equity_band in {"MED", "HIGH"}
+        and debt_confidence == "FULL"
+        and contact_quality in {"GOOD", "STRONG"}
+        and owner_agency in {"HIGH", "MEDIUM"}
+        and intervention_window in {"WIDE", "MODERATE"}
+        and lender_control != "HIGH"
+        and influenceability == "HIGH"
+        and workability == "STRONG"
+        and lane_confidence == "HIGH"
+    )
+
+
+def _vault_sort_key(row: dict) -> tuple:
+    sale_status = str(row.get("saleStatus") or "").strip().lower()
+    county = str(row.get("county") or "").strip().lower()
+    return (
+        0 if sale_status == "pre_foreclosure" else 1,
+        0 if county in _PREFERRED_COUNTIES else 1,
+        0 if bool(row.get("topTierReady")) else 1,
+        0 if bool(row.get("prefcLiveQuality")) else 1,
+        0 if str(row.get("auctionReadiness") or "").strip().upper() == "GREEN" else 1,
+        0 if str(row.get("equityBand") or "").strip().upper() in {"HIGH", "MED"} else 1,
+        0 if str(row.get("contactPathQuality") or "").strip().upper() in {"STRONG", "GOOD"} else 1,
+        0 if str(row.get("workabilityBand") or "").strip().upper() == "STRONG" else 1,
+        -(float(row.get("falcoScore") or 0)),
+        int(row.get("dtsDays") or 9999) if row.get("dtsDays") is not None else 9999,
+    )
 
 
 def main() -> None:
@@ -207,10 +269,13 @@ def main() -> None:
             current_sale_date,
             original_sale_date,
             falco_score_internal,
-            equity_band
+            equity_band,
+            first_seen_at,
+            last_seen_at
         FROM leads
         WHERE COALESCE(auction_readiness, '') IN ('GREEN', 'YELLOW', 'PARTIAL')
            OR sale_status = 'pre_foreclosure'
+           OR UPPER(COALESCE(distress_type, '')) = 'FSBO'
         ORDER BY
             CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
             CASE auction_readiness
@@ -243,6 +308,8 @@ def main() -> None:
         original_sale_date,
         falco_score,
         equity_band,
+        first_seen_at,
+        last_seen_at,
     ) in rows:
         packet_path = packet_for_lead(lead_key)
         if not packet_path:
@@ -252,50 +319,88 @@ def main() -> None:
         contact_ready = latest_contact_ready(cur, lead_key) == "1"
         attom = latest_attom_snapshot(cur, lead_key)
         distress_recorded_at = latest_foreclosure_recorded_at(cur, lead_key)
-        display_distress_type = "Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or "")
+        is_fsbo = str(distress_type or "").upper() == "FSBO"
+        display_distress_type = "Seller-Direct Review" if is_fsbo else ("Pre-Foreclosure Review" if sale_status == "pre_foreclosure" else (distress_type or ""))
         title = masked_title(county or "", display_distress_type or distress_type or "")
         slug = f"{slugify(title)}-{lead_key[:8]}"
         base = existing.get(slug, {})
 
-        quality = assess_packet_data(
-            {
-                "address": address or "",
-                "county": county,
-                "distress_type": distress_type,
-                "falco_score_internal": falco_score,
-                "auction_readiness": readiness,
-                "equity_band": equity_band,
-                "dts_days": dts_days,
-                "sale_status": sale_status,
-                "contact_ready": contact_ready,
-                "attom_raw_json": attom["attom_raw_json"],
-                "value_anchor_mid": attom["value_anchor_mid"],
-                "value_anchor_low": attom["value_anchor_low"],
-                "value_anchor_high": attom["value_anchor_high"],
-                "property_identifier": latest_prov_text(cur, lead_key, "property_identifier"),
-                "owner_name": latest_prov_text(cur, lead_key, "owner_name"),
-                "owner_mail": latest_prov_text(cur, lead_key, "owner_mail"),
-                "last_sale_date": latest_prov_text(cur, lead_key, "last_sale_date"),
-                "mortgage_date": latest_prov_text(cur, lead_key, "mortgage_date"),
-                "mortgage_lender": latest_prov_text(cur, lead_key, "mortgage_lender"),
-                "mortgage_amount": latest_prov_num(cur, lead_key, "mortgage_amount"),
-                "year_built": latest_prov_num(cur, lead_key, "year_built"),
-                "building_area_sqft": latest_prov_num(cur, lead_key, "building_area_sqft"),
-                "beds": latest_prov_num(cur, lead_key, "beds"),
-                "baths": latest_prov_num(cur, lead_key, "baths"),
-                "trustee_phone_public": latest_prov_text(cur, lead_key, "trustee_phone_public"),
-                "owner_phone_primary": latest_prov_text(cur, lead_key, "owner_phone_primary"),
-                "owner_phone_secondary": latest_prov_text(cur, lead_key, "owner_phone_secondary"),
-                "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
-            }
-        )
-        publish_ready = bool(quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"))
+        lead_fields = {
+            "lead_key": lead_key,
+            "address": address or "",
+            "county": county,
+            "distress_type": distress_type,
+            "falco_score_internal": falco_score,
+            "auction_readiness": readiness,
+            "equity_band": equity_band,
+            "dts_days": dts_days,
+            "sale_status": sale_status,
+            "current_sale_date": current_sale_date,
+            "original_sale_date": original_sale_date,
+            "contact_ready": contact_ready,
+            "attom_raw_json": attom["attom_raw_json"],
+            "value_anchor_mid": attom["value_anchor_mid"],
+            "value_anchor_low": attom["value_anchor_low"],
+            "value_anchor_high": attom["value_anchor_high"],
+            "property_identifier": latest_prov_text(cur, lead_key, "property_identifier"),
+            "owner_name": latest_prov_text(cur, lead_key, "owner_name"),
+            "owner_mail": latest_prov_text(cur, lead_key, "owner_mail"),
+            "last_sale_date": latest_prov_text(cur, lead_key, "last_sale_date"),
+            "mortgage_date": latest_prov_text(cur, lead_key, "mortgage_date"),
+            "mortgage_lender": latest_prov_text(cur, lead_key, "mortgage_lender"),
+            "mortgage_amount": latest_prov_num(cur, lead_key, "mortgage_amount"),
+            "mortgage_record_book": latest_prov_text(cur, lead_key, "mortgage_record_book"),
+            "mortgage_record_page": latest_prov_text(cur, lead_key, "mortgage_record_page"),
+            "mortgage_record_instrument": latest_prov_text(cur, lead_key, "mortgage_record_instrument"),
+            "debt_reconstruction_missing_reason": latest_prov_text(cur, lead_key, "debt_reconstruction_missing_reason"),
+            "year_built": latest_prov_num(cur, lead_key, "year_built"),
+            "building_area_sqft": latest_prov_num(cur, lead_key, "building_area_sqft"),
+            "beds": latest_prov_num(cur, lead_key, "beds"),
+            "baths": latest_prov_num(cur, lead_key, "baths"),
+            "list_price": latest_prov_num(cur, lead_key, "list_price"),
+            "trustee_phone_public": latest_prov_text(cur, lead_key, "trustee_phone_public"),
+            "owner_phone_primary": latest_prov_text(cur, lead_key, "owner_phone_primary"),
+            "owner_phone_secondary": latest_prov_text(cur, lead_key, "owner_phone_secondary"),
+            "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
+            "fsbo_listing_title": latest_prov_text(cur, lead_key, "fsbo_listing_title"),
+            "fsbo_listing_description": latest_prov_text(cur, lead_key, "fsbo_listing_description"),
+            "fsbo_signal_labels": latest_prov_text(cur, lead_key, "fsbo_signal_labels"),
+            "fsbo_listing_source": latest_prov_text(cur, lead_key, "fsbo_listing_source"),
+            "fsbo_signal_score": latest_prov_num(cur, lead_key, "fsbo_signal_score"),
+            "first_seen_at": first_seen_at,
+            "last_seen_at": last_seen_at,
+        }
+        quality = assess_packet_data(lead_fields)
+        publish_ready = bool(quality["fsbo_vault_ready"] if is_fsbo else (quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready")))
         if sale_status == "pre_foreclosure":
             publish_ready = bool(quality.get("prefc_live_quality"))
+        elif not is_fsbo:
+            publish_ready = _scheduled_live_ready(quality, lead_fields)
+        source_rows = cur.execute(
+            """
+            SELECT DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))
+            FROM ingest_events
+            WHERE lead_key=?
+            """,
+            (lead_key,),
+        ).fetchall()
+        source_mix = [str(row[0] or "").strip() for row in source_rows if str(row[0] or "").strip()]
+        overlap_signals: list[str] = []
+        if "SUBSTITUTION_OF_TRUSTEE" in source_mix and "LIS_PENDENS" in source_mix:
+            overlap_signals.append("stacked_notice_path")
+        if any(source in source_mix for source in ("API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES")):
+            overlap_signals.append("tax_overlap")
+        if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
+            overlap_signals.append("reopened_timing")
+        decision = determine_lead_action(lead_fields, quality, overlap_signals, out_rows)
+        if not base:
+            publish_ready = publish_ready and decision["next_action"] == "publish"
         if not publish_ready and not base:
             continue
         enriched_fields = quality.get("enriched_fields", {})
         published_readiness = readiness
+        if is_fsbo:
+            published_readiness = str(quality.get("fsbo_actionability_band") or "REVIEW")
         if readiness == "GREEN" and not quality["top_tier_ready"]:
             published_readiness = "YELLOW"
         if sale_status == "pre_foreclosure" and published_readiness not in {"GREEN", "YELLOW", "PARTIAL"}:
@@ -308,7 +413,7 @@ def main() -> None:
 
         status = derive_status(base, dts_days)
         market = f"{county or 'Unknown County'}, {state or 'TN'}"
-        auction_window = "Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{int(dts_days)} Days" if dts_days is not None else "Confidential")
+        auction_window = "Seller-Direct" if is_fsbo else ("Pre-Foreclosure" if sale_status == "pre_foreclosure" else (f"{int(dts_days)} Days" if dts_days is not None else "Confidential"))
 
         created_at = base.get("createdAt")
         if not created_at:
@@ -332,7 +437,7 @@ def main() -> None:
             ),
             "publicTeaser": build_teaser(county or "", published_readiness or "", falco_score, dts_days),
             "packetUrl": f"/api/vault/packet?slug={slug}",
-            "packetLabel": "Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief",
+            "packetLabel": "Seller-Direct Review Brief" if is_fsbo else ("Pre-Foreclosure Review Brief" if sale_status == "pre_foreclosure" else "Auction Opportunity Brief"),
             "packetFileName": packet_file_name,
             "sourceLeadKey": lead_key,
             "createdAt": created_at,
@@ -362,6 +467,18 @@ def main() -> None:
             "buildingAreaSqft": enriched_fields.get("building_area_sqft"),
             "beds": enriched_fields.get("beds"),
             "baths": enriched_fields.get("baths"),
+            "listPrice": enriched_fields.get("list_price"),
+            "fsboActionabilityBand": quality.get("fsbo_actionability_band"),
+            "fsboActionabilityReasons": quality.get("fsbo_actionability_reasons") or [],
+            "fsboReviewReady": bool(quality.get("fsbo_review_ready")),
+            "fsboVaultReady": bool(quality.get("fsbo_vault_ready")),
+            "fsboPriceGapPct": quality.get("fsbo_price_gap_pct"),
+            "fsboDaysTracked": quality.get("fsbo_days_tracked"),
+            "fsboSignalScore": quality.get("fsbo_signal_score"),
+            "fsboSignalLabels": quality.get("fsbo_signal_labels") or [],
+            "fsboListingTitle": latest_prov_text(cur, lead_key, "fsbo_listing_title"),
+            "fsboListingDescription": latest_prov_text(cur, lead_key, "fsbo_listing_description"),
+            "fsboListingSource": latest_prov_text(cur, lead_key, "fsbo_listing_source"),
             "contactPathQuality": quality["execution_reality"]["contact_path_quality"],
             "controlParty": quality["execution_reality"]["control_party"],
             "executionPosture": quality["execution_reality"]["execution_posture"],
@@ -378,10 +495,14 @@ def main() -> None:
             "prefcDebtProxyReady": bool(quality.get("prefc_debt_proxy_ready")),
             "saleStatus": sale_status or "",
             "dataNotes": ((quality.get("pre_foreclosure_review_blockers") if sale_status == "pre_foreclosure" else quality["vault_publish_blockers"]) + quality["execution_notes"])[:4],
+            "recommendedAction": decision["next_action"],
+            "recommendedActionReasons": decision["reasons"],
         }
         out_rows.append(row)
 
     con.close()
+    out_rows.sort(key=_vault_sort_key)
+    out_rows = out_rows[:MAX_LISTINGS]
     write_listings(out_rows)
 
     print(f"synced_listings={len(out_rows)}")
