@@ -291,6 +291,10 @@ def main() -> None:
         FROM leads
         WHERE COALESCE(auction_readiness, '') IN ('GREEN', 'YELLOW', 'PARTIAL')
            OR sale_status = 'pre_foreclosure'
+           OR (
+                sale_status = 'scheduled'
+                AND UPPER(COALESCE(equity_band, '')) IN ('MED', 'HIGH')
+              )
            OR UPPER(COALESCE(distress_type, '')) = 'FSBO'
         ORDER BY
             CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
@@ -390,8 +394,6 @@ def main() -> None:
         publish_ready = bool(quality["fsbo_vault_ready"] if is_fsbo else (quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready")))
         if sale_status == "pre_foreclosure":
             publish_ready = bool(quality.get("prefc_live_quality"))
-        elif not is_fsbo:
-            publish_ready = _scheduled_live_ready(quality, lead_fields)
         source_rows = cur.execute(
             """
             SELECT DISTINCT UPPER(COALESCE(source, 'UNKNOWN'))
@@ -409,6 +411,11 @@ def main() -> None:
         if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
             overlap_signals.append("reopened_timing")
         decision = determine_lead_action(lead_fields, quality, overlap_signals, out_rows)
+        if sale_status == "scheduled" and not is_fsbo:
+            publish_ready = bool(
+                _scheduled_live_ready(quality, lead_fields)
+                or (bool(quality.get("vault_publish_ready")) and decision["next_action"] == "publish")
+            )
         if not base:
             publish_ready = publish_ready and decision["next_action"] == "publish"
         if not publish_ready and not base:
