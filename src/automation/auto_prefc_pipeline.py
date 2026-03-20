@@ -30,7 +30,7 @@ from .site_snapshots import (
     _load_live_slugs,
 )
 
-_PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county"}
+_PUSH_HARDER_BUDGET_COUNTIES = {"rutherford county", "davidson county", "montgomery county"}
 _HIGH_QUALITY_SOURCE_TYPES = {"SOT", "SUBSTITUTION_OF_TRUSTEE", "LIS_PENDENS"}
 
 
@@ -185,7 +185,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
             FROM leads
             WHERE sale_status='pre_foreclosure'
             ORDER BY COALESCE(score_updated_at, last_seen_at, first_seen_at) DESC
-            LIMIT 80
+            LIMIT 140
             """
         ).fetchall()
 
@@ -331,16 +331,16 @@ def _apply_recovery_budget(targets: list[dict[str, Any]], limit: int) -> list[di
     if not targets or limit <= 0:
         return []
 
-    county_caps = {0: 4, 1: 3, 2: 2, 3: 1}
+    county_caps = {0: 6, 1: 5, 2: 3, 3: 2}
     selected: list[dict[str, Any]] = []
     county_counts: dict[str, int] = {}
     action_counts: dict[str, int] = {}
     action_caps = {
-        "county_record_lookup": max(2, limit // 2),
-        "reconstruct_debt": max(3, limit),
-        "reconstruct_transfer": max(2, limit // 2),
-        "enrich_contact": max(2, limit // 2),
-        "special_situations_review": max(2, limit // 3),
+        "county_record_lookup": max(3, limit // 2),
+        "reconstruct_debt": max(4, limit),
+        "reconstruct_transfer": max(3, limit // 2),
+        "enrich_contact": max(4, limit),
+        "special_situations_review": max(3, limit // 2),
     }
 
     for row in targets:
@@ -439,7 +439,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_PREFC_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_PREFC_ENRICH disabled"}
 
-    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "10")), 0)
+    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "16")), 0)
     targets = _apply_recovery_budget(_prefc_retry_targets(limit * 3), limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
@@ -634,7 +634,7 @@ def run(run_id: str) -> dict[str, Any]:
             },
         }
 
-    publish_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PUBLISH_LIMIT", "4")), 0)
+    publish_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PUBLISH_LIMIT", "6")), 0)
     candidates = _strict_prefc_publish_candidates(publish_limit)
     publish_result = _publish_candidates(candidates)
     return {

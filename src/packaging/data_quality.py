@@ -900,7 +900,7 @@ def _derive_recoverable_partial(
     packetability_score = int(packetability.get("score") or 0)
     packetability_band = str(packetability.get("band") or "LOW").upper()
 
-    if packetability_band == "LOW" and packetability_score < 6:
+    if packetability_band == "LOW" and packetability_score < 5:
         return {"recoverable": False, "next_step": "", "reasons": []}
 
     if is_pre_foreclosure and debt_confidence in {"PARTIAL", "PROXY", "THIN"}:
@@ -932,6 +932,17 @@ def _derive_recoverable_partial(
         recoverable = True
         next_step = "reconstruct_debt" if debt_confidence != "FULL" else "enrich_contact"
         reasons.append("Pre-foreclosure is close enough to keep in the active recovery lane")
+
+    if (
+        not recoverable
+        and is_pre_foreclosure
+        and prefc_county_is_active(enriched.get("county"))
+        and packetability_score >= 6
+        and str(enriched.get("equity_band") or "").strip().upper() in {"LOW", "MED", "HIGH"}
+    ):
+        recoverable = True
+        next_step = "reconstruct_debt" if debt_confidence != "FULL" else "enrich_contact"
+        reasons.append("Active-county pre-foreclosure stays in the larger recovery funnel")
 
     return {
         "recoverable": recoverable,
