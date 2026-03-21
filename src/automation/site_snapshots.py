@@ -73,6 +73,29 @@ def _load_live_slugs() -> list[str]:
     return slugs
 
 
+def _load_live_lead_keys() -> set[str]:
+    if not SITE_VAULT_LISTINGS.exists():
+        return set()
+
+    lead_keys: set[str] = set()
+    for line in SITE_VAULT_LISTINGS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") != "active":
+            continue
+        lead_key = str(row.get("sourceLeadKey") or "").strip()
+        if lead_key:
+            lead_keys.add(lead_key)
+    return lead_keys
+
+
 def _lead_key_prefix(lead_key: str) -> str:
     return (lead_key or "")[:8].lower()
 
@@ -250,9 +273,14 @@ def _meets_high_confidence_review_bar(quality: dict[str, Any], sale_status: str)
         )
 
     return bool(
-        quality.get("top_tier_ready")
-        and quality.get("vault_publish_ready")
-        and workability_band == "STRONG"
+        quality.get("vault_publish_ready")
+        and str(quality.get("debt_confidence") or "").upper() == "FULL"
+        and workability_band in {"STRONG", "MODERATE"}
+        and contact_path_quality in {"GOOD", "STRONG"}
+        and owner_agency in {"HIGH", "MEDIUM"}
+        and intervention_window in {"WIDE", "MODERATE"}
+        and lender_control_intensity != "HIGH"
+        and len(blockers) <= 2
     )
 
 
@@ -805,6 +833,134 @@ def _build_publish_candidates(
     return candidates[:limit]
 
 
+def _build_credible_shots(
+    con: sqlite3.Connection,
+    live_slugs: list[str],
+    limit: int = 4,
+) -> list[dict[str, Any]]:
+    live_lead_keys = _load_live_lead_keys()
+    attom_map: dict[str, dict[str, Any]] = {}
+    for row in con.execute(
+        """
+        SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+        FROM (
+            SELECT
+              lead_key,
+              attom_raw_json,
+              avm_value,
+              avm_low,
+              avm_high,
+              ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+            FROM attom_enrichments
+        )
+        WHERE rn = 1
+        """
+    ).fetchall():
+        attom_map[str(row["lead_key"])] = {
+            "attom_raw_json": row["attom_raw_json"],
+            "value_anchor_mid": row["avm_value"],
+            "value_anchor_low": row["avm_low"],
+            "value_anchor_high": row["avm_high"],
+        }
+
+    rows = con.execute(
+        """
+        SELECT
+          lead_key,
+          address,
+          county,
+          distress_type,
+          sale_status,
+          falco_score_internal,
+          auction_readiness,
+          equity_band,
+          dts_days,
+          current_sale_date,
+          original_sale_date,
+          first_seen_at,
+          last_seen_at
+        FROM leads
+        WHERE sale_status IN ('scheduled', 'pre_foreclosure')
+          AND address IS NOT NULL
+          AND TRIM(address) <> ''
+        ORDER BY COALESCE(falco_score_internal, 0) DESC, last_seen_at DESC, first_seen_at DESC
+        LIMIT 200
+        """
+    ).fetchall()
+
+    candidates: list[dict[str, Any]] = []
+    for lead in rows:
+        lead_key = str(lead["lead_key"] or "").strip()
+        if not lead_key or lead_key in live_lead_keys:
+            continue
+
+        hydrated = _hydrate_quality_fields(con, lead, attom_map)
+        quality = assess_packet_data(hydrated)
+        decision = determine_lead_action(lead, quality, [], [])
+        execution_reality = quality.get("execution_reality") or {}
+        blockers = quality.get("vault_publish_blockers") or []
+        equity_band = str(lead["equity_band"] or "").strip().upper()
+
+        if bool(quality.get("suppress_early")):
+            continue
+        if str(lead["sale_status"] or "").strip().lower() != "scheduled":
+            continue
+        if equity_band not in {"MED", "HIGH"}:
+            continue
+        if int(lead["falco_score_internal"] or 0) < 80:
+            continue
+        next_action = str(decision.get("next_action") or "").strip().lower()
+        if next_action == "suppress":
+            continue
+        if len(blockers) > 3:
+            continue
+
+        prefix = _lead_key_prefix(lead_key)
+        matched = next((slug for slug in live_slugs if slug.lower().endswith(prefix)), None)
+        if matched:
+            continue
+
+        candidates.append(
+            {
+                "leadKey": lead_key,
+                "address": lead["address"],
+                "county": lead["county"],
+                "saleStatus": lead["sale_status"],
+                "distressType": lead["distress_type"],
+                "equityBand": equity_band,
+                "debtConfidence": quality.get("debt_confidence") or "",
+                "falcoScore": int(lead["falco_score_internal"] or 0),
+                "auctionReadiness": str(lead["auction_readiness"] or "").upper(),
+                "nextAction": next_action,
+                "workabilityBand": str(execution_reality.get("workability_band") or "").upper(),
+                "contactPathQuality": str(execution_reality.get("contact_path_quality") or "").upper(),
+                "ownerAgency": str(execution_reality.get("owner_agency") or "").upper(),
+                "blockers": blockers,
+                "vaultLive": False,
+                "vaultSlug": None,
+            }
+        )
+
+    county_rank = {
+        "Rutherford County": 0,
+        "Davidson County": 1,
+        "Williamson County": 2,
+        "Sumner County": 3,
+        "Montgomery County": 4,
+        "Dickson County": 5,
+    }
+    candidates.sort(
+        key=lambda row: (
+            county_rank.get(str(row.get("county") or ""), 99),
+            0 if str(row.get("equityBand") or "").upper() == "HIGH" else 1,
+            len(row.get("blockers") or []),
+            0 if str(row.get("debtConfidence") or "").upper() == "FULL" else 1,
+            -int(row.get("falcoScore") or 0),
+        )
+    )
+    return candidates[:limit]
+
+
 def _parse_fsbo_signal_labels(value: Any) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
@@ -1293,6 +1449,7 @@ def _operator_snapshot() -> dict[str, Any]:
         ]
         live_slugs = _load_live_slugs()
         vault_candidates = _build_vault_candidates(con, live_slugs)
+        credible_shots = _build_credible_shots(con, live_slugs)
         pre_foreclosure_promotion = _build_pre_foreclosure_promotion(con, live_slugs)
         fsbo_lane = _build_fsbo_lane(con, live_slugs)
         lifecycle_events = _build_lifecycle_events(con, live_slugs)
@@ -1381,6 +1538,7 @@ def _operator_snapshot() -> dict[str, Any]:
             "contactReady": contact_ready,
             "vaultLive": len(live_slugs),
             "vaultQueue": len(vault_candidates),
+            "credibleShots": len(credible_shots),
             "pendingApprovals": 0,
         },
         "recentLeads": _attach_vault_state(recent_leads, live_slugs),
@@ -1399,6 +1557,7 @@ def _operator_snapshot() -> dict[str, Any]:
         "preForeclosurePromotion": {
             **pre_foreclosure_promotion,
         },
+        "credibleShots": credible_shots,
         "fsboLane": fsbo_lane,
     }
 

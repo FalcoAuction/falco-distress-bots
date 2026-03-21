@@ -81,8 +81,9 @@ def _target_keys(limit: int) -> list[dict[str, Any]]:
                 ELSE 10
               END,
               CASE
-                WHEN sale_status = 'pre_foreclosure' THEN 0
-                WHEN UPPER(COALESCE(equity_band, '')) IN ('MED', 'HIGH') THEN 1
+                WHEN sale_status = 'scheduled'
+                     AND UPPER(COALESCE(equity_band, '')) IN ('MED', 'HIGH') THEN 0
+                WHEN sale_status = 'pre_foreclosure' THEN 1
                 ELSE 2
               END,
               freshness DESC,
@@ -194,7 +195,7 @@ def _publishable_pack_targets(lead_keys: list[str]) -> list[str]:
 
 
 def run(run_id: str) -> dict[str, Any]:
-    limit = max(int(os.environ.get("FALCO_EXPANSION_ATTOM_LIMIT", "20")), 0)
+    limit = max(int(os.environ.get("FALCO_EXPANSION_ATTOM_LIMIT", "32")), 0)
     targets = _target_keys(limit)
     if not targets:
         return {
