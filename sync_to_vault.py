@@ -22,6 +22,7 @@ REPORTS_DIR = MAIN_REPO / "out" / "reports"
 VAULT_AUDIT_FILE = REPORTS_DIR / "vault_gate_audit.json"
 
 MAX_LISTINGS = 100
+_SYNC_SCAN_MULTIPLIER = 5
 _PREFERRED_COUNTIES = {"rutherford county", "davidson county"}
 _DEFAULT_RELIST_GRACE_DAYS = 21
 
@@ -436,7 +437,7 @@ def main() -> None:
             COALESCE(first_seen_at, '') DESC
         LIMIT ?
         """,
-        (MAX_LISTINGS,),
+        (MAX_LISTINGS * _SYNC_SCAN_MULTIPLIER,),
     ).fetchall()
 
     out_rows: list[dict] = []
@@ -548,15 +549,22 @@ def main() -> None:
         if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
             overlap_signals.append("reopened_timing")
         decision = determine_lead_action(lead_fields, quality, overlap_signals, out_rows)
+        scheduled_live_ready = False
         if sale_status == "scheduled" and not is_fsbo:
+            scheduled_live_ready = _scheduled_live_ready(quality, lead_fields)
             publish_ready = bool(
-                _scheduled_live_ready(quality, lead_fields)
+                scheduled_live_ready
                 or (bool(quality.get("vault_publish_ready")) and decision["next_action"] == "publish")
             )
         if was_live_before and not base and not allow_relist and not is_recent_candidate and not publish_ready:
             continue
+        if base and not publish_ready:
+            continue
         if not base:
-            publish_ready = publish_ready and decision["next_action"] == "publish"
+            publish_ready = publish_ready and (
+                decision["next_action"] == "publish"
+                or scheduled_live_ready
+            )
         if not publish_ready and not base:
             continue
         enriched_fields = quality.get("enriched_fields", {})

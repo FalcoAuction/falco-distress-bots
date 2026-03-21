@@ -26,6 +26,10 @@ _EXPANSION_COUNTIES = (
     "Cumberland County",
     "Putnam County",
     "Sullivan County",
+    "Loudon County",
+    "Bradley County",
+    "Anderson County",
+    "Bedford County",
 )
 _CORE_HIGH_SIGNAL_COUNTIES = (
     "Rutherford County",
@@ -84,7 +88,11 @@ def _target_keys(limit: int) -> list[dict[str, Any]]:
                 WHEN 'Cumberland County' THEN 10
                 WHEN 'Putnam County' THEN 11
                 WHEN 'Sullivan County' THEN 12
-                ELSE 13
+                WHEN 'Loudon County' THEN 13
+                WHEN 'Bradley County' THEN 14
+                WHEN 'Anderson County' THEN 15
+                WHEN 'Bedford County' THEN 16
+                ELSE 17
               END,
               CASE
                 WHEN sale_status = 'scheduled'

@@ -557,15 +557,26 @@ def run() -> dict[str, int]:
         if item.strip()
     }
 
-    rows = cur.execute(
-        """
-        SELECT lead_key, county, distress_type, falco_score_internal
-        FROM leads
-        WHERE sale_status='pre_foreclosure'
-        ORDER BY COALESCE(falco_score_internal, 0) DESC, lead_key ASC
-        LIMIT 80
-        """
-    ).fetchall()
+    if target_keys:
+        rows = cur.execute(
+            """
+            SELECT lead_key, county, distress_type, falco_score_internal, sale_status
+            FROM leads
+            WHERE sale_status IN ('pre_foreclosure', 'scheduled')
+            ORDER BY COALESCE(falco_score_internal, 0) DESC, lead_key ASC
+            LIMIT 160
+            """
+        ).fetchall()
+    else:
+        rows = cur.execute(
+            """
+            SELECT lead_key, county, distress_type, falco_score_internal, sale_status
+            FROM leads
+            WHERE sale_status='pre_foreclosure'
+            ORDER BY COALESCE(falco_score_internal, 0) DESC, lead_key ASC
+            LIMIT 80
+            """
+        ).fetchall()
     rows = [row for row in rows if not target_keys or str(row["lead_key"] or "").strip() in target_keys]
     rows.sort(
         key=lambda row: (

@@ -84,6 +84,10 @@ def prefc_county_tier(county: str | None) -> str:
         "cumberland county",
         "putnam county",
         "sullivan county",
+        "loudon county",
+        "bradley county",
+        "anderson county",
+        "bedford county",
     }:
         return "SECONDARY"
     if normalized in {"knox county"}:

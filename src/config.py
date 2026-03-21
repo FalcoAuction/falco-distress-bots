@@ -51,6 +51,10 @@ DEFAULT_ALLOWED_COUNTIES_BASE = [
     "Cumberland",
     "Putnam",
     "Sullivan",
+    "Loudon",
+    "Bradley",
+    "Anderson",
+    "Bedford",
 ]
 
 
@@ -63,7 +67,7 @@ SEED_URLS_PUBLIC_NOTICES = [
     "https://www.tnpublicnotice.com/Search.aspx",
 ]
 
-PUBLIC_NOTICES_MAX_LIST_PAGES = 20
+PUBLIC_NOTICES_MAX_LIST_PAGES = 24
 
 # Per-bot window (THIS is the important fix)
 # TNLegalPub etc can have sale dates that are much farther out than courthouse lists.
@@ -136,5 +140,5 @@ HOT_DAYS_THRESHOLD = 14
 # ============================================================
 # SAFETY LIMITS
 # ============================================================
-MAX_NOTICE_LINKS_PER_SOURCE = 450
+MAX_NOTICE_LINKS_PER_SOURCE = 550
 MAX_NOTICE_TEXT_CHARS = 8000
