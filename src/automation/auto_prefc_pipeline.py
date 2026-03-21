@@ -24,6 +24,7 @@ from .site_publish import _load_env_file, _run_command
 from .site_snapshots import (
     SITE_REPO,
     SITE_VAULT_LISTINGS,
+    _build_credible_shots,
     _build_publish_candidates,
     _connect,
     _hydrate_quality_fields,
@@ -442,7 +443,7 @@ def _prune_moderate_live_foreclosures(limit: int) -> dict[str, Any]:
         contact_quality = str(row.get("contactPathQuality") or "").strip().upper()
 
         if (
-            readiness != "GREEN"
+            readiness == "RED"
             and (
                 equity_band in {"LOW", "UNKNOWN", ""}
                 or workability not in {"STRONG"}
@@ -553,6 +554,88 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
     }
 
 
+def _scheduled_credible_targets(limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+    with _connect() as con:
+        live_slugs = _load_live_slugs()
+        return _build_credible_shots(con, live_slugs, limit=limit)
+
+
+def _run_targeted_scheduled_enrichment(run_id: str) -> dict[str, Any]:
+    if not _truthy(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH", "1")):
+        return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_SCHEDULED_ENRICH disabled"}
+
+    limit = max(int(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH_LIMIT", "4")), 0)
+    targets = _scheduled_credible_targets(limit)
+    if not targets:
+        return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
+
+    all_keys = sorted({str(row.get("leadKey") or "").strip() for row in targets if str(row.get("leadKey") or "").strip()})
+    county_lookup_keys = [
+        str(row.get("leadKey") or "").strip()
+        for row in targets
+        if str(row.get("nextAction") or "").strip().lower() == "county_record_lookup"
+        and str(row.get("leadKey") or "").strip()
+    ]
+
+    env_backup = {
+        key: os.environ.get(key)
+        for key in (
+            "FALCO_STAGE2_SOURCE",
+            "FALCO_ATTOM_TARGET_LEAD_KEYS",
+            "FALCO_ATTOM_MAX_ENRICH",
+            "FALCO_MAX_ATTOM_CALLS_PER_RUN",
+            "FALCO_BATCHDATA_TARGET_LEAD_KEYS",
+            "FALCO_DEBT_RECON_TARGET_LEAD_KEYS",
+            "FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS",
+        )
+    }
+
+    attom_result: dict[str, Any] | None = None
+    batchdata_result: dict[str, Any] | None = None
+    county_lookup_result: dict[str, Any] | None = None
+    try:
+        os.environ["FALCO_STAGE2_SOURCE"] = "sqlite"
+        os.environ["FALCO_ATTOM_TARGET_LEAD_KEYS"] = ",".join(all_keys)
+        os.environ["FALCO_ATTOM_MAX_ENRICH"] = str(max(len(all_keys), 1))
+        os.environ["FALCO_MAX_ATTOM_CALLS_PER_RUN"] = str(max(len(all_keys) * 4, 4))
+        attom_result = run_attom_enrichment()
+
+        if os.environ.get("FALCO_BATCHDATA_API_KEY", "").strip():
+            os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(all_keys)
+            batchdata_result = run_batchdata_fallback()
+
+        if county_lookup_keys:
+            os.environ["FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS"] = ",".join(sorted(set(county_lookup_keys)))
+            county_lookup_result = run_county_record_lookup()
+
+        os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(all_keys)
+        run_debt_reconstruction()
+        score_leads_by_keys(all_keys, run_id=f"{run_id}_auto_sched")
+        for lead_key in all_keys:
+            os.environ["FALCO_REPACK_LEAD_KEY"] = lead_key
+            run_packager()
+    finally:
+        os.environ.pop("FALCO_REPACK_LEAD_KEY", None)
+        for key, value in env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    return {
+        "attempted": True,
+        "enabled": True,
+        "requested": len(all_keys),
+        "processed": len(all_keys),
+        "countyLookup": county_lookup_result,
+        "targetActions": targets,
+        "attom": attom_result,
+        "batchdata": batchdata_result,
+    }
+
+
 def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
     with _connect() as con:
         live_slugs = _load_live_slugs()
@@ -604,6 +687,42 @@ def _strict_prefc_publish_candidates(limit: int) -> list[dict[str, Any]]:
     return filtered[:limit]
 
 
+def _strict_scheduled_publish_candidates(limit: int) -> list[dict[str, Any]]:
+    with _connect() as con:
+        live_slugs = _load_live_slugs()
+        candidates = _build_publish_candidates(con, live_slugs, limit=max(limit * 3, 24))
+
+    filtered: list[dict[str, Any]] = []
+    for candidate in candidates:
+        payload = candidate.get("listingPayload") or {}
+        if str(payload.get("saleStatus") or "").strip().lower() != "scheduled":
+            continue
+        if _candidate_publish_issues(payload):
+            continue
+        if str(payload.get("debtConfidence") or "").upper() != "FULL":
+            continue
+        if str(payload.get("equityBand") or "").upper() not in {"MED", "HIGH"}:
+            continue
+        if str(payload.get("contactPathQuality") or "").upper() not in {"GOOD", "STRONG"}:
+            continue
+        if str(payload.get("ownerAgency") or "").upper() not in {"HIGH", "MEDIUM"}:
+            continue
+        if str(payload.get("workabilityBand") or "").upper() not in {"MODERATE", "STRONG"}:
+            continue
+        filtered.append(candidate)
+
+    filtered.sort(
+        key=lambda row: (
+            -_county_budget_boost((row.get("listingPayload") or {}).get("county")),
+            0 if str((row.get("listingPayload") or {}).get("auctionReadiness") or "").upper() == "GREEN" else 1,
+            0 if str((row.get("listingPayload") or {}).get("equityBand") or "").upper() == "HIGH" else 1,
+            -float(((row.get("listingPayload") or {}).get("falcoScore") or 0)),
+            int(((row.get("listingPayload") or {}).get("dtsDays") or 9999)),
+        )
+    )
+    return filtered[:limit]
+
+
 def _publish_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     if not candidates:
         return {"attempted": True, "published": 0, "slugs": []}
@@ -643,6 +762,7 @@ def _publish_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
 
 def run(run_id: str) -> dict[str, Any]:
     enrichment_result = _run_targeted_enrichment(run_id)
+    scheduled_enrichment_result = _run_targeted_scheduled_enrichment(run_id)
     prune_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PRUNE_LIMIT", "3")), 0)
     prune_result = _prune_weak_live_prefc(prune_limit)
     foreclosure_prune_limit = max(int(os.environ.get("FALCO_AUTO_FORECLOSURE_PRUNE_LIMIT", "2")), 0)
@@ -663,16 +783,27 @@ def run(run_id: str) -> dict[str, Any]:
         }
 
     publish_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PUBLISH_LIMIT", "6")), 0)
-    candidates = _strict_prefc_publish_candidates(publish_limit)
+    prefc_candidates = _strict_prefc_publish_candidates(publish_limit)
+    scheduled_candidates = _strict_scheduled_publish_candidates(max(4, publish_limit))
+    candidates_by_slug: dict[str, dict[str, Any]] = {}
+    for candidate in prefc_candidates + scheduled_candidates:
+        payload = candidate.get("listingPayload") or {}
+        slug = str(payload.get("slug") or "").strip()
+        if slug:
+            candidates_by_slug[slug] = candidate
+    candidates = list(candidates_by_slug.values())
     publish_result = _publish_candidates(candidates)
     return {
         "ok": bool(publish_result.get("ok", True)),
         "enrichment": enrichment_result,
+        "scheduledEnrichment": scheduled_enrichment_result,
         "prune": prune_result,
         "foreclosurePrune": foreclosure_prune_result,
         "publish": {
             **publish_result,
             "enabled": True,
             "candidateCount": len(candidates),
+            "prefcCandidateCount": len(prefc_candidates),
+            "scheduledCandidateCount": len(scheduled_candidates),
         },
     }
