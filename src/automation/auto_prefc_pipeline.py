@@ -704,8 +704,6 @@ def _strict_scheduled_publish_candidates(limit: int) -> list[dict[str, Any]]:
             continue
         if str(payload.get("debtConfidence") or "").upper() != "FULL":
             continue
-        if str(payload.get("equityBand") or "").upper() not in {"MED", "HIGH"}:
-            continue
         if str(payload.get("contactPathQuality") or "").upper() not in {"GOOD", "STRONG"}:
             continue
         if str(payload.get("ownerAgency") or "").upper() not in {"HIGH", "MEDIUM"}:

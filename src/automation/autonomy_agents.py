@@ -315,11 +315,9 @@ def _lead_next_action(lead: sqlite3.Row, quality: dict[str, Any], overlap_signal
     if sale_status == "scheduled" and bool(quality.get("vault_publish_ready")):
         contact_quality = str(execution.get("contact_path_quality") or "THIN").upper()
         workability = str(execution.get("workability_band") or "LIMITED").upper()
-        equity_band = str(lead.get("equity_band") or "").upper()
         debt_confidence = str(quality.get("debt_confidence") or "").upper()
         if (
             debt_confidence == "FULL"
-            and equity_band in {"MED", "HIGH"}
             and contact_quality in {"GOOD", "STRONG"}
             and workability in {"MODERATE", "STRONG", "LIMITED"}
         ):
