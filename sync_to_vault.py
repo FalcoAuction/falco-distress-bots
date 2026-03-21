@@ -18,6 +18,8 @@ SITE_PACKET_DIR = SITE_REPO / "private" / "vault" / "packets"
 SITE_DATA_DIR = SITE_REPO / "data"
 SITE_LISTINGS_FILE = SITE_DATA_DIR / "vault_listings.ndjson"
 SITE_HISTORY_FILE = SITE_DATA_DIR / "vault_history.json"
+REPORTS_DIR = MAIN_REPO / "out" / "reports"
+VAULT_AUDIT_FILE = REPORTS_DIR / "vault_gate_audit.json"
 
 MAX_LISTINGS = 100
 _PREFERRED_COUNTIES = {"rutherford county", "davidson county"}
@@ -70,6 +72,30 @@ def load_existing_listings() -> dict[str, dict]:
 def write_listings(rows: list[dict]) -> None:
     payload = "\n".join(json.dumps(r) for r in rows)
     SITE_LISTINGS_FILE.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+
+
+def write_vault_audit(rows: list[dict]) -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    active_rows = [row for row in rows if str(row.get("status") or "").strip().lower() == "active"]
+    payload = {
+        "generatedAt": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "activeCount": len(active_rows),
+        "allActiveRowsPublishReady": all(bool(row.get("vaultPublishReady")) for row in active_rows),
+        "rows": [
+            {
+                "slug": row.get("slug"),
+                "sourceLeadKey": row.get("sourceLeadKey"),
+                "saleStatus": row.get("saleStatus"),
+                "equityBand": row.get("equityBand"),
+                "debtConfidence": row.get("debtConfidence"),
+                "auctionReadiness": row.get("auctionReadiness"),
+                "vaultPublishReady": bool(row.get("vaultPublishReady")),
+                "recommendedAction": row.get("recommendedAction"),
+            }
+            for row in active_rows
+        ],
+    }
+    VAULT_AUDIT_FILE.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
 def _identity_key(county: str | None, address: str | None) -> str:
@@ -641,12 +667,14 @@ def main() -> None:
     out_rows.sort(key=_vault_sort_key)
     out_rows = out_rows[:MAX_LISTINGS]
     write_listings(out_rows)
+    write_vault_audit(out_rows)
 
     print(f"synced_listings={len(out_rows)}")
     print(f"copied_packets={copied}")
     print(f"skipped_no_packet={skipped_no_packet}")
     print(f"vault_registry={SITE_LISTINGS_FILE}")
     print(f"private_site_packets={SITE_PACKET_DIR}")
+    print(f"vault_audit={VAULT_AUDIT_FILE}")
 
 
 if __name__ == "__main__":
