@@ -49,6 +49,9 @@ _HIGH_EQUITY_EXPANSION_COUNTIES = {
     "blount county",
     "sevier county",
     "washington county",
+    "cumberland county",
+    "putnam county",
+    "sullivan county",
 }
 _HIGH_QUALITY_SOURCE_TYPES = {"SOT", "SUBSTITUTION_OF_TRUSTEE", "LIS_PENDENS"}
 
@@ -466,7 +469,7 @@ def _run_targeted_enrichment(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_PREFC_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_PREFC_ENRICH disabled"}
 
-    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "22")), 0)
+    limit = max(int(os.environ.get("FALCO_AUTO_PREFC_ENRICH_LIMIT", "26")), 0)
     targets = _apply_recovery_budget(_prefc_retry_targets(limit * 3), limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
@@ -566,7 +569,7 @@ def _run_targeted_scheduled_enrichment(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_SCHEDULED_ENRICH disabled"}
 
-    limit = max(int(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH_LIMIT", "4")), 0)
+    limit = max(int(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH_LIMIT", "6")), 0)
     targets = _scheduled_credible_targets(limit)
     if not targets:
         return {"attempted": True, "enabled": True, "requested": 0, "processed": 0, "publishedCandidates": 0}
