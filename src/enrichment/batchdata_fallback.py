@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from .contact_enricher import enrich_contact_data
+from ..core.env_defaults import load_bots_env_defaults
 from ..packaging.data_quality import assess_packet_data
 from ..automation.prefc_policy import prefc_county_is_active, prefc_county_priority, prefc_source_priority
 from ..settings import is_allowed_county, within_target_counties
@@ -607,7 +608,50 @@ def _call_batchdata(address: str, county: str, state: str) -> Dict[str, Any]:
     return lookup_payload
 
 
+def _load_sqlite_target_rows(cur: sqlite3.Cursor, target_lead_keys: set[str]) -> list[sqlite3.Row]:
+    if not target_lead_keys:
+        return []
+    placeholders = ",".join("?" for _ in target_lead_keys)
+    return cur.execute(
+        f"""
+        WITH latest_attom AS (
+          SELECT
+            lead_key,
+            attom_raw_json,
+            avm_value,
+            avm_low,
+            avm_high,
+            ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+          FROM attom_enrichments
+        )
+        SELECT
+          l.lead_key,
+          l.address,
+          l.county,
+          l.state,
+          l.distress_type,
+          l.sale_status,
+          l.current_sale_date,
+          l.original_sale_date,
+          l.falco_score_internal,
+          l.auction_readiness,
+          l.equity_band,
+          l.dts_days,
+          la.attom_raw_json,
+          la.avm_value,
+          la.avm_low,
+          la.avm_high
+        FROM leads l
+        LEFT JOIN latest_attom la
+          ON la.lead_key = l.lead_key AND la.rn = 1
+        WHERE l.lead_key IN ({placeholders})
+        """,
+        tuple(sorted(target_lead_keys)),
+    ).fetchall()
+
+
 def run() -> Dict[str, int]:
+    load_bots_env_defaults()
     enabled = os.environ.get("FALCO_ENABLE_BATCHDATA_FALLBACK", "").strip().lower() in {"1", "true", "yes", "y"}
     if not enabled:
         return {
@@ -687,6 +731,8 @@ def run() -> Dict[str, int]:
     }
     if target_lead_keys:
         rows = [row for row in rows if str(row["lead_key"] or "").strip() in target_lead_keys]
+        if not rows:
+            rows = _load_sqlite_target_rows(cur, target_lead_keys)
 
     rows = sorted(
         rows,
@@ -715,6 +761,7 @@ def run() -> Dict[str, int]:
     for row in rows:
 
         lead_key = str(row["lead_key"] or "").strip()
+        targeted_mode = bool(target_lead_keys and lead_key in target_lead_keys)
         address = _normalize_lookup_address(str(row["address"] or "").strip())
         county = str(row["county"] or "").strip()
         state = str(row["state"] or "TN").strip() or "TN"
@@ -732,9 +779,14 @@ def run() -> Dict[str, int]:
         if is_pre_foreclosure:
             if pre_foreclosure_requested >= pre_foreclosure_limit:
                 continue
-        elif summary["requested"] >= limit:
+        elif summary["requested"] >= limit and not targeted_mode:
             break
-        if readiness not in {"GREEN", "YELLOW", "PARTIAL"} and score < 70 and sale_status != "pre_foreclosure":
+        if (
+            not targeted_mode
+            and readiness not in {"GREEN", "YELLOW", "PARTIAL"}
+            and score < 70
+            and sale_status != "pre_foreclosure"
+        ):
             summary["skipped_not_worth_it"] += 1
             continue
 
@@ -774,10 +826,12 @@ def run() -> Dict[str, int]:
             and lender_control != "HIGH"
             and (debt_confidence in {"FULL", "PARTIAL", "PROXY"} or overlap_count > 0)
         )
-        if is_pre_foreclosure and not prefc_is_worth_it:
+        if is_pre_foreclosure and not prefc_is_worth_it and not targeted_mode:
             summary["skipped_not_worth_it"] += 1
             continue
         if (
+            not targeted_mode
+            and
             not is_pre_foreclosure
             and readiness not in {"GREEN", "YELLOW", "PARTIAL"}
             and score < 75
@@ -785,7 +839,7 @@ def run() -> Dict[str, int]:
         ):
             summary["skipped_not_worth_it"] += 1
             continue
-        if not targets and not needs_contact and not prefc_needs_contact_upgrade:
+        if not targets and not needs_contact and not prefc_needs_contact_upgrade and not targeted_mode:
             summary["skipped_already_complete"] += 1
             continue
 

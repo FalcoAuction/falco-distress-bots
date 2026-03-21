@@ -35,6 +35,7 @@ from .automation import foreclosure_lifecycle
 from .automation.operator_enrichment_requests import process_operator_enrichment_requests
 from .automation.site_snapshots import write_site_snapshots
 from .core.run_metadata import store_run_metadata
+from .core.env_defaults import load_bots_env_defaults
 from .telemetry import run_logger
 
 
@@ -66,6 +67,7 @@ def run_bot(name: str, fn):
 
 
 def main():
+    load_bots_env_defaults()
     run_id = str(uuid.uuid4())
     os.environ["FALCO_RUN_ID"] = run_id
     os.environ.setdefault("FALCO_SQLITE_PATH", "data/falco.db")

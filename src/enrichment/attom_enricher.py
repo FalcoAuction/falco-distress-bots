@@ -15,6 +15,7 @@ from .attom_client import AttomClient, AttomError
 from ..gating.convertibility import is_institutional
 from ..storage import sqlite_store as _store
 from ..telemetry.stage2_gating import write_gating_event
+from ..core.env_defaults import load_bots_env_defaults
 
 DEBUG = os.getenv("FALCO_ENRICH_DEBUG", "").strip() not in ("", "0", "false", "False")
 
@@ -851,6 +852,7 @@ def _load_sqlite_target_candidates(target_lead_keys: set[str]) -> List[Dict[str,
 # =========================================================
 
 def run() -> Dict[str, int]:
+    load_bots_env_defaults()
     _run_id = os.getenv("FALCO_RUN_ID", "").strip()
     if _run_id:
         try:

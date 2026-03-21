@@ -21,6 +21,7 @@ from .prefc_policy import (
     prefc_source_priority,
 )
 from .site_publish import _load_env_file, _run_command
+from ..core.env_defaults import load_bots_env_defaults
 from .site_snapshots import (
     SITE_REPO,
     SITE_VAULT_LISTINGS,
@@ -570,6 +571,7 @@ def _scheduled_credible_targets(limit: int) -> list[dict[str, Any]]:
 
 
 def _run_targeted_scheduled_enrichment(run_id: str) -> dict[str, Any]:
+    load_bots_env_defaults()
     if not _truthy(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_SCHEDULED_ENRICH disabled"}
 
