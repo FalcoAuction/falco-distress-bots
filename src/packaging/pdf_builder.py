@@ -2315,13 +2315,16 @@ def _render_compact_value_framework(doc: _Doc, fields: Dict[str, Any], brief: Di
 
 def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
     """Extract owner/mortgage fields from raw_merged['owner'] and raw_merged['mortgage']."""
+    current_lender = _val(fields.get("mortgage_lender_current"), None)
+    current_date = _val(fields.get("mortgage_date_current"), None)
+    current_amount = fields.get("mortgage_amount")
     out: Dict[str, Optional[str]] = {
         "owner_name":       _val(fields.get("owner_name"), None),
         "owner_mail":       _val(fields.get("owner_mail"), None),
         "last_sale_date":   _val(fields.get("last_sale_date"), None),
-        "mortgage_lender":  _val(fields.get("mortgage_lender_current"), None) or _val(fields.get("mortgage_lender"), None),
-        "mortgage_amount":  _fmt_cur(fields.get("mortgage_amount")) if fields.get("mortgage_amount") is not None else None,
-        "mortgage_date":    _val(fields.get("mortgage_date_current"), None) or _val(fields.get("mortgage_date"), None),
+        "mortgage_lender":  current_lender or _val(fields.get("mortgage_lender"), None),
+        "mortgage_amount":  _fmt_cur(current_amount) if current_amount is not None else None,
+        "mortgage_date":    current_date or _val(fields.get("mortgage_date"), None),
     }
     raw_json = fields.get("attom_raw_json")
     if not raw_json:
@@ -2378,12 +2381,13 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
                         _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
                     ) or None
                 _amt = _fm.get("amount")
-                if _amt is not None:
+                if out["mortgage_amount"] is None and _amt is not None:
                     try:
                         out["mortgage_amount"] = f"${float(_amt):,.0f}"
                     except (TypeError, ValueError):
                         out["mortgage_amount"] = str(_amt)
-                out["mortgage_date"] = _fm.get("recordingDate") or None
+                if not out["mortgage_date"]:
+                    out["mortgage_date"] = _fm.get("recordingDate") or None
             # Current shape: direct fields on mortgage.mortgage
             if not out["mortgage_lender"]:
                 _ldr = _mort.get("lender") or {}
@@ -2410,16 +2414,18 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
 
 def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
     """Extract lien skeleton from raw_merged mortgage blob + AVM low."""
+    current_lender = _val(fields.get("mortgage_lender_current"), None)
+    current_amount = fields.get("mortgage_amount")
     out: Dict[str, Any] = {
-        "first_lender":    _val(fields.get("mortgage_lender_current"), None) or _val(fields.get("mortgage_lender"), None),
+        "first_lender":    current_lender or _val(fields.get("mortgage_lender"), None),
         "first_amount":    None,   # float or None
         "second_amount":   None,   # float or None
         "total_amount":    None,   # float or None
         "equity_proxy_low": None,  # float or None
     }
-    if fields.get("mortgage_amount") is not None:
+    if current_amount is not None:
         try:
-            out["first_amount"] = float(fields.get("mortgage_amount"))
+            out["first_amount"] = float(current_amount)
         except (TypeError, ValueError):
             pass
     raw_json = fields.get("attom_raw_json")
@@ -2440,13 +2446,15 @@ def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
             _fm = _mort.get("firstMortgage") or {}
             if isinstance(_fm, dict) and _fm:
                 _ldr = _fm.get("lender") or {}
-                out["first_lender"] = (
-                    _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
-                ) or None
-                try:
-                    out["first_amount"] = float(_fm["amount"]) if _fm.get("amount") is not None else None
-                except (TypeError, ValueError):
-                    pass
+                if out["first_lender"] is None:
+                    out["first_lender"] = (
+                        _ldr.get("institution") if isinstance(_ldr, dict) else str(_ldr)
+                    ) or None
+                if out["first_amount"] is None:
+                    try:
+                        out["first_amount"] = float(_fm["amount"]) if _fm.get("amount") is not None else None
+                    except (TypeError, ValueError):
+                        pass
             # Current shape: direct fields on mortgage.mortgage
             if out["first_lender"] is None:
                 _ldr = _mort.get("lender") or {}
