@@ -310,6 +310,7 @@ def _prefc_retry_targets(limit: int) -> list[dict[str, Any]]:
                 {
                     "lead_key": lead_key,
                     "county": county,
+                    "distress_type": str(lead["distress_type"] or ""),
                     "needs_attom": bool(missing_valuation and debt_ready),
                     "needs_batchdata": bool(batchdata_targets or contact_gap),
                     "needs_debt_reconstruction": next_action in {"reconstruct_debt", "county_record_lookup"},

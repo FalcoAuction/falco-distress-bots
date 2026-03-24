@@ -208,6 +208,32 @@ def _attach_vault_state(rows: list[dict[str, Any]], live_slugs: list[str]) -> li
     return attached
 
 
+def _source_set(con: sqlite3.Connection, lead_key: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT DISTINCT UPPER(COALESCE(source, ''))
+        FROM ingest_events
+        WHERE lead_key = ?
+        """,
+        (lead_key,),
+    ).fetchall()
+    return {str(row[0] or "").strip().upper() for row in rows if str(row[0] or "").strip()}
+
+
+def _overlap_signals(lead: sqlite3.Row, con: sqlite3.Connection) -> list[str]:
+    signals: list[str] = []
+    sources = _source_set(con, str(lead["lead_key"] or ""))
+    if "SUBSTITUTION_OF_TRUSTEE" in sources and "LIS_PENDENS" in sources:
+        signals.append("stacked_notice_path")
+    if sources.intersection({"API_TAX", "OFFICIAL_TAX_SALE", "TAXPAGES"}):
+        signals.append("tax_overlap")
+    current_sale_date = str(lead["current_sale_date"] or "").strip()
+    original_sale_date = str(lead["original_sale_date"] or "").strip()
+    if current_sale_date and original_sale_date and current_sale_date != original_sale_date:
+        signals.append("reopened_timing")
+    return signals
+
+
 def _latest_foreclosure_recorded_at(con: sqlite3.Connection, lead_key: str) -> str | None:
     row = con.execute(
         """
@@ -896,7 +922,8 @@ def _build_credible_shots(
 
         hydrated = _hydrate_quality_fields(con, lead, attom_map)
         quality = assess_packet_data(hydrated)
-        decision = determine_lead_action(lead, quality, [], [])
+        overlap_signals = _overlap_signals(lead, con)
+        decision = determine_lead_action(hydrated, quality, overlap_signals, [])
         execution_reality = quality.get("execution_reality") or {}
         blockers = quality.get("vault_publish_blockers") or []
         equity_band = str(lead["equity_band"] or "").strip().upper()
@@ -932,6 +959,7 @@ def _build_credible_shots(
                 "falcoScore": int(lead["falco_score_internal"] or 0),
                 "auctionReadiness": str(lead["auction_readiness"] or "").upper(),
                 "nextAction": next_action,
+                "overlapSignals": overlap_signals,
                 "workabilityBand": str(execution_reality.get("workability_band") or "").upper(),
                 "contactPathQuality": str(execution_reality.get("contact_path_quality") or "").upper(),
                 "ownerAgency": str(execution_reality.get("owner_agency") or "").upper(),
