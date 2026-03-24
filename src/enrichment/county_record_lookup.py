@@ -13,6 +13,7 @@ from urllib.error import URLError, HTTPError
 import http.cookiejar
 
 from ..automation.prefc_policy import prefc_county_is_active
+from ..core.env_defaults import load_bots_env_defaults
 from ..storage import sqlite_store as _store
 
 _SOURCE_CHANNEL = "COUNTY_RECORD_LOOKUP"
@@ -106,6 +107,11 @@ def _county_config(county: str) -> dict[str, str]:
             "notes": "Use county register or recorder search with instrument or book/page refs.",
         },
     )
+
+
+def _county_label_for_ustsn(county: str) -> str:
+    normalized = str(county or "").strip().upper()
+    return normalized.replace(" COUNTY", "").title()
 
 
 def _target_keys() -> set[str] | None:
@@ -211,20 +217,117 @@ def _abandon_ustsn_sessions(opener: urllib_request.OpenerDirector, body: str) ->
     return abandoned
 
 
-def _login_ustsn() -> tuple[bool, str]:
+def _login_ustsn() -> tuple[bool, str, urllib_request.OpenerDirector | None]:
     opener = _ustsn_opener()
     ok, status, body = _attempt_ustsn_login(opener)
     if ok:
-        return True, status
+        return True, status, opener
     if status != "session_limit_exceeded":
-        return False, status
+        return False, status, None
 
     abandoned = _abandon_ustsn_sessions(opener, body)
     if abandoned <= 0:
-        return False, "session_limit_exceeded"
+        return False, "session_limit_exceeded", None
 
     ok, status, _ = _attempt_ustsn_login(opener)
-    return ok, status
+    return ok, status, opener if ok else None
+
+
+def _ustsn_subscription_map(opener: urllib_request.OpenerDirector) -> dict[str, str]:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    req = urllib_request.Request(
+        urllib_parse.urljoin(_USTITLESEARCH_BASE_URL, "subscription.asp"),
+        headers=headers,
+    )
+    with opener.open(req, timeout=30) as response:
+        body = response.read().decode("cp1252", errors="ignore")
+
+    mapping: dict[str, str] = {}
+    pattern = re.compile(
+        r'changesubscription\.asp\?SubscriptionId=(\d+)[^>]*>\s*(?:<button[^>]*>)?\s*TN,\s*([^<]+?)\s*(?:</button>)?\s*</a>',
+        flags=re.IGNORECASE,
+    )
+    for subscription_id, county_name in pattern.findall(body):
+        mapping[str(county_name).strip().upper()] = str(subscription_id).strip()
+    return mapping
+
+
+def _ustsn_probe_task(
+    opener: urllib_request.OpenerDirector,
+    county: str,
+    book: str,
+    page: str,
+) -> dict[str, Any]:
+    county_name = _county_label_for_ustsn(county).upper()
+    try:
+        subscription_map = _ustsn_subscription_map(opener)
+    except (HTTPError, URLError):
+        return {
+            "probe_status": "site_unavailable",
+            "catalog_book_found": False,
+            "catalog_page_found": False,
+            "subscription_id": "",
+            "probe_notes": "Unable to load USTN subscription list for county lookup.",
+        }
+
+    subscription_id = str(subscription_map.get(county_name) or "").strip()
+    if not subscription_id:
+        return {
+            "probe_status": "subscription_unavailable",
+            "catalog_book_found": False,
+            "catalog_page_found": False,
+            "subscription_id": "",
+            "probe_notes": f"No active USTN subscription mapping found for {county_name.title()}.",
+        }
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    image_url = urllib_parse.urljoin(
+        _USTITLESEARCH_BASE_URL,
+        f"subscriptionimagelist.asp?action=list&subscriptionid={subscription_id}",
+    )
+    try:
+        with opener.open(urllib_request.Request(image_url, headers=headers), timeout=60) as response:
+            body = response.read().decode("cp1252", errors="ignore")
+    except (HTTPError, URLError):
+        return {
+            "probe_status": "image_catalog_unavailable",
+            "catalog_book_found": False,
+            "catalog_page_found": False,
+            "subscription_id": subscription_id,
+            "probe_notes": "USTN image catalog could not be loaded for the county subscription.",
+        }
+
+    book_token = str(book or "").strip()
+    page_token = str(page or "").strip()
+    book_found = bool(book_token and f">{book_token}&nbsp;&nbsp;<" in body)
+    page_found = bool(page_token and f">{page_token}&nbsp;&nbsp;<" in body)
+
+    if book_found and page_found:
+        probe_status = "catalog_match"
+        probe_notes = (
+            "USTN image catalog contains both the referenced book and page values. "
+            "This confirms image-era coverage, but not document-level extraction yet."
+        )
+    elif book_found or page_found:
+        probe_status = "partial_catalog_match"
+        probe_notes = (
+            "USTN image catalog contains part of the recorded reference. "
+            "Coverage is plausible, but document-level extraction is still unresolved."
+        )
+    else:
+        probe_status = "catalog_no_match"
+        probe_notes = (
+            "USTN image catalog did not expose the referenced book/page values in the public listing."
+        )
+
+    return {
+        "probe_status": probe_status,
+        "catalog_book_found": book_found,
+        "catalog_page_found": page_found,
+        "subscription_id": subscription_id,
+        "probe_notes": probe_notes,
+        "image_catalog_url": image_url,
+    }
 
 
 def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row, login_status: str) -> dict[str, Any] | None:
@@ -306,12 +409,45 @@ def _persist_task(task: dict[str, Any]) -> None:
     _store.insert_provenance_text(lead_key, "county_record_lookup_url", str(task.get("search_url") or task.get("official_url") or ""), _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.95)
     _store.insert_provenance_text(lead_key, "county_record_lookup_hint", str(task["lookup_hint"]), _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.95)
     _store.insert_provenance_text(lead_key, "county_record_lookup_refs", str(task["record_refs"]), _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.95)
+    probe_status = str(task.get("probe_status") or "").strip()
+    if probe_status:
+        _store.insert_provenance_text(lead_key, "county_record_lookup_probe_status", probe_status, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.9)
+    subscription_id = str(task.get("subscription_id") or "").strip()
+    if subscription_id:
+        _store.insert_provenance_text(lead_key, "county_record_lookup_subscription_id", subscription_id, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.9)
+    image_catalog_url = str(task.get("image_catalog_url") or "").strip()
+    if image_catalog_url:
+        _store.insert_provenance_text(lead_key, "county_record_lookup_image_catalog_url", image_catalog_url, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.9)
+    if "catalog_book_found" in task:
+        _store.insert_provenance_text(
+            lead_key,
+            "county_record_lookup_book_catalog_match",
+            "1" if bool(task.get("catalog_book_found")) else "0",
+            _SOURCE_CHANNEL,
+            retrieved_at,
+            artifact_ref,
+            0.9,
+        )
+    if "catalog_page_found" in task:
+        _store.insert_provenance_text(
+            lead_key,
+            "county_record_lookup_page_catalog_match",
+            "1" if bool(task.get("catalog_page_found")) else "0",
+            _SOURCE_CHANNEL,
+            retrieved_at,
+            artifact_ref,
+            0.9,
+        )
+    probe_notes = str(task.get("probe_notes") or "").strip()
+    if probe_notes:
+        _store.insert_provenance_text(lead_key, "county_record_lookup_probe_notes", probe_notes, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.85)
 
 
 def run() -> dict[str, Any]:
+    load_bots_env_defaults()
     targets = _target_keys()
     queued: list[dict[str, Any]] = []
-    login_ok, login_status = _login_ustsn()
+    login_ok, login_status, opener = _login_ustsn()
 
     with _connect() as con:
         rows = con.execute(
@@ -331,6 +467,17 @@ def run() -> dict[str, Any]:
             task = _build_lookup_task(con, lead, "authenticated" if login_ok else login_status)
             if not task:
                 continue
+            if login_ok and opener and "ustitlesearch.net" in str(task.get("search_url") or "").lower():
+                probe = _ustsn_probe_task(
+                    opener,
+                    str(task.get("county") or ""),
+                    str(task.get("book") or ""),
+                    str(task.get("page") or ""),
+                )
+                task.update(probe)
+                probe_status = str(probe.get("probe_status") or "").strip()
+                if probe_status:
+                    task["status"] = probe_status
             _persist_task(task)
             queued.append(task)
 
