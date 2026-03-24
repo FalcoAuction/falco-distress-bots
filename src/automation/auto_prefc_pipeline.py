@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from ..enrichment.attom_enricher import run as run_attom_enrichment
@@ -81,6 +83,16 @@ def _source_quality_boost(source_value: str | None) -> int:
     if normalized in {"FORECLOSURE", "FORECLOSURE_TN"}:
         return 0
     return 1
+
+
+def _reports_dir() -> Path:
+    out_dir = Path(__file__).resolve().parents[2] / "out" / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
@@ -571,6 +583,200 @@ def _scheduled_credible_targets(limit: int) -> list[dict[str, Any]]:
         return _build_credible_shots(con, live_slugs, limit=limit)
 
 
+def _conversion_targets(limit: int) -> list[dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    keyed: dict[str, dict[str, Any]] = {}
+
+    for row in _scheduled_credible_targets(max(limit, 4)):
+        lead_key = str(row.get("leadKey") or "").strip()
+        if not lead_key:
+            continue
+        blockers = [str(item).strip() for item in (row.get("blockers") or []) if str(item).strip()]
+        next_action = str(row.get("nextAction") or "").strip().lower()
+        target = {
+            "lead_key": lead_key,
+            "lane": "scheduled",
+            "county": str(row.get("county") or ""),
+            "distress_type": str(row.get("distressType") or ""),
+            "score": float(row.get("falcoScore") or 0),
+            "equity_band": str(row.get("equityBand") or "").upper(),
+            "blockers": blockers,
+            "next_action": next_action,
+            "needs_attom": "Valuation anchors missing" in blockers or str(row.get("equityBand") or "").upper() in {"", "UNKNOWN"},
+            "needs_batchdata": any(
+                blocker in {"Mortgage lender missing", "Original loan amount missing", "Last transfer date missing"}
+                for blocker in blockers
+            ),
+            "needs_county_lookup": next_action == "county_record_lookup",
+            "needs_debt_reconstruction": next_action in {"reconstruct_debt", "county_record_lookup"},
+            "needs_transfer_reconstruction": next_action == "reconstruct_transfer" or "Last transfer date missing" in blockers,
+            "source_priority": prefc_source_priority(str(row.get("distressType") or "")),
+        }
+        if any(
+            target[key]
+            for key in (
+                "needs_attom",
+                "needs_batchdata",
+                "needs_county_lookup",
+                "needs_debt_reconstruction",
+                "needs_transfer_reconstruction",
+            )
+        ):
+            keyed[lead_key] = target
+
+    for row in _prefc_retry_targets(max(limit * 2, 8)):
+        lead_key = str(row.get("lead_key") or "").strip()
+        if not lead_key:
+            continue
+        blockers = [str(item).strip() for item in (row.get("recoverable_partial_reasons") or []) if str(item).strip()]
+        existing = keyed.get(lead_key, {})
+        target = {
+            "lead_key": lead_key,
+            "lane": "pre_foreclosure",
+            "county": str(row.get("county") or existing.get("county") or ""),
+            "distress_type": str(row.get("distress_type") or existing.get("distress_type") or ""),
+            "score": float(row.get("score") or existing.get("score") or 0),
+            "equity_band": str(existing.get("equity_band") or ""),
+            "blockers": blockers or list(existing.get("blockers") or []),
+            "next_action": str(row.get("next_action") or existing.get("next_action") or "").strip().lower(),
+            "needs_attom": bool(row.get("needs_attom")) or bool(existing.get("needs_attom")),
+            "needs_batchdata": bool(row.get("needs_batchdata")) or bool(existing.get("needs_batchdata")),
+            "needs_county_lookup": str(row.get("next_action") or "").strip().lower() == "county_record_lookup" or bool(existing.get("needs_county_lookup")),
+            "needs_debt_reconstruction": bool(row.get("needs_debt_reconstruction")) or bool(existing.get("needs_debt_reconstruction")),
+            "needs_transfer_reconstruction": bool(row.get("needs_transfer_reconstruction")) or bool(existing.get("needs_transfer_reconstruction")),
+            "source_priority": int(row.get("source_priority") or existing.get("source_priority") or 99),
+        }
+        keyed[lead_key] = target
+
+    targets = list(keyed.values())
+    targets.sort(
+        key=lambda row: (
+            0 if row.get("lane") == "scheduled" else 1,
+            -_county_budget_boost(row.get("county")),
+            -_source_quality_boost(row.get("distress_type")),
+            0 if row.get("needs_county_lookup") else 1,
+            0 if row.get("needs_debt_reconstruction") else 1,
+            0 if row.get("needs_transfer_reconstruction") else 1,
+            0 if str(row.get("equity_band") or "").upper() == "HIGH" else 1 if str(row.get("equity_band") or "").upper() == "MED" else 2,
+            -float(row.get("score") or 0),
+        )
+    )
+    return targets[:limit]
+
+
+def _write_conversion_report(payload: dict[str, Any]) -> str:
+    path = _reports_dir() / "conversion_lane.json"
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return str(path)
+
+
+def _run_conversion_lane(run_id: str) -> dict[str, Any]:
+    if not _truthy(os.environ.get("FALCO_AUTO_CONVERSION_LANE", "1")):
+        return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_CONVERSION_LANE disabled"}
+
+    limit = max(int(os.environ.get("FALCO_AUTO_CONVERSION_LIMIT", "10")), 0)
+    targets = _conversion_targets(limit)
+    if not targets:
+        report = {
+            "generated_at": _now_iso(),
+            "run_id": run_id,
+            "attempted": True,
+            "enabled": True,
+            "requested": 0,
+            "targets": [],
+        }
+        return {"attempted": True, "enabled": True, "requested": 0, "path": _write_conversion_report(report)}
+
+    all_keys = sorted({str(row.get("lead_key") or "").strip() for row in targets if str(row.get("lead_key") or "").strip()})
+    attom_keys = sorted({row["lead_key"] for row in targets if row.get("needs_attom")})
+    batchdata_keys = sorted({row["lead_key"] for row in targets if row.get("needs_batchdata")})
+    county_lookup_keys = sorted({row["lead_key"] for row in targets if row.get("needs_county_lookup")})
+    debt_keys = sorted({
+        row["lead_key"]
+        for row in targets
+        if row.get("needs_debt_reconstruction") or row.get("needs_transfer_reconstruction")
+    })
+
+    env_backup = {
+        key: os.environ.get(key)
+        for key in (
+            "FALCO_STAGE2_SOURCE",
+            "FALCO_ATTOM_TARGET_LEAD_KEYS",
+            "FALCO_ATTOM_MAX_ENRICH",
+            "FALCO_MAX_ATTOM_CALLS_PER_RUN",
+            "FALCO_BATCHDATA_TARGET_LEAD_KEYS",
+            "FALCO_DEBT_RECON_TARGET_LEAD_KEYS",
+            "FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS",
+        )
+    }
+
+    attom_result: dict[str, Any] | None = None
+    batchdata_result: dict[str, Any] | None = None
+    county_lookup_result: dict[str, Any] | None = None
+    debt_result: dict[str, Any] | None = None
+    try:
+        os.environ["FALCO_STAGE2_SOURCE"] = "sqlite"
+        if attom_keys:
+            os.environ["FALCO_ATTOM_TARGET_LEAD_KEYS"] = ",".join(attom_keys)
+            os.environ["FALCO_ATTOM_MAX_ENRICH"] = str(max(len(attom_keys), 1))
+            os.environ["FALCO_MAX_ATTOM_CALLS_PER_RUN"] = str(max(len(attom_keys) * 4, 4))
+            attom_result = run_attom_enrichment()
+
+        if batchdata_keys and os.environ.get("FALCO_BATCHDATA_API_KEY", "").strip():
+            os.environ["FALCO_BATCHDATA_TARGET_LEAD_KEYS"] = ",".join(batchdata_keys)
+            batchdata_result = run_batchdata_fallback()
+
+        if county_lookup_keys:
+            os.environ["FALCO_COUNTY_LOOKUP_TARGET_LEAD_KEYS"] = ",".join(county_lookup_keys)
+            county_lookup_result = run_county_record_lookup()
+
+        if debt_keys:
+            os.environ["FALCO_DEBT_RECON_TARGET_LEAD_KEYS"] = ",".join(debt_keys)
+            debt_result = run_debt_reconstruction()
+
+        score_leads_by_keys(all_keys, run_id=f"{run_id}_conversion")
+        for lead_key in all_keys:
+            os.environ["FALCO_REPACK_LEAD_KEY"] = lead_key
+            run_packager()
+    finally:
+        os.environ.pop("FALCO_REPACK_LEAD_KEY", None)
+        for key, value in env_backup.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    report = {
+        "generated_at": _now_iso(),
+        "run_id": run_id,
+        "attempted": True,
+        "enabled": True,
+        "requested": len(all_keys),
+        "attomTargets": attom_keys,
+        "batchdataTargets": batchdata_keys,
+        "countyLookupTargets": county_lookup_keys,
+        "debtTargets": debt_keys,
+        "targets": targets,
+        "attom": attom_result,
+        "batchdata": batchdata_result,
+        "countyLookup": county_lookup_result,
+        "debtReconstruction": debt_result,
+    }
+    return {
+        "attempted": True,
+        "enabled": True,
+        "requested": len(all_keys),
+        "path": _write_conversion_report(report),
+        "attom": attom_result,
+        "batchdata": batchdata_result,
+        "countyLookup": county_lookup_result,
+        "debtReconstruction": debt_result,
+        "targets": targets,
+    }
+
+
 def _run_targeted_scheduled_enrichment(run_id: str) -> dict[str, Any]:
     load_bots_env_defaults()
     if not _truthy(os.environ.get("FALCO_AUTO_SCHEDULED_ENRICH", "1")):
@@ -773,6 +979,7 @@ def _publish_candidates(candidates: list[dict[str, Any]]) -> dict[str, Any]:
 def run(run_id: str) -> dict[str, Any]:
     enrichment_result = _run_targeted_enrichment(run_id)
     scheduled_enrichment_result = _run_targeted_scheduled_enrichment(run_id)
+    conversion_result = _run_conversion_lane(run_id)
     prune_limit = max(int(os.environ.get("FALCO_AUTO_PREFC_PRUNE_LIMIT", "3")), 0)
     prune_result = _prune_weak_live_prefc(prune_limit)
     foreclosure_prune_limit = max(int(os.environ.get("FALCO_AUTO_FORECLOSURE_PRUNE_LIMIT", "2")), 0)
@@ -807,6 +1014,7 @@ def run(run_id: str) -> dict[str, Any]:
         "ok": bool(publish_result.get("ok", True)),
         "enrichment": enrichment_result,
         "scheduledEnrichment": scheduled_enrichment_result,
+        "conversion": conversion_result,
         "prune": prune_result,
         "foreclosurePrune": foreclosure_prune_result,
         "publish": {
