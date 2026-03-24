@@ -14,6 +14,8 @@ jobs:
       FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
       NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
       NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+      FALCO_SITE_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      FALCO_SITE_SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
       # DEBUG (TEMP during buildout)
       FALCO_ENRICH_DEBUG: "1"
@@ -45,3 +47,14 @@ jobs:
 
       - name: Run Falco pipeline
         run: python -m src.run_all
+
+      - name: Upload run status artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: falco-daily-status
+          path: |
+            out/reports/latest_run_status.json
+            out/reports/latest_run_summary.json
+            out/reports/conversion_lane.json
+          if-no-files-found: ignore
