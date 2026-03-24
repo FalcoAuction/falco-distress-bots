@@ -221,11 +221,6 @@ def _packet_for_lead(lead_key: str) -> Path | None:
     )
     if not candidates:
         return None
-
-    repack_candidates = [p for p in candidates if "unknown_run" in p.parts]
-    if repack_candidates:
-        return repack_candidates[0]
-
     return candidates[0]
 
 

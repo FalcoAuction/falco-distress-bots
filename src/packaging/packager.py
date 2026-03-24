@@ -92,12 +92,20 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         "owner_mail",
         "last_sale_date",
         "mortgage_lender",
+        "mortgage_lender_current",
+        "mortgage_lender_original",
+        "mortgage_lender_notice_holder",
         "mortgage_date",
+        "mortgage_date_current",
         "property_identifier",
         "owner_phone_primary",
         "owner_phone_secondary",
         "notice_phone",
         "trustee_phone_public",
+        "fsbo_listing_title",
+        "fsbo_listing_description",
+        "fsbo_signal_labels",
+        "fsbo_listing_source",
     )
     want_num = (
         "mortgage_amount",
@@ -105,6 +113,8 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         "building_area_sqft",
         "beds",
         "baths",
+        "list_price",
+        "fsbo_signal_score",
     )
     out = {}
     for field_name in want_text:
@@ -344,6 +354,8 @@ _LEAD_COLS = """
           l.sale_status,
           l.current_sale_date,
           l.original_sale_date,
+          l.first_seen_at,
+          l.last_seen_at,
           l.falco_score_internal,
           l.auction_readiness,
           l.equity_band,
@@ -423,6 +435,7 @@ def run() -> Dict[str, int]:
            AND l.dts_days >= ?
            AND l.dts_days <= ?)
           OR l.sale_status = 'pre_foreclosure'
+          OR UPPER(COALESCE(l.distress_type, '')) = 'FSBO'
         )
         """
 
@@ -430,6 +443,7 @@ def run() -> Dict[str, int]:
             _LEAD_COLS + where_clause + """
         ORDER BY
             CASE WHEN l.sale_status = 'pre_foreclosure' THEN 0 ELSE 1 END ASC,
+            CASE WHEN UPPER(COALESCE(l.distress_type, '')) = 'FSBO' THEN 1 ELSE 2 END ASC,
             CASE COALESCE(l.auction_readiness, '')
                 WHEN 'GREEN' THEN 1
                 WHEN 'YELLOW' THEN 2
@@ -534,6 +548,10 @@ def run() -> Dict[str, int]:
         for _k, _v in _hydrate_fallback_fields(cur, lead_key).items():
             if _v is not None:
                 fields[_k] = _v
+        if fields.get("mortgage_lender_current"):
+            fields["mortgage_lender"] = fields.get("mortgage_lender_current")
+        if fields.get("mortgage_date_current"):
+            fields["mortgage_date"] = fields.get("mortgage_date_current")
         if fields.get("current_sale_date") and not fields.get("sale_date_iso"):
             fields["sale_date_iso"] = fields.get("current_sale_date")
         if fields.get("current_sale_date") and not fields.get("sale_date"):
@@ -566,6 +584,7 @@ def run() -> Dict[str, int]:
             print(f"[CONTACT][WARN] enrich_contact_data failed lead_key={lead_key!r}: {_ce_exc}")
 
         _is_pre_foreclosure = str(fields.get("sale_status") or "").strip().lower() == "pre_foreclosure"
+        _is_fsbo = (fields.get("distress_type") or "").upper() == "FSBO"
 
         # UW gate — attempt auto-underwriting when uw_ready is missing.
         # Manual UW in manual_underwriting table is authoritative and is not overwritten.
@@ -573,6 +592,9 @@ def run() -> Dict[str, int]:
         #   if it fails, repack proceeds anyway (sparse UW section).
         _uw_ready_raw = int(fields.get("uw_ready") or 0)
         if _is_pre_foreclosure:
+            fields.setdefault("uw_json", "")
+            fields["uw_ready"] = 1
+        elif _is_fsbo:
             fields.setdefault("uw_json", "")
             fields["uw_ready"] = 1
         elif _uw_ready_raw != 1:
@@ -618,7 +640,7 @@ def run() -> Dict[str, int]:
         # required inputs
         _is_lp   = (fields.get("distress_type") or "").upper() == "LIS_PENDENS"
         _has_avm = fields.get("avm_low") is not None and fields.get("avm_high") is not None
-        if not fields.get("address") or (not _is_lp and not _is_pre_foreclosure and not _has_avm):
+        if not fields.get("address") or (not _is_lp and not _is_pre_foreclosure and not _is_fsbo and not _has_avm):
             skipped_missing += 1
             continue
         # LP leads without AVM proceed but default to YELLOW readiness pending enrichment
@@ -678,12 +700,31 @@ def run() -> Dict[str, int]:
             fields["internal_comps"] = []
 
         quality = assess_packet_data(fields)
+        if _is_fsbo and not quality.get("fsbo_review_ready"):
+            skipped_missing += 1
+            continue
         fields["packet_quality"] = quality
         fields["packet_completeness_pct"] = quality["packet_completeness_pct"]
         fields["vault_publish_ready"] = quality["vault_publish_ready"]
         fields["pre_foreclosure_review_ready"] = quality.get("pre_foreclosure_review_ready", False)
+        fields["fsbo_review_ready"] = quality.get("fsbo_review_ready", False)
+        fields["fsbo_actionability_band"] = quality.get("fsbo_actionability_band")
+        fields["fsbo_actionability_reasons"] = quality.get("fsbo_actionability_reasons", [])
+        fields["fsbo_vault_ready"] = quality.get("fsbo_vault_ready", False)
+        fields["fsbo_price_gap_pct"] = quality.get("fsbo_price_gap_pct")
+        fields["fsbo_days_tracked"] = quality.get("fsbo_days_tracked")
+        fields["distress_lane"] = "Seller-Direct Opportunity" if _is_fsbo else fields.get("distress_lane")
         fields["vault_publish_blockers"] = quality["vault_publish_blockers"]
         fields["batchdata_fallback_targets"] = quality["batchdata_fallback_targets"]
+
+        if _is_fsbo:
+            actionability_band = str(quality.get("fsbo_actionability_band") or "").upper()
+            if actionability_band == "ACTIONABLE_NOW":
+                fields["auction_readiness"] = "GREEN"
+            elif actionability_band == "REVIEW":
+                fields["auction_readiness"] = "YELLOW"
+            else:
+                fields["auction_readiness"] = "PARTIAL"
 
         if quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"):
             vault_ready += 1

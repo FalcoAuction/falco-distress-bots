@@ -99,6 +99,15 @@ def _fmt_pct(v: Optional[float]) -> str:
     return f"{v * 100:.1f}%"
 
 
+def _float_or_none(v: Any) -> Optional[float]:
+    try:
+        if v is None or v == "":
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
 def _val(v: Any, fallback: str = "Unavailable") -> str:
     if v is None:
         return fallback
@@ -453,6 +462,38 @@ def _readiness_label(r: str) -> str:
 
 def _draw_kpi_tiles(doc: _Doc, fields: Dict[str, Any]) -> None:
     c         = doc.c
+    if _is_fsbo(fields):
+        actionability = str(fields.get("fsbo_actionability_band") or "REVIEW").upper()
+        action_color = {"ACTIONABLE_NOW": _GREEN, "REVIEW": _AMBER, "WATCH": _SLATE}.get(actionability, _GRAY)
+        price_gap = _float_or_none(fields.get("fsbo_price_gap_pct"))
+        direct_phone = _val(fields.get("owner_phone_primary"), "Missing")
+        tiles = [
+            ("Days Tracked", _val(fields.get("fsbo_days_tracked"), "-"), _SLATE),
+            ("Actionability", actionability.replace("_", " "), action_color),
+            ("Price vs Value", _fmt_pct(price_gap) if price_gap is not None else "N/A", _SLATE),
+            ("Direct Seller", "READY" if direct_phone != "Missing" else "MISSING", _GREEN if direct_phone != "Missing" else _RED),
+        ]
+        n = len(tiles)
+        gap_pts = 6
+        tw = (CW - gap_pts * (n - 1)) / n
+        th = 44
+        tx = ML
+        ty = doc.y - th
+        for label, value, vc in tiles:
+            c.setFillColor(_TILE_BG)
+            c.setStrokeColor(_TILE_BRD)
+            c.setLineWidth(0.5)
+            c.roundRect(tx, ty, tw, th, 4, fill=1, stroke=1)
+            c.setFont("Helvetica", 7)
+            c.setFillColor(_GRAY)
+            c.drawCentredString(tx + tw / 2, ty + th - 13, label)
+            c.setFont("Helvetica-Bold", 11)
+            c.setFillColor(vc)
+            c.drawCentredString(tx + tw / 2, ty + 9, str(value)[:14])
+            tx += tw + gap_pts
+        doc.y = ty - 10
+        return
+
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
     diamond   = bool(fields.get("diamond_proxy"))
     rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
@@ -542,6 +583,24 @@ def _draw_hero(
 
 def _narrative_intelligence(fields: Dict[str, Any]) -> List[str]:
     """Dense factual sentences derived entirely from structured fields. No fluff."""
+    if _is_fsbo(fields):
+        price_gap = _float_or_none(fields.get("fsbo_price_gap_pct"))
+        tracked = fields.get("fsbo_days_tracked")
+        phone = _val(fields.get("owner_phone_primary"), "Missing")
+        actionability = _val(fields.get("fsbo_actionability_band"), "REVIEW")
+        source = _val(fields.get("fsbo_listing_source"), "FSBO.com")
+        lines = [
+            f"Seller-direct lane.  Actionability {actionability}.  Days tracked {_val(tracked, '-')}.  Source {source}.",
+            f"List price {_fmt_cur(fields.get('list_price'))}.  Price vs value {_fmt_pct(price_gap) if price_gap is not None else 'N/A'}.  Direct seller contact {phone}.",
+        ]
+        reasons = fields.get("fsbo_actionability_reasons") or []
+        if reasons:
+            lines.append("Execution read: " + "  ".join(str(reason) for reason in reasons[:2]))
+        lines.append(
+            "Use this as a seller-direct execution brief: confirm seller control, occupancy, condition, and pricing room before committing field time."
+        )
+        return lines
+
     score       = fields.get("falco_score_internal")
     dts         = fields.get("dts_days")
     readiness   = (fields.get("auction_readiness") or "UNKNOWN").upper()
@@ -1058,7 +1117,12 @@ _DISTRESS_LABEL_MAP: Dict[str, str] = {
     "SUBSTITUTION_OF_TRUSTEE": "Trustee Sale",
     "TAX_SALE":                "Tax Sale",
     "SHERIFF_SALE":            "Sheriff Sale",
+    "FSBO":                    "Seller-Direct",
 }
+
+
+def _is_fsbo(fields: Dict[str, Any]) -> bool:
+    return str(fields.get("distress_type") or "").upper().strip() == "FSBO"
 
 
 def _distress_label(fields: Dict[str, Any]) -> str:
@@ -1482,6 +1546,10 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     _dist    = _distress_label(fields)
     _dts     = fields.get("dts_days")
     _dts_str = f"{_dts} days" if _dts is not None else "Unknown"
+    _is_sd   = _is_fsbo(fields)
+    _tracked = fields.get("fsbo_days_tracked")
+    if _is_sd and _tracked is not None:
+        _dts_str = f"{_tracked} days"
 
     _low  = fields.get("value_anchor_low")
     _high = fields.get("value_anchor_high")
@@ -1523,15 +1591,18 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     if _cond_str.lower() in {"unknown", "unknown (street_view)"}:
         _cond_str = "Not yet verified"
 
-    # Key Risk: first HIGH or MED flag; fall back to first flag
-    _flags    = _risk_flags(fields)
-    _risk_str = "No primary blockers"
-    for _ft, _sv in _flags:
-        if _sv in ("HIGH", "MED"):
-            _risk_str = _ft[:50]
-            break
-    if _risk_str == "None Triggered" and _flags:
-        _risk_str = _flags[0][0][:50]
+    # Key Risk / actionability read
+    if _is_sd:
+        _risk_str = str((fields.get("fsbo_actionability_reasons") or ["Seller-direct review lane"])[0])[:50]
+    else:
+        _flags    = _risk_flags(fields)
+        _risk_str = "No primary blockers"
+        for _ft, _sv in _flags:
+            if _sv in ("HIGH", "MED"):
+                _risk_str = _ft[:50]
+                break
+        if _risk_str == "None Triggered" and _flags:
+            _risk_str = _flags[0][0][:50]
 
     # ── Box geometry ─────────────────────────────────────────────────────────
     _HDR_H  = 17
@@ -1601,13 +1672,21 @@ def _draw_auction_snapshot(doc: _Doc, fields: Dict[str, Any]) -> None:
     _snap_kv(_cy, "County", _county, "Distress Type", _dist)
     _cy -= _ROW_H
 
-    # Row 3: Scheduled sale timing | Market Value
-    _snap_kv(_cy, "Sched. Sale In", _dts_str, "Market Value", _val_str, bold1=True)
+    # Row 3: timing / listing age | Market Value
+    _snap_kv(_cy, "Days Tracked" if _is_sd else "Sched. Sale In", _dts_str, "Market Value", _val_str, bold1=True)
     _cy -= _ROW_H
 
-    # Row 4: Target Bid | Occupancy
+    # Row 4: ask / bid | Occupancy
     _bid_color = _GREEN if _bid_str != "Not Set" else _AMBER
-    _snap_kv(_cy, "Target Bid", _bid_str, "Occupancy", _occ_str, bold1=True, vc1=_bid_color)
+    _snap_kv(
+        _cy,
+        "List Price" if _is_sd else "Target Bid",
+        _fmt_cur(_float_or_none(fields.get("list_price"))) if _is_sd else _bid_str,
+        "Occupancy",
+        _occ_str,
+        bold1=True,
+        vc1=_bid_color,
+    )
     _cy -= _ROW_H
 
     # Row 5: Condition (left) | Key Risk (right, wraps up to 2 lines)
@@ -1703,16 +1782,32 @@ def _page1_executive(
             pass
     doc.gap(6)
 
-    # 2) Why This Property Is in Distress
-    doc.section("Auction Trigger")
-    doc.kv("Distress Type",     _distress_label(fields))
-    doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)))
-    doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
-    doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
-    _dts_raw = fields.get("dts_days")
-    doc.kv("Scheduled Sale In", f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
-    doc.kv("Enrichment Status", _val(fields.get("attom_status")))
-    doc.gap(6)
+    # 2) Why this opportunity matters
+    if _is_fsbo(fields):
+        _tracked_raw = fields.get("fsbo_days_tracked")
+        _list_price = _float_or_none(fields.get("list_price"))
+        _fsbo_band = _val(fields.get("fsbo_actionability_band"))
+        _source = _val(fields.get("fsbo_listing_source"))
+        _reason = str((fields.get("fsbo_actionability_reasons") or ["Seller-direct review lane"])[0])
+        doc.section("Seller-Direct Snapshot")
+        doc.kv("Opportunity Type", _distress_label(fields))
+        doc.kv("List Price", _fmt_cur(_list_price), bold_v=True)
+        doc.kv("Days Tracked", f"{_tracked_raw} days" if _tracked_raw is not None else "Unknown")
+        doc.kv("Direct Seller Contact", _val(fields.get("owner_phone_primary")))
+        doc.kv("Actionability", _fsbo_band)
+        doc.kv("Listing Source", _source)
+        doc.kv("Why It Matters", _reason)
+        doc.gap(6)
+    else:
+        doc.section("Auction Trigger")
+        doc.kv("Distress Type",     _distress_label(fields))
+        doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)))
+        doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
+        doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
+        _dts_raw = fields.get("dts_days")
+        doc.kv("Scheduled Sale In", f"{_dts_raw} days" if _dts_raw is not None else "Unknown", bold_v=True)
+        doc.kv("Enrichment Status", _val(fields.get("attom_status")))
+        doc.gap(6)
 
     # 3) Estimated Market Value
     low        = fields.get("value_anchor_low")
@@ -2224,9 +2319,9 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
         "owner_name":       _val(fields.get("owner_name"), None),
         "owner_mail":       _val(fields.get("owner_mail"), None),
         "last_sale_date":   _val(fields.get("last_sale_date"), None),
-        "mortgage_lender":  _val(fields.get("mortgage_lender"), None),
+        "mortgage_lender":  _val(fields.get("mortgage_lender_current"), None) or _val(fields.get("mortgage_lender"), None),
         "mortgage_amount":  _fmt_cur(fields.get("mortgage_amount")) if fields.get("mortgage_amount") is not None else None,
-        "mortgage_date":    _val(fields.get("mortgage_date"), None),
+        "mortgage_date":    _val(fields.get("mortgage_date_current"), None) or _val(fields.get("mortgage_date"), None),
     }
     raw_json = fields.get("attom_raw_json")
     if not raw_json:
@@ -2316,7 +2411,7 @@ def _extract_owner_mortgage(fields: Dict[str, Any]) -> Dict[str, Optional[str]]:
 def _extract_lien_skeleton(fields: Dict[str, Any]) -> Dict[str, Any]:
     """Extract lien skeleton from raw_merged mortgage blob + AVM low."""
     out: Dict[str, Any] = {
-        "first_lender":    _val(fields.get("mortgage_lender"), None),
+        "first_lender":    _val(fields.get("mortgage_lender_current"), None) or _val(fields.get("mortgage_lender"), None),
         "first_amount":    None,   # float or None
         "second_amount":   None,   # float or None
         "total_amount":    None,   # float or None
@@ -2698,35 +2793,60 @@ def _page3_property_facts(doc: _Doc, fields: Dict[str, Any]) -> None:
 def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any]) -> None:
     doc.page_header("Timing, Value & Underwriting")
 
-    doc.section("Sale Timeline")
-    doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)), bold_v=True)
-    doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
-    _dts_display = _val(fields.get("dts_days"))
-    if _dts_display not in {"â€”", "Unknown"}:
-        _dts_display = f"{_dts_display} days"
-    doc.kv("Days Until Scheduled Sale", _dts_display)
-    doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
-    doc.kv("Sale Location",     _val(fields.get("sale_location")), lw=110)
-    doc.kv("Sale Type",         _val(fields.get("sale_type")))
-    doc.kv("Enriched At",       _val(fields.get("enriched_at")))
-    doc.kv("Enrichment Status", _val(fields.get("attom_status")))
-    _notice_verified = fields.get("notice_verified")
-    if _notice_verified is True:
-        doc.kv("Sale Notice Verification", "MANUALLY VERIFIED")
-    elif _notice_verified is False:
-        doc.kv("Sale Notice Verification", "SCRAPE ONLY — NOT MANUALLY VERIFIED")
+    if _is_fsbo(fields):
+        _price_gap = _float_or_none(fields.get("fsbo_price_gap_pct"))
+        _signal_labels = fields.get("fsbo_signal_labels") or []
+        if isinstance(_signal_labels, str):
+            _signal_labels = [part.strip() for part in _signal_labels.split(",") if part.strip()]
+        doc.section("Seller-Direct Execution")
+        doc.kv("List Price", _fmt_cur(_float_or_none(fields.get("list_price"))), bold_v=True)
+        doc.kv("Days Tracked", f"{fields.get('fsbo_days_tracked')} days" if fields.get("fsbo_days_tracked") is not None else "Unknown")
+        doc.kv("Direct Seller Contact", _val(fields.get("owner_phone_primary")))
+        doc.kv("Listing Source", _val(fields.get("fsbo_listing_source")))
+        doc.kv("Actionability", _val(fields.get("fsbo_actionability_band")))
+        doc.kv("Price vs Value", _fmt_pct(_price_gap) if _price_gap is not None else "N/A")
+        if _signal_labels:
+            doc.kv("Seller Signals", ", ".join(_signal_labels[:3]))
+        doc.kv("Enriched At", _val(fields.get("enriched_at")))
+        doc.kv("Enrichment Status", _val(fields.get("attom_status")))
     else:
-        doc.kv("Sale Notice Verification", "UNVERIFIED")
+        doc.section("Sale Timeline")
+        doc.kv("Scheduled Sale Date", _val(_timeline_sale_date(fields)), bold_v=True)
+        doc.kv("Scheduled Sale Time", _val(fields.get("sale_time")))
+        _dts_display = _val(fields.get("dts_days"))
+        if _dts_display not in {"â€”", "Unknown"}:
+            _dts_display = f"{_dts_display} days"
+        doc.kv("Days Until Scheduled Sale", _dts_display)
+        doc.kv("Recorded Date", _val(_timeline_recorded_date(fields)))
+        doc.kv("Sale Location",     _val(fields.get("sale_location")), lw=110)
+        doc.kv("Sale Type",         _val(fields.get("sale_type")))
+        doc.kv("Enriched At",       _val(fields.get("enriched_at")))
+        doc.kv("Enrichment Status", _val(fields.get("attom_status")))
+        _notice_verified = fields.get("notice_verified")
+        if _notice_verified is True:
+            doc.kv("Sale Notice Verification", "MANUALLY VERIFIED")
+        elif _notice_verified is False:
+            doc.kv("Sale Notice Verification", "SCRAPE ONLY — NOT MANUALLY VERIFIED")
+        else:
+            doc.kv("Sale Notice Verification", "UNVERIFIED")
     doc.gap(6)
 
     doc.section("Risk Factors")
-    flags = _risk_flags(fields)
-    if not flags:
-        doc.bullet("No automated risk triggers detected.")
+    if _is_fsbo(fields):
+        fsbo_reasons = fields.get("fsbo_actionability_reasons") or []
+        if not fsbo_reasons:
+            doc.bullet("No seller-direct risk notes detected yet.")
+        else:
+            for reason in fsbo_reasons[:4]:
+                doc.bullet(str(reason))
     else:
-        sev_color = {"HIGH": _RED, "MED": _AMBER, "LOW": _GRAY}
-        for flag_text, sev in flags:
-            doc.bullet(f"[{sev}] {flag_text}", color=sev_color.get(sev, _SLATE))
+        flags = _risk_flags(fields)
+        if not flags:
+            doc.bullet("No automated risk triggers detected.")
+        else:
+            sev_color = {"HIGH": _RED, "MED": _AMBER, "LOW": _GRAY}
+            for flag_text, sev in flags:
+                doc.bullet(f"[{sev}] {flag_text}", color=sev_color.get(sev, _SLATE))
 
     _lien = _extract_lien_skeleton(fields)
 
@@ -2735,10 +2855,17 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
     doc.gap(6)
     _render_compact_value_framework(doc, fields, brief)
     doc.gap(6)
-    doc.section("Before You Bid")
+    doc.section("Before You Engage" if _is_fsbo(fields) else "Before You Bid")
 
     _owner_mort = _extract_owner_mortgage(fields)
-    if _lien["equity_proxy_low"] is not None:
+    if _is_fsbo(fields):
+        doc.body(
+            "Confirm seller control, title status, occupancy, and condition before spending real time. "
+            "Seller-direct files should move only when contact is reachable and pricing still leaves room for execution.",
+            size=9,
+            leading=13,
+        )
+    elif _lien["equity_proxy_low"] is not None:
         doc.body(
             f"Equity proxy based on AVM low less total original mortgage: ${_lien['equity_proxy_low']:,.0f}. "
             "Title confirmation required prior to capital deployment.",
