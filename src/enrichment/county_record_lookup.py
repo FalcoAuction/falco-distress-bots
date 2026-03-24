@@ -330,6 +330,25 @@ def _ustsn_probe_task(
     }
 
 
+def _county_lookup_next_step(task: dict[str, Any]) -> str:
+    status = str(task.get("probe_status") or task.get("status") or "").strip().lower()
+    if status == "catalog_match":
+        return "document_extraction_pending"
+    if status == "partial_catalog_match":
+        return "document_search_retry"
+    if status == "subscription_unavailable":
+        return "county_not_subscribed"
+    if status == "catalog_no_match":
+        return "refs_not_in_catalog"
+    if status == "image_catalog_unavailable":
+        return "catalog_unavailable"
+    if status == "site_unavailable":
+        return "site_unavailable"
+    if status in {"auth_required", "auth_failed", "auth_uncertain", "session_limit_exceeded"}:
+        return "auth_blocked"
+    return "queued"
+
+
 def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row, login_status: str) -> dict[str, Any] | None:
     lead_key = str(lead["lead_key"] or "").strip()
     county = str(lead["county"] or "").strip()
@@ -441,6 +460,8 @@ def _persist_task(task: dict[str, Any]) -> None:
     probe_notes = str(task.get("probe_notes") or "").strip()
     if probe_notes:
         _store.insert_provenance_text(lead_key, "county_record_lookup_probe_notes", probe_notes, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.85)
+    next_step = _county_lookup_next_step(task)
+    _store.insert_provenance_text(lead_key, "county_record_lookup_next_step", next_step, _SOURCE_CHANNEL, retrieved_at, artifact_ref, 0.9)
 
 
 def run() -> dict[str, Any]:

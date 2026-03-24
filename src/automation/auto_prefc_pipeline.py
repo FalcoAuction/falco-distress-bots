@@ -672,6 +672,119 @@ def _write_conversion_report(payload: dict[str, Any]) -> str:
     return str(path)
 
 
+def _latest_provenance_text(con: sqlite3.Connection, lead_key: str, field_name: str) -> str:
+    row = con.execute(
+        """
+        SELECT field_value_text
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return str(row[0] or "").strip() if row else ""
+
+
+def _post_conversion_outcomes(targets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not targets:
+        return []
+
+    outcomes: list[dict[str, Any]] = []
+    with _connect() as con:
+        attom_map: dict[str, dict[str, Any]] = {}
+        for row in con.execute(
+            """
+            SELECT lead_key, attom_raw_json, avm_value, avm_low, avm_high
+            FROM (
+                SELECT
+                  lead_key,
+                  attom_raw_json,
+                  avm_value,
+                  avm_low,
+                  avm_high,
+                  ROW_NUMBER() OVER (PARTITION BY lead_key ORDER BY enriched_at DESC, id DESC) AS rn
+                FROM attom_enrichments
+            )
+            WHERE rn = 1
+            """
+        ).fetchall():
+            attom_map[str(row["lead_key"])] = dict(row)
+
+        for target in targets:
+            lead_key = str(target.get("lead_key") or "").strip()
+            if not lead_key:
+                continue
+            lead = con.execute(
+                """
+                SELECT
+                  lead_key,
+                  address,
+                  county,
+                  distress_type,
+                  sale_status,
+                  falco_score_internal,
+                  auction_readiness,
+                  equity_band,
+                  dts_days,
+                  current_sale_date,
+                  original_sale_date,
+                  canonical_property_key,
+                  first_seen_at,
+                  last_seen_at
+                FROM leads
+                WHERE lead_key=?
+                LIMIT 1
+                """,
+                (lead_key,),
+            ).fetchone()
+            if not lead:
+                continue
+
+            hydrated = _hydrate_quality_fields(con, lead, attom_map)
+            quality = assess_packet_data(hydrated)
+            county_lookup_status = _latest_provenance_text(con, lead_key, "county_record_lookup_status")
+            county_lookup_next_step = _latest_provenance_text(con, lead_key, "county_record_lookup_next_step")
+            debt_blocker_type = _latest_provenance_text(con, lead_key, "debt_reconstruction_blocker_type")
+            sale_status = str(lead["sale_status"] or "").strip().lower()
+            publish_ready = bool(quality.get("prefc_live_quality")) if sale_status == "pre_foreclosure" else bool(quality.get("vault_publish_ready"))
+
+            if publish_ready:
+                disposition = "publish_ready"
+            elif county_lookup_next_step == "document_extraction_pending":
+                disposition = "external_document_extraction_pending"
+            elif debt_blocker_type == "resolved":
+                disposition = "not_live_under_current_gate"
+            elif county_lookup_next_step in {"refs_not_in_catalog", "county_not_subscribed", "catalog_unavailable", "auth_blocked"}:
+                disposition = county_lookup_next_step
+            elif debt_blocker_type:
+                disposition = f"blocked_{debt_blocker_type}"
+            else:
+                disposition = "in_recovery"
+
+            outcomes.append(
+                {
+                    "lead_key": lead_key,
+                    "address": str(lead["address"] or "").strip(),
+                    "county": str(lead["county"] or "").strip(),
+                    "lane": str(target.get("lane") or "").strip(),
+                    "next_action": str(target.get("next_action") or "").strip(),
+                    "disposition": disposition,
+                    "vault_publish_ready": publish_ready,
+                    "prefc_live_quality": bool(quality.get("prefc_live_quality")),
+                    "debt_confidence": str(quality.get("debt_confidence") or "").strip().upper(),
+                    "equity_band": str(hydrated.get("equity_band") or lead["equity_band"] or "").strip().upper(),
+                    "county_lookup_status": county_lookup_status,
+                    "county_lookup_next_step": county_lookup_next_step,
+                    "debt_blocker_type": debt_blocker_type,
+                    "mortgage_lender": str(hydrated.get("mortgage_lender") or "").strip(),
+                    "mortgage_amount": hydrated.get("mortgage_amount"),
+                    "last_sale_date": str(hydrated.get("last_sale_date") or "").strip(),
+                }
+            )
+    return outcomes
+
+
 def _run_conversion_lane(run_id: str) -> dict[str, Any]:
     if not _truthy(os.environ.get("FALCO_AUTO_CONVERSION_LANE", "1")):
         return {"attempted": False, "enabled": False, "reason": "FALCO_AUTO_CONVERSION_LANE disabled"}
@@ -763,6 +876,7 @@ def _run_conversion_lane(run_id: str) -> dict[str, Any]:
         "batchdata": batchdata_result,
         "countyLookup": county_lookup_result,
         "debtReconstruction": debt_result,
+        "outcomes": _post_conversion_outcomes(targets),
     }
     return {
         "attempted": True,
