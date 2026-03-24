@@ -22,6 +22,10 @@ def _reports_dir() -> Path:
     return out_dir
 
 
+def _status_path() -> Path:
+    return _reports_dir() / "latest_run_status.json"
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -116,6 +120,22 @@ def _json_ready(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     return value
+
+
+def write_run_status(payload: Dict[str, Any]) -> Dict[str, Any]:
+    path = _status_path()
+    normalized = {
+        **payload,
+        "updated_at": _utc_now(),
+    }
+    path.write_text(
+        json.dumps(normalized, indent=2, ensure_ascii=False, default=_json_ready) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "ok": True,
+        "path": str(path),
+    }
 
 
 def _load_live_vault_lead_keys() -> set[str]:

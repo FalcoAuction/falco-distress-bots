@@ -9,6 +9,12 @@ def write_run_summary(*args: Any, **kwargs: Any):
     return _write_run_summary(*args, **kwargs)
 
 
+def write_run_status(*args: Any, **kwargs: Any):
+    from .run_summary import write_run_status as _write_run_status
+
+    return _write_run_status(*args, **kwargs)
+
+
 def maybe_publish_to_vault(*args: Any, **kwargs: Any):
     from .site_publish import maybe_publish_to_vault as _maybe_publish_to_vault
 
@@ -21,4 +27,4 @@ def write_agent_reports(*args: Any, **kwargs: Any):
     return _write_agent_reports(*args, **kwargs)
 
 
-__all__ = ["write_run_summary", "maybe_publish_to_vault", "write_agent_reports"]
+__all__ = ["write_run_summary", "write_run_status", "maybe_publish_to_vault", "write_agent_reports"]

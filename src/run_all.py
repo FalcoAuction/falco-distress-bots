@@ -27,6 +27,7 @@ from .automation import (
     maybe_publish_to_vault,
     write_agent_reports,
     write_run_summary,
+    write_run_status,
 )
 from .automation.expansion_backfill import run as run_expansion_backfill
 from .automation.autonomy_agents import write_autonomy_report
@@ -77,6 +78,21 @@ def main():
     print("RUN_ALL VERSION CHECK - 2026-02-20 (ATTOM premium operational)")
     print(f"RUN_ALL UTC START: {utc_start}")
     print(f"RUN_ALL RUN_ID: {run_id}")
+
+    write_run_status(
+        {
+            "runId": run_id,
+            "status": "running",
+            "startedAt": utc_start,
+            "finishedAt": None,
+            "runner": "github_actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "local",
+            "workflow": os.environ.get("GITHUB_WORKFLOW"),
+            "githubRunId": os.environ.get("GITHUB_RUN_ID"),
+            "summaryPath": None,
+            "summary": None,
+            "error": None,
+        }
+    )
 
     run_logger.start_run(run_id)
     stage_results = []
@@ -163,6 +179,25 @@ def main():
         print(f"RUN_ALL UTC END: {utc_end}")
         summary_result = write_run_summary(run_id, utc_start, utc_end, stage_results, publish_result)
         print(f"[RunSummary] {summary_result}")
+        write_run_status(
+            {
+                "runId": run_id,
+                "status": "success",
+                "startedAt": utc_start,
+                "finishedAt": utc_end,
+                "runner": "github_actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "local",
+                "workflow": os.environ.get("GITHUB_WORKFLOW"),
+                "githubRunId": os.environ.get("GITHUB_RUN_ID"),
+                "summaryPath": summary_result.get("path"),
+                "summary": {
+                    "ingestEvents": summary_result.get("ingest_events"),
+                    "packetsCreated": summary_result.get("packets_created"),
+                    "vaultReadyCount": summary_result.get("vault_ready_count"),
+                    "topTierReadyCount": summary_result.get("top_tier_ready_count"),
+                },
+                "error": None,
+            }
+        )
         agent_result = write_agent_reports(run_id, stage_results, summary_result["report"])
         print(f"[AgentReports] {agent_result}")
         autonomy_result = write_autonomy_report(run_id, summary_result["report"])
@@ -185,6 +220,20 @@ def main():
         utc_end = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         tb = traceback.format_exc()
         print(f"RUN_ALL FATAL ERROR:\n{tb}")
+        write_run_status(
+            {
+                "runId": run_id,
+                "status": "failed",
+                "startedAt": utc_start,
+                "finishedAt": utc_end,
+                "runner": "github_actions" if os.environ.get("GITHUB_ACTIONS") == "true" else "local",
+                "workflow": os.environ.get("GITHUB_WORKFLOW"),
+                "githubRunId": os.environ.get("GITHUB_RUN_ID"),
+                "summaryPath": None,
+                "summary": None,
+                "error": tb.splitlines()[-1] if tb else "Unknown failure",
+            }
+        )
         run_logger.finish_run_failed(run_id, tb, {
             "run_id": run_id,
             "utc_start": utc_start,

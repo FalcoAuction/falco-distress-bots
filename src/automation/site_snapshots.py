@@ -1738,6 +1738,17 @@ def _load_latest_autonomy_snapshot() -> dict[str, Any] | None:
         return None
 
 
+def _load_latest_run_status() -> dict[str, Any] | None:
+    path = REPORTS_DIR / "latest_run_status.json"
+    if not path.exists():
+        return None
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _refresh_outreach_snapshots() -> dict[str, str | None]:
     SITE_OUTREACH_DIR.mkdir(parents=True, exist_ok=True)
     results: dict[str, str | None] = {}
@@ -1762,6 +1773,7 @@ def write_site_snapshots() -> dict[str, Any]:
     operator_payload = _operator_snapshot()
     operator_payload["analyst"] = _load_latest_analyst_snapshot()
     operator_payload["autonomy"] = _load_latest_autonomy_snapshot()
+    operator_payload["runStatus"] = _load_latest_run_status()
     _write_json(operator_path, operator_payload)
     with _connect() as con:
         candidate_payload = {
