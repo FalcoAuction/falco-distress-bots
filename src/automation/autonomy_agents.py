@@ -404,6 +404,13 @@ def determine_lead_action(
     live_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     lead_dict = dict(lead)
+    enriched_fields = quality.get("enriched_fields") or {}
+    if isinstance(enriched_fields, dict):
+        for key, value in enriched_fields.items():
+            if value is None:
+                continue
+            if lead_dict.get(key) in (None, "", "UNKNOWN"):
+                lead_dict[key] = value
     live_lookup = {
         str(row.get("sourceLeadKey") or "").strip()
         for row in (live_rows or [])

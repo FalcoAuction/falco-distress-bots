@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Any
 from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 from urllib.error import URLError, HTTPError
+import http.cookiejar
 
 from ..automation.prefc_policy import prefc_county_is_active
 from ..storage import sqlite_store as _store
@@ -55,6 +57,7 @@ _COUNTY_LOOKUP_CONFIG: dict[str, dict[str, str]] = {
 }
 
 _USTITLESEARCH_LOGIN_URL = "https://www.ustitlesearch.net/logon.asp"
+_USTITLESEARCH_BASE_URL = "https://www.ustitlesearch.net/"
 
 
 def _db_path() -> str:
@@ -128,11 +131,39 @@ def _ustsn_password() -> str:
     ).strip()
 
 
-def _login_ustsn() -> tuple[bool, str]:
+def _ustsn_opener() -> urllib_request.OpenerDirector:
+    cookie_jar = http.cookiejar.CookieJar()
+    return urllib_request.build_opener(urllib_request.HTTPCookieProcessor(cookie_jar))
+
+
+def _session_ids_from_html(body: str) -> list[str]:
+    return re.findall(r"abandon\.asp\?sessionid=(\d+)", body, flags=re.IGNORECASE)
+
+
+def _looks_authenticated(body: str) -> bool:
+    lowered = body.lower()
+    if "invalid login" in lowered:
+        return False
+    if "logon to the us title search network" in lowered:
+        return 'parent.location.replace("page.asp?page=' in lowered
+    if "number of sessions permitted for" in lowered:
+        return False
+    if 'parent.location.replace("page.asp?page=' in lowered:
+        return True
+    return True
+
+
+def _attempt_ustsn_login(opener: urllib_request.OpenerDirector) -> tuple[bool, str, str]:
     username = _ustsn_username()
     password = _ustsn_password()
     if not username or not password:
-        return False, "auth_required"
+        return False, "auth_required", ""
+
+    headers = {"User-Agent": "Mozilla/5.0"}
+    try:
+        opener.open(urllib_request.Request(_USTITLESEARCH_LOGIN_URL, headers=headers), timeout=20)
+    except (HTTPError, URLError):
+        return False, "site_unavailable", ""
 
     qs = urllib_parse.urlencode(
         {
@@ -144,19 +175,56 @@ def _login_ustsn() -> tuple[bool, str]:
         }
     )
     url = f"{_USTITLESEARCH_LOGIN_URL}?{qs}"
-    req = urllib_request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    req = urllib_request.Request(url, headers=headers)
     try:
-        with urllib_request.urlopen(req, timeout=20) as response:
+        with opener.open(req, timeout=20) as response:
             body = response.read().decode("cp1252", errors="ignore")
     except (HTTPError, URLError):
-        return False, "site_unavailable"
+        return False, "site_unavailable", ""
 
     lowered = body.lower()
     if "invalid login" in lowered:
-        return False, "auth_failed"
-    if "logon to the us title search network" in lowered and "invalid login" not in lowered:
-        return False, "auth_uncertain"
-    return True, "authenticated"
+        return False, "auth_failed", body
+    if "number of sessions permitted for" in lowered:
+        return False, "session_limit_exceeded", body
+    if _looks_authenticated(body):
+        return True, "authenticated", body
+    return False, "auth_uncertain", body
+
+
+def _abandon_ustsn_sessions(opener: urllib_request.OpenerDirector, body: str) -> int:
+    session_ids = _session_ids_from_html(body)
+    headers = {"User-Agent": "Mozilla/5.0"}
+    abandoned = 0
+    for session_id in session_ids:
+        try:
+            opener.open(
+                urllib_request.Request(
+                    urllib_parse.urljoin(_USTITLESEARCH_BASE_URL, f"abandon.asp?sessionid={session_id}"),
+                    headers=headers,
+                ),
+                timeout=20,
+            ).read()
+            abandoned += 1
+        except (HTTPError, URLError):
+            continue
+    return abandoned
+
+
+def _login_ustsn() -> tuple[bool, str]:
+    opener = _ustsn_opener()
+    ok, status, body = _attempt_ustsn_login(opener)
+    if ok:
+        return True, status
+    if status != "session_limit_exceeded":
+        return False, status
+
+    abandoned = _abandon_ustsn_sessions(opener, body)
+    if abandoned <= 0:
+        return False, "session_limit_exceeded"
+
+    ok, status, _ = _attempt_ustsn_login(opener)
+    return ok, status
 
 
 def _build_lookup_task(con: sqlite3.Connection, lead: sqlite3.Row, login_status: str) -> dict[str, Any] | None:
