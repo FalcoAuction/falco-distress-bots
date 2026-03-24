@@ -133,6 +133,7 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
         "owner_name": None,
         "owner_mail": None,
         "last_sale_date": None,
+        "mortgage_date": None,
         "mortgage_lender": None,
         "mortgage_amount": None,
     }
@@ -165,11 +166,18 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
 
     mortgage_blob = blob.get("mortgage")
     if isinstance(mortgage_blob, dict):
-        lender = mortgage_blob.get("lender") or {}
-        if isinstance(lender, dict):
-            out["mortgage_lender"] = lender.get("name") or None
-
         mortgage = mortgage_blob.get("mortgage") or {}
+        lender = mortgage.get("lender") if isinstance(mortgage, dict) else {}
+        if not isinstance(lender, dict):
+            lender = mortgage_blob.get("lender") or {}
+        if isinstance(lender, dict):
+            out["mortgage_lender"] = (
+                lender.get("name")
+                or lender.get("lastname")
+                or lender.get("companyName")
+                or None
+            )
+
         if isinstance(mortgage, dict):
             out["mortgage_amount"] = (
                 mortgage.get("amount")
@@ -177,6 +185,7 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
                 or mortgage.get("originationAmount")
                 or None
             )
+            out["mortgage_date"] = mortgage.get("date") or mortgage.get("recordingDate") or None
         if not out["mortgage_amount"]:
             out["mortgage_amount"] = (
                 mortgage_blob.get("amount")
@@ -184,8 +193,42 @@ def _extract_owner_mortgage(raw_json: Any) -> Dict[str, Optional[str]]:
                 or mortgage_blob.get("originationAmount")
                 or None
             )
+        if not out["mortgage_date"]:
+            out["mortgage_date"] = mortgage_blob.get("date") or mortgage_blob.get("recordingDate") or None
 
     return out
+
+
+def _coerce_date_value(value: Any) -> Optional[str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-":
+        return raw[:10]
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(raw[:19], fmt).date().isoformat()
+        except Exception:
+            continue
+    return None
+
+
+def _apply_current_mortgage_context(enriched: Dict[str, Any], attom_fields: Dict[str, Optional[str]]) -> None:
+    current_lender = attom_fields.get("mortgage_lender")
+    current_date = _coerce_date_value(attom_fields.get("mortgage_date"))
+    if current_lender:
+        enriched["mortgage_lender_current"] = current_lender
+    if current_date:
+        enriched["mortgage_date_current"] = current_date
+
+    existing_date = _coerce_date_value(enriched.get("mortgage_date"))
+    if current_lender and (
+        not _present(enriched.get("mortgage_lender"))
+        or (current_date and (not existing_date or current_date > existing_date))
+    ):
+        enriched["mortgage_lender"] = current_lender
+    if current_date and (not _present(enriched.get("mortgage_date")) or not existing_date or current_date > existing_date):
+        enriched["mortgage_date"] = current_date
 
 
 def _extract_property_detail(raw_json: Any) -> Dict[str, Any]:
@@ -1079,9 +1122,11 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     for key, value in _extract_property_detail(fields.get("attom_raw_json")).items():
         if not _present(enriched.get(key)) and _present(value):
             enriched[key] = value
-    for key, value in _extract_owner_mortgage(fields.get("attom_raw_json")).items():
+    attom_owner_mortgage = _extract_owner_mortgage(fields.get("attom_raw_json"))
+    for key, value in attom_owner_mortgage.items():
         if not _present(enriched.get(key)) and _present(value):
             enriched[key] = value
+    _apply_current_mortgage_context(enriched, attom_owner_mortgage)
 
     sale_status = str(enriched.get("sale_status") or "").lower().strip()
     distress_type = str(enriched.get("distress_type") or "").upper().strip()
@@ -1333,7 +1378,11 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
             "owner_mail": enriched.get("owner_mail"),
             "last_sale_date": enriched.get("last_sale_date"),
             "mortgage_date": enriched.get("mortgage_date"),
+            "mortgage_date_current": enriched.get("mortgage_date_current"),
             "mortgage_lender": enriched.get("mortgage_lender"),
+            "mortgage_lender_current": enriched.get("mortgage_lender_current"),
+            "mortgage_lender_original": enriched.get("mortgage_lender_original"),
+            "mortgage_lender_notice_holder": enriched.get("mortgage_lender_notice_holder"),
             "mortgage_amount": enriched.get("mortgage_amount"),
             "year_built": enriched.get("year_built"),
             "building_area_sqft": enriched.get("building_area_sqft"),

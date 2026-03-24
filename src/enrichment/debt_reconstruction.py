@@ -177,6 +177,26 @@ def _latest_batchdata_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[
     return payload, str(row[0] or ""), str(row[2] or _now_iso())
 
 
+def _latest_attom_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[dict[str, Any] | None, str]:
+    row = con.execute(
+        """
+        SELECT attom_raw_json, enriched_at
+        FROM attom_enrichments
+        WHERE lead_key=? AND attom_raw_json IS NOT NULL
+        ORDER BY enriched_at DESC, id DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    if not row or not row[0]:
+        return None, _now_iso()
+    try:
+        payload = json.loads(row[0])
+    except Exception:
+        return None, str(row[1] or _now_iso())
+    return payload if isinstance(payload, dict) else None, str(row[1] or _now_iso())
+
+
 def _latest_notice_artifact(con: sqlite3.Connection, lead_key: str) -> tuple[str | None, str | None, str]:
     prov = con.execute(
         """
@@ -397,23 +417,67 @@ def _extract_batchdata_reconstruction(payload: dict[str, Any]) -> dict[str, Any]
     return out
 
 
+def _extract_attom_reconstruction(payload: dict[str, Any]) -> dict[str, Any]:
+    mortgage_blob = payload.get("mortgage") if isinstance(payload.get("mortgage"), dict) else {}
+    mortgage = mortgage_blob.get("mortgage") if isinstance(mortgage_blob.get("mortgage"), dict) else mortgage_blob
+    lender = mortgage.get("lender") if isinstance(mortgage.get("lender"), dict) else {}
+    owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else {}
+    sale = owner.get("sale") if isinstance(owner.get("sale"), dict) else {}
+
+    out: dict[str, Any] = {}
+    current_lender = _clean_party_name(
+        lender.get("name")
+        or lender.get("lastname")
+        or lender.get("companyName")
+    )
+    mortgage_amount = _coerce_num(
+        mortgage.get("amount")
+        or mortgage.get("loanAmount")
+        or mortgage.get("originationAmount")
+    )
+    mortgage_date = _coerce_date(mortgage.get("date") or mortgage.get("recordingDate"))
+    last_sale_date = _coerce_date(
+        sale.get("saleTransDate")
+        or sale.get("saleRecDate")
+    )
+    if current_lender:
+        out["current_holder"] = current_lender
+    if mortgage_amount is not None:
+        out["mortgage_amount"] = mortgage_amount
+    if mortgage_date:
+        out["mortgage_date"] = mortgage_date
+    if last_sale_date:
+        out["last_sale_date"] = last_sale_date
+    return out
+
+
 def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[str, Any]:
     current_lender = _clean_party_name(_latest_text(con, lead_key, "mortgage_lender"))
     mortgage_amount = _latest_num(con, lead_key, "mortgage_amount")
     mortgage_date = _coerce_date(_latest_text(con, lead_key, "mortgage_date"))
     last_sale_date = _coerce_date(_latest_text(con, lead_key, "last_sale_date"))
+    current_mortgage_lender = _clean_party_name(_latest_text(con, lead_key, "mortgage_lender_current"))
+    current_mortgage_date = _coerce_date(_latest_text(con, lead_key, "mortgage_date_current"))
     chain_info = _parse_notice_chain(_latest_text(con, lead_key, "mortgage_chain_notice"))
     payload, artifact_id, retrieved_at = _latest_batchdata_artifact(con, lead_key)
     batchdata_info = _extract_batchdata_reconstruction(payload or {}) if payload else {}
+    attom_payload, attom_retrieved_at = _latest_attom_artifact(con, lead_key)
+    attom_info = _extract_attom_reconstruction(attom_payload or {}) if attom_payload else {}
     notice_payload, notice_artifact_id, notice_retrieved_at = _latest_notice_artifact(con, lead_key)
     notice_details = _parse_notice_debt_details(notice_payload)
 
-    canonical_lender = (
+    notice_holder = (
         notice_details.get("current_holder")
+        or chain_info.get("current_holder")
+    )
+    canonical_lender = (
+        attom_info.get("current_holder")
         or
         batchdata_info.get("current_holder")
         or chain_info.get("current_holder")
+        or current_mortgage_lender
         or current_lender
+        or notice_holder
     )
     original_lender = (
         notice_details.get("original_lender")
@@ -423,24 +487,33 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
         or current_lender
     )
     canonical_mortgage_date = (
-        mortgage_date
-        or notice_details.get("mortgage_date")
+        attom_info.get("mortgage_date")
         or batchdata_info.get("mortgage_date")
+        or current_mortgage_date
+        or mortgage_date
+        or notice_details.get("mortgage_date")
         or chain_info.get("assignment_recorded_at")
     )
     canonical_amount = mortgage_amount if mortgage_amount is not None else (
-        notice_details.get("mortgage_amount") if notice_details.get("mortgage_amount") is not None else batchdata_info.get("mortgage_amount")
+        notice_details.get("mortgage_amount")
+        if notice_details.get("mortgage_amount") is not None
+        else (
+            attom_info.get("mortgage_amount")
+            if attom_info.get("mortgage_amount") is not None
+            else batchdata_info.get("mortgage_amount")
+        )
     )
     record_book = chain_info.get("record_book") or notice_details.get("record_book") or batchdata_info.get("record_book")
     record_page = chain_info.get("record_page") or notice_details.get("record_page") or batchdata_info.get("record_page")
     record_instrument = chain_info.get("record_instrument") or notice_details.get("record_instrument") or batchdata_info.get("record_instrument")
     assignment_recorded_at = chain_info.get("assignment_recorded_at") or batchdata_info.get("assignment_recorded_at")
-    canonical_last_sale_date = last_sale_date or notice_details.get("last_sale_date")
+    canonical_last_sale_date = last_sale_date or attom_info.get("last_sale_date") or notice_details.get("last_sale_date")
     source_mix = [
         label
         for label, present in (
             ("NOTICE", bool(notice_payload)),
             ("BATCHDATA", bool(payload)),
+            ("ATTOM", bool(attom_payload)),
             ("CHAIN", bool(chain_info)),
         )
         if present
@@ -481,7 +554,9 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
 
     summary_parts = []
     if canonical_lender:
-        summary_parts.append(f"Current holder: {canonical_lender}")
+        summary_parts.append(f"Current mortgage lender: {canonical_lender}")
+    if notice_holder and notice_holder != canonical_lender:
+        summary_parts.append(f"Notice holder: {notice_holder}")
     if original_lender and original_lender != canonical_lender:
         summary_parts.append(f"Original lender: {original_lender}")
     if canonical_amount is not None:
@@ -503,11 +578,14 @@ def reconstruct_debt_for_lead(con: sqlite3.Connection, lead_key: str) -> dict[st
 
     return {
         "artifact_id": artifact_id or notice_artifact_id,
-        "retrieved_at": retrieved_at if artifact_id else notice_retrieved_at,
+        "retrieved_at": retrieved_at if artifact_id else (notice_retrieved_at if notice_artifact_id else attom_retrieved_at),
         "mortgage_lender": canonical_lender,
+        "mortgage_lender_current": canonical_lender,
+        "mortgage_lender_notice_holder": notice_holder,
         "mortgage_lender_original": original_lender,
         "mortgage_amount": canonical_amount,
         "mortgage_date": canonical_mortgage_date,
+        "mortgage_date_current": canonical_mortgage_date,
         "last_sale_date": canonical_last_sale_date,
         "mortgage_assignment_recorded_at": assignment_recorded_at,
         "mortgage_record_book": record_book,

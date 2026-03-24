@@ -505,7 +505,11 @@ def main() -> None:
             "owner_mail": latest_prov_text(cur, lead_key, "owner_mail"),
             "last_sale_date": latest_prov_text(cur, lead_key, "last_sale_date"),
             "mortgage_date": latest_prov_text(cur, lead_key, "mortgage_date"),
+            "mortgage_date_current": latest_prov_text(cur, lead_key, "mortgage_date_current"),
             "mortgage_lender": latest_prov_text(cur, lead_key, "mortgage_lender"),
+            "mortgage_lender_current": latest_prov_text(cur, lead_key, "mortgage_lender_current"),
+            "mortgage_lender_original": latest_prov_text(cur, lead_key, "mortgage_lender_original"),
+            "mortgage_lender_notice_holder": latest_prov_text(cur, lead_key, "mortgage_lender_notice_holder"),
             "mortgage_amount": latest_prov_num(cur, lead_key, "mortgage_amount"),
             "mortgage_record_book": latest_prov_text(cur, lead_key, "mortgage_record_book"),
             "mortgage_record_page": latest_prov_text(cur, lead_key, "mortgage_record_page"),
@@ -568,6 +572,8 @@ def main() -> None:
         if not publish_ready and not base:
             continue
         enriched_fields = quality.get("enriched_fields", {})
+        display_mortgage_lender = enriched_fields.get("mortgage_lender_current") or enriched_fields.get("mortgage_lender")
+        display_mortgage_date = enriched_fields.get("mortgage_date_current") or enriched_fields.get("mortgage_date")
         published_readiness = readiness
         if is_fsbo:
             published_readiness = str(quality.get("fsbo_actionability_band") or "REVIEW")
@@ -630,8 +636,12 @@ def main() -> None:
             "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
             "noticePhone": enriched_fields.get("notice_phone"),
             "lastSaleDate": enriched_fields.get("last_sale_date"),
-            "mortgageDate": enriched_fields.get("mortgage_date"),
-            "mortgageLender": enriched_fields.get("mortgage_lender"),
+            "mortgageDate": display_mortgage_date,
+            "mortgageLender": display_mortgage_lender,
+            "mortgageCurrentDate": enriched_fields.get("mortgage_date_current"),
+            "mortgageCurrentLender": enriched_fields.get("mortgage_lender_current"),
+            "mortgageOriginalLender": enriched_fields.get("mortgage_lender_original"),
+            "mortgageNoticeHolder": enriched_fields.get("mortgage_lender_notice_holder"),
             "mortgageAmount": enriched_fields.get("mortgage_amount"),
             "yearBuilt": enriched_fields.get("year_built"),
             "buildingAreaSqft": enriched_fields.get("building_area_sqft"),

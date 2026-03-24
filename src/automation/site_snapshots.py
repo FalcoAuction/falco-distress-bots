@@ -96,8 +96,88 @@ def _load_live_lead_keys() -> set[str]:
     return lead_keys
 
 
+def _load_live_pre_foreclosure_rows() -> list[dict[str, Any]]:
+    if not SITE_VAULT_LISTINGS.exists():
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for line in SITE_VAULT_LISTINGS.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("status") != "active":
+            continue
+        if str(row.get("saleStatus") or "").strip().lower() != "pre_foreclosure":
+            continue
+        rows.append(row)
+    return rows
+
+
 def _lead_key_prefix(lead_key: str) -> str:
     return (lead_key or "")[:8].lower()
+
+
+def _normalize_party(value: Any) -> str:
+    return " ".join(str(value or "").strip().upper().split())
+
+
+def _iso_date(value: Any) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if len(raw) >= 10 and raw[4] == "-" and raw[7] == "-":
+        return raw[:10]
+    return None
+
+
+def _extract_attom_context(raw_json: Any) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw_json) if isinstance(raw_json, str) else (raw_json or {})
+    except Exception:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    mortgage = payload.get("mortgage") if isinstance(payload.get("mortgage"), dict) else {}
+    lender = mortgage.get("lender") if isinstance(mortgage.get("lender"), dict) else {}
+    return {
+        "mortgageLender": lender.get("name") or lender.get("lastname") or lender.get("companyName"),
+        "mortgageDate": _iso_date(mortgage.get("date") or mortgage.get("recordingDate")),
+        "mortgageAmount": mortgage.get("amount") or mortgage.get("loanAmount") or mortgage.get("originationAmount"),
+    }
+
+
+def _latest_batchdata_context(con: sqlite3.Connection, lead_key: str) -> dict[str, Any]:
+    row = con.execute(
+        """
+        SELECT payload
+        FROM raw_artifacts
+        WHERE lead_key=? AND channel='BATCHDATA' AND payload IS NOT NULL
+        ORDER BY retrieved_at DESC
+        LIMIT 1
+        """,
+        (lead_key,),
+    ).fetchone()
+    if not row or not row[0]:
+        return {}
+    try:
+        payload = json.loads(row[0])
+    except Exception:
+        return {}
+    results = payload.get("results") if isinstance(payload, dict) else {}
+    properties = results.get("properties") if isinstance(results, dict) else []
+    item = properties[0] if isinstance(properties, list) and properties and isinstance(properties[0], dict) else {}
+    foreclosure = item.get("foreclosure") if isinstance(item.get("foreclosure"), dict) else {}
+    return {
+        "mortgageLender": foreclosure.get("currentLenderName"),
+        "mortgageDate": _iso_date(foreclosure.get("recordingDate") or foreclosure.get("filingDate")),
+        "mortgageAmount": foreclosure.get("loanAmount") or foreclosure.get("amount"),
+    }
 
 
 def _prefc_strength_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -513,7 +593,11 @@ def _hydrate_quality_fields(
         "owner_mail",
         "last_sale_date",
         "mortgage_date",
+        "mortgage_date_current",
         "mortgage_lender",
+        "mortgage_lender_current",
+        "mortgage_lender_original",
+        "mortgage_lender_notice_holder",
         "property_identifier",
         "mortgage_record_book",
         "mortgage_record_page",
@@ -614,6 +698,9 @@ def _build_candidate_listing_payload(
     def _field(name: str) -> Any:
         return enriched_fields.get(name) or lead_data.get(name)
 
+    display_mortgage_lender = _field("mortgage_lender_current") or _field("mortgage_lender")
+    display_mortgage_date = _field("mortgage_date_current") or _field("mortgage_date")
+
     return {
         "slug": slug,
         "title": title,
@@ -649,8 +736,12 @@ def _build_candidate_listing_payload(
         "trusteePhonePublic": _field("trustee_phone_public"),
         "noticePhone": _field("notice_phone"),
         "lastSaleDate": _field("last_sale_date"),
-        "mortgageDate": _field("mortgage_date"),
-        "mortgageLender": _field("mortgage_lender"),
+        "mortgageDate": display_mortgage_date,
+        "mortgageLender": display_mortgage_lender,
+        "mortgageCurrentDate": _field("mortgage_date_current"),
+        "mortgageCurrentLender": _field("mortgage_lender_current"),
+        "mortgageOriginalLender": _field("mortgage_lender_original"),
+        "mortgageNoticeHolder": _field("mortgage_lender_notice_holder"),
         "mortgageAmount": _field("mortgage_amount"),
         "listPrice": _field("list_price"),
         "fsboListingTitle": _field("fsbo_listing_title"),
@@ -1372,6 +1463,108 @@ def _fetch_scalar(cur: sqlite3.Cursor, sql: str, params: tuple[Any, ...] = ()) -
     return int(row[0] or 0)
 
 
+def _build_prefc_data_trust_audit(con: sqlite3.Connection) -> dict[str, Any]:
+    rows = _load_live_pre_foreclosure_rows()
+    audit_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        lead_key = str(row.get("sourceLeadKey") or "").strip()
+        if not lead_key:
+            continue
+        attom_row = con.execute(
+            """
+            SELECT attom_raw_json
+            FROM attom_enrichments
+            WHERE lead_key=? AND attom_raw_json IS NOT NULL
+            ORDER BY enriched_at DESC, id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
+        attom_context = _extract_attom_context(attom_row[0] if attom_row and attom_row[0] else None)
+        batchdata_context = _latest_batchdata_context(con, lead_key)
+        reconstructed_current = con.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name='mortgage_lender_current' AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
+        reconstructed_date = con.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name='mortgage_date_current' AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
+        notice_holder = con.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name='mortgage_lender_notice_holder' AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
+
+        displayed_lender = str(row.get("mortgageLender") or "").strip()
+        displayed_date = _iso_date(row.get("mortgageDate"))
+        authoritative_lender = (
+            str(reconstructed_current[0]).strip() if reconstructed_current and reconstructed_current[0]
+            else str(batchdata_context.get("mortgageLender") or "").strip()
+            or str(attom_context.get("mortgageLender") or "").strip()
+        )
+        authoritative_date = (
+            _iso_date(reconstructed_date[0]) if reconstructed_date and reconstructed_date[0]
+            else _iso_date(batchdata_context.get("mortgageDate"))
+            or _iso_date(attom_context.get("mortgageDate"))
+        )
+
+        issues: list[str] = []
+        if authoritative_lender and _normalize_party(displayed_lender) != _normalize_party(authoritative_lender):
+            issues.append("Displayed lender does not match current lender context")
+        if authoritative_date and displayed_date and displayed_date != authoritative_date:
+            issues.append("Displayed mortgage date does not match current mortgage date")
+        if not displayed_lender:
+            issues.append("Displayed lender missing")
+        status = "flagged" if issues else "clean"
+
+        audit_rows.append(
+            {
+                "leadKey": lead_key,
+                "address": row.get("address") or row.get("title"),
+                "county": row.get("county"),
+                "status": status,
+                "issues": issues,
+                "displayedMortgageLender": displayed_lender or None,
+                "displayedMortgageDate": displayed_date,
+                "currentMortgageLender": authoritative_lender or None,
+                "currentMortgageDate": authoritative_date,
+                "noticeHolder": str(notice_holder[0]).strip() if notice_holder and notice_holder[0] else None,
+                "attomMortgageLender": attom_context.get("mortgageLender"),
+                "attomMortgageDate": attom_context.get("mortgageDate"),
+                "batchdataMortgageLender": batchdata_context.get("mortgageLender"),
+                "batchdataMortgageDate": batchdata_context.get("mortgageDate"),
+            }
+        )
+
+    flagged = [row for row in audit_rows if row["status"] == "flagged"]
+    return {
+        "generatedAt": _utc_now(),
+        "liveCount": len(audit_rows),
+        "cleanCount": len(audit_rows) - len(flagged),
+        "flaggedCount": len(flagged),
+        "rows": audit_rows,
+    }
+
+
 def _operator_snapshot() -> dict[str, Any]:
     con = _connect()
     try:
@@ -1481,6 +1674,7 @@ def _operator_snapshot() -> dict[str, Any]:
         pre_foreclosure_promotion = _build_pre_foreclosure_promotion(con, live_slugs)
         fsbo_lane = _build_fsbo_lane(con, live_slugs)
         lifecycle_events = _build_lifecycle_events(con, live_slugs)
+        data_trust_audit = _build_prefc_data_trust_audit(con)
 
         foreclosure_overview = dict(
             cur.execute(
@@ -1567,6 +1761,7 @@ def _operator_snapshot() -> dict[str, Any]:
             "vaultLive": len(live_slugs),
             "vaultQueue": len(vault_candidates),
             "credibleShots": len(credible_shots),
+            "prefcDataTrustAlerts": int(data_trust_audit.get("flaggedCount") or 0),
             "pendingApprovals": 0,
         },
         "recentLeads": _attach_vault_state(recent_leads, live_slugs),
@@ -1585,6 +1780,7 @@ def _operator_snapshot() -> dict[str, Any]:
         "preForeclosurePromotion": {
             **pre_foreclosure_promotion,
         },
+        "prefcDataTrustAudit": data_trust_audit,
         "credibleShots": credible_shots,
         "fsboLane": fsbo_lane,
     }
@@ -1770,11 +1966,13 @@ def write_site_snapshots() -> dict[str, Any]:
     SITE_OPERATOR_DIR.mkdir(parents=True, exist_ok=True)
     operator_path = SITE_OPERATOR_DIR / "report.json"
     candidates_path = SITE_OPERATOR_DIR / "vault_candidates.json"
+    data_trust_path = REPORTS_DIR / "prefc_data_trust_audit.json"
     operator_payload = _operator_snapshot()
     operator_payload["analyst"] = _load_latest_analyst_snapshot()
     operator_payload["autonomy"] = _load_latest_autonomy_snapshot()
     operator_payload["runStatus"] = _load_latest_run_status()
     _write_json(operator_path, operator_payload)
+    _write_json(data_trust_path, operator_payload.get("prefcDataTrustAudit") or {})
     with _connect() as con:
         candidate_payload = {
             "generatedAt": _utc_now(),
@@ -1801,5 +1999,6 @@ def write_site_snapshots() -> dict[str, Any]:
         "ok": True,
         "operator": str(operator_path),
         "vaultCandidates": str(candidates_path),
+        "prefcDataTrustAudit": str(data_trust_path),
         "outreach": outreach_paths,
     }
