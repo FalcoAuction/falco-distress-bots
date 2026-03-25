@@ -466,7 +466,7 @@ def _draw_kpi_tiles(doc: _Doc, fields: Dict[str, Any]) -> None:
         actionability = str(fields.get("fsbo_actionability_band") or "REVIEW").upper()
         action_color = {"ACTIONABLE_NOW": _GREEN, "REVIEW": _AMBER, "WATCH": _SLATE}.get(actionability, _GRAY)
         price_gap = _float_or_none(fields.get("fsbo_price_gap_pct"))
-        direct_phone = _val(fields.get("owner_phone_primary"), "Missing")
+        direct_phone = _display_phone(fields.get("owner_phone_primary"), "Missing")
         tiles = [
             ("Days Tracked", _val(fields.get("fsbo_days_tracked"), "-"), _SLATE),
             ("Actionability", actionability.replace("_", " "), action_color),
@@ -586,7 +586,7 @@ def _narrative_intelligence(fields: Dict[str, Any]) -> List[str]:
     if _is_fsbo(fields):
         price_gap = _float_or_none(fields.get("fsbo_price_gap_pct"))
         tracked = fields.get("fsbo_days_tracked")
-        phone = _val(fields.get("owner_phone_primary"), "Missing")
+        phone = _display_phone(fields.get("owner_phone_primary"), "Missing")
         actionability = _val(fields.get("fsbo_actionability_band"), "REVIEW")
         source = _val(fields.get("fsbo_listing_source"), "FSBO.com")
         lines = [
@@ -1105,7 +1105,12 @@ def _sanitize_phone(s: Optional[str]) -> Optional[str]:
         return None
     if area[0] in ("0", "1") or exch[0] in ("0", "1"):
         return None
-    return s.strip()
+    return f"{area}-{exch}-{digits[6:]}"
+
+
+def _display_phone(value: Any, fallback: str = "Missing") -> str:
+    formatted = _sanitize_phone(str(value or "").strip())
+    return formatted or fallback
 
 
 # Plain-English display labels for known distress-type codes.
@@ -1793,7 +1798,7 @@ def _page1_executive(
         doc.kv("Opportunity Type", _distress_label(fields))
         doc.kv("List Price", _fmt_cur(_list_price), bold_v=True)
         doc.kv("Days Tracked", f"{_tracked_raw} days" if _tracked_raw is not None else "Unknown")
-        doc.kv("Direct Seller Contact", _val(fields.get("owner_phone_primary")))
+        doc.kv("Direct Seller Contact", _display_phone(fields.get("owner_phone_primary"), "Unknown"))
         doc.kv("Actionability", _fsbo_band)
         doc.kv("Listing Source", _source)
         doc.kv("Why It Matters", _reason)
@@ -2833,7 +2838,7 @@ def _page4_timeline_risk(doc: _Doc, fields: Dict[str, Any], brief: Dict[str, Any
         doc.section("Seller-Direct Execution")
         doc.kv("List Price", _fmt_cur(_float_or_none(fields.get("list_price"))), bold_v=True)
         doc.kv("Days Tracked", f"{fields.get('fsbo_days_tracked')} days" if fields.get("fsbo_days_tracked") is not None else "Unknown")
-        doc.kv("Direct Seller Contact", _val(fields.get("owner_phone_primary")))
+        doc.kv("Direct Seller Contact", _display_phone(fields.get("owner_phone_primary"), "Unknown"))
         doc.kv("Listing Source", _val(fields.get("fsbo_listing_source")))
         doc.kv("Actionability", _val(fields.get("fsbo_actionability_band")))
         doc.kv("Price vs Value", _fmt_pct(_price_gap) if _price_gap is not None else "N/A")
