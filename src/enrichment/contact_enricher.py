@@ -11,7 +11,9 @@
 #
 # Tier 3 — owner skip trace adapter (NullSkipTraceProvider by default)
 #           Writes: owner_phone_primary, owner_phone_secondary,
-#                   owner_phone_source, owner_phone_confidence
+#                   owner_phone_source, owner_phone_confidence,
+#                   owner_phone_dnc_primary, owner_phone_dnc_secondary,
+#                   owner_phone_dnc_status
 #
 # contact_ready (computed flag, refreshed every run)
 #           "1" when any tier produced an actionable phone or name.
@@ -152,6 +154,20 @@ def _get_owner_address(fields: Dict[str, Any]) -> Optional[str]:
     return f"{addr}, {state}"
 
 
+def _write_optional_prov_field(
+    cur: sqlite3.Cursor,
+    lead_key: str,
+    field_name: str,
+    value: Optional[str],
+    source_channel: str,
+    run_id: Optional[str],
+    created_at: str,
+) -> bool:
+    if value is None or str(value).strip() == "":
+        return False
+    return _write_prov_field(cur, lead_key, field_name, str(value).strip(), source_channel, run_id, created_at)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -202,7 +218,9 @@ def enrich_contact_data(
             fields.setdefault("trustee_phone_public", v)
 
     # ── Tier 3: Owner skip trace ──────────────────────────────────────────────
-    if not _has_prov_field(cur, lead_key, "owner_phone_primary"):
+    has_owner_phone = _has_prov_field(cur, lead_key, "owner_phone_primary")
+    has_owner_dnc = _has_prov_field(cur, lead_key, "owner_phone_dnc_status")
+    if not has_owner_phone or not has_owner_dnc:
         try:
             address = _get_owner_address(fields)
             if address:
@@ -231,8 +249,8 @@ def enrich_contact_data(
                             summary["t3_written"] += 1
                         fields["owner_phone_secondary"] = clean2
 
-                if _t3_any:
-                    src = result.owner_phone_source or "SkipTrace"
+                src = result.owner_phone_source or "SkipTrace"
+                if _t3_any or result.owner_phone_dnc_status:
                     _write_prov_field(
                         cur, lead_key, "owner_phone_source", src,
                         src, run_id, created_at,
@@ -244,11 +262,52 @@ def enrich_contact_data(
                             src, run_id, created_at,
                         )
                     fields["owner_phone_source"] = src
+                if result.owner_phone_primary_dnc is not None:
+                    _write_optional_prov_field(
+                        cur,
+                        lead_key,
+                        "owner_phone_dnc_primary",
+                        "1" if result.owner_phone_primary_dnc else "0",
+                        src,
+                        run_id,
+                        created_at,
+                    )
+                    fields["owner_phone_dnc_primary"] = "1" if result.owner_phone_primary_dnc else "0"
+                if result.owner_phone_secondary_dnc is not None:
+                    _write_optional_prov_field(
+                        cur,
+                        lead_key,
+                        "owner_phone_dnc_secondary",
+                        "1" if result.owner_phone_secondary_dnc else "0",
+                        src,
+                        run_id,
+                        created_at,
+                    )
+                    fields["owner_phone_dnc_secondary"] = "1" if result.owner_phone_secondary_dnc else "0"
+                if result.owner_phone_dnc_status:
+                    _write_optional_prov_field(
+                        cur,
+                        lead_key,
+                        "owner_phone_dnc_status",
+                        result.owner_phone_dnc_status,
+                        src,
+                        run_id,
+                        created_at,
+                    )
+                    fields["owner_phone_dnc_status"] = result.owner_phone_dnc_status
         except Exception:
             summary["errors"] += 1
     else:
         # Already written — load into fields
-        for k in ("owner_phone_primary", "owner_phone_secondary", "owner_phone_source"):
+        for k in (
+            "owner_phone_primary",
+            "owner_phone_secondary",
+            "owner_phone_source",
+            "owner_phone_confidence",
+            "owner_phone_dnc_primary",
+            "owner_phone_dnc_secondary",
+            "owner_phone_dnc_status",
+        ):
             v = _read_prov_field(cur, lead_key, k)
             if v:
                 fields.setdefault(k, v)

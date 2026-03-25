@@ -583,6 +583,10 @@ def _hydrate_quality_fields(
         "trustee_phone_public",
         "owner_phone_primary",
         "owner_phone_secondary",
+        "owner_phone_confidence",
+        "owner_phone_dnc_primary",
+        "owner_phone_dnc_secondary",
+        "owner_phone_dnc_status",
         "notice_phone",
         "owner_name",
         "owner_mail",
@@ -1342,6 +1346,8 @@ def _build_pre_foreclosure_promotion(
                 "propertyIdentifier": hydrated.get("property_identifier"),
                 "ownerPhonePrimary": hydrated.get("owner_phone_primary"),
                 "ownerPhoneSecondary": hydrated.get("owner_phone_secondary"),
+                "ownerPhoneConfidence": hydrated.get("owner_phone_confidence"),
+                "ownerPhoneDncStatus": hydrated.get("owner_phone_dnc_status"),
                 "trusteePhonePublic": hydrated.get("trustee_phone_public"),
                 "noticePhone": hydrated.get("notice_phone"),
             }
@@ -1604,11 +1610,22 @@ def _build_prefc_partner_desk(
             "SELECT address FROM leads WHERE lead_key=? LIMIT 1",
             (lead_key,),
         ).fetchone()
+        dnc_row = con.execute(
+            """
+            SELECT field_value_text
+            FROM lead_field_provenance
+            WHERE lead_key=? AND field_name='owner_phone_dnc_status' AND field_value_text IS NOT NULL
+            ORDER BY created_at DESC, prov_id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
         display_address = (
             str(address_row[0]).strip()
             if address_row and address_row[0]
             else str(row.get("address") or row.get("title") or "").strip()
         )
+        dnc_status = str(dnc_row[0]).strip().upper() if dnc_row and dnc_row[0] else str(row.get("ownerPhoneDncStatus") or "UNVERIFIED").strip().upper()
         record_refs = [
             f"Book {row.get('mortgageRecordBook')}" if row.get("mortgageRecordBook") else "",
             f"Page {row.get('mortgageRecordPage')}" if row.get("mortgageRecordPage") else "",
@@ -1631,8 +1648,12 @@ def _build_prefc_partner_desk(
             "ownerPhoneSecondary": row.get("ownerPhoneSecondary"),
             "noticePhone": row.get("noticePhone"),
             "trusteePhonePublic": row.get("trusteePhonePublic"),
-            "dncStatus": "UNVERIFIED",
-            "dncNote": "No DNC scrub is currently persisted in operator data.",
+            "dncStatus": dnc_status,
+            "dncNote": (
+                "Skip-trace DNC signal from BatchData."
+                if dnc_status not in {"", "UNVERIFIED"}
+                else "No DNC scrub is currently persisted in operator data."
+            ),
             "trustStatus": trust.get("status") or "unknown",
             "trustIssues": trust.get("issues") or [],
         }
