@@ -1501,6 +1501,101 @@ def _latest_text_with_meta(
     return {"value": value, "source": source, "checkedAt": checked_at}
 
 
+def _count_phone_observations(con: sqlite3.Connection, lead_key: str, field_name: str) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(*)
+        FROM lead_field_provenance
+        WHERE lead_key=?
+          AND field_name=?
+          AND field_value_text IS NOT NULL
+          AND TRIM(field_value_text) != ''
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _count_distinct_phone_sources(con: sqlite3.Connection, lead_key: str) -> int:
+    row = con.execute(
+        """
+        SELECT COUNT(DISTINCT UPPER(TRIM(COALESCE(field_value_text, ''))))
+        FROM lead_field_provenance
+        WHERE lead_key=?
+          AND field_name='owner_phone_source'
+          AND field_value_text IS NOT NULL
+          AND TRIM(field_value_text) != ''
+        """,
+        (lead_key,),
+    ).fetchone()
+    return int(row[0] or 0) if row else 0
+
+
+def _is_entity_owned(owner_name: Any) -> bool:
+    name = _normalize_party(owner_name)
+    if not name:
+        return False
+    entity_tokens = (
+        " LLC",
+        " LLP",
+        " LP",
+        " INC",
+        " CORP",
+        " CORPORATION",
+        " COMPANY",
+        " CO ",
+        " BANK",
+        " NATIONAL ASSOCIATION",
+        " ASSOCIATION",
+        " TRUST",
+        " HOLDINGS",
+        " PROPERTIES",
+        " INVESTMENTS",
+        " FUND",
+    )
+    return any(token in f" {name} " for token in entity_tokens)
+
+
+def _prefc_contact_accuracy_assessment(
+    con: sqlite3.Connection,
+    lead_key: str,
+    owner_name: Any,
+    owner_phone_primary: Any,
+    owner_phone_secondary: Any,
+) -> dict[str, Any]:
+    primary = str(owner_phone_primary or "").strip()
+    secondary = str(owner_phone_secondary or "").strip()
+    source_count = _count_distinct_phone_sources(con, lead_key)
+    primary_hits = _count_phone_observations(con, lead_key, "owner_phone_primary")
+    secondary_hits = _count_phone_observations(con, lead_key, "owner_phone_secondary")
+    repeat_count = max(primary_hits, secondary_hits)
+    entity_owned = _is_entity_owned(owner_name)
+
+    if not primary and not secondary:
+        tier = "NO_PHONE"
+        note = "No homeowner phone is currently persisted."
+    elif entity_owned:
+        tier = "ENTITY_REVIEW_REQUIRED"
+        note = "Ownership appears to be a trust, bank, or entity. Treat homeowner reachout as review-only."
+    elif source_count >= 2:
+        tier = "MULTI_SOURCE_CONFIRMED"
+        note = "Phone data has been confirmed by more than one source."
+    elif repeat_count >= 2:
+        tier = "REPEATED_SINGLE_SOURCE"
+        note = "Phone data repeated across multiple pulls, but still comes from one source."
+    else:
+        tier = "SINGLE_SOURCE_ONLY"
+        note = "Phone data is present from one source only."
+
+    return {
+        "tier": tier,
+        "note": note,
+        "sourceCount": source_count,
+        "repeatCount": repeat_count,
+        "entityOwned": entity_owned,
+    }
+
+
 def _prefc_dnc_assessment(con: sqlite3.Connection, lead_key: str, fallback_status: Any = None) -> dict[str, Any]:
     status_meta = _latest_text_with_meta(con, lead_key, "owner_phone_dnc_status")
     source_meta = _latest_text_with_meta(con, lead_key, "owner_phone_source")
@@ -1712,6 +1807,13 @@ def _build_prefc_partner_desk(
             or owner_phone_secondary_meta.get("checkedAt")
             or owner_phone_source_meta.get("checkedAt")
         )
+        contact_accuracy = _prefc_contact_accuracy_assessment(
+            con,
+            lead_key,
+            row.get("ownerName"),
+            owner_phone_primary,
+            owner_phone_secondary,
+        )
         record_refs = [
             f"Book {row.get('mortgageRecordBook')}" if row.get("mortgageRecordBook") else "",
             f"Page {row.get('mortgageRecordPage')}" if row.get("mortgageRecordPage") else "",
@@ -1734,6 +1836,11 @@ def _build_prefc_partner_desk(
             "ownerPhoneSecondary": owner_phone_secondary,
             "ownerPhoneSource": owner_phone_source,
             "ownerPhoneCheckedAt": owner_phone_checked_at,
+            "contactAccuracyTier": contact_accuracy.get("tier"),
+            "contactAccuracyNote": contact_accuracy.get("note"),
+            "contactAccuracySourceCount": contact_accuracy.get("sourceCount"),
+            "contactAccuracyRepeatCount": contact_accuracy.get("repeatCount"),
+            "contactEntityOwned": bool(contact_accuracy.get("entityOwned")),
             "contactTargetRole": row.get("contactTargetRole"),
             "saleControllerName": row.get("saleControllerName"),
             "saleControllerPhonePrimary": row.get("saleControllerPhonePrimary"),
