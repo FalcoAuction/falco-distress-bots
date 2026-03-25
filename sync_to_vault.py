@@ -571,6 +571,13 @@ def main() -> None:
         enriched_fields = quality.get("enriched_fields", {})
         display_mortgage_lender = enriched_fields.get("mortgage_lender_current") or enriched_fields.get("mortgage_lender")
         display_mortgage_date = enriched_fields.get("mortgage_date_current") or enriched_fields.get("mortgage_date")
+        owner_phone_primary = enriched_fields.get("owner_phone_primary") or latest_prov_text(cur, lead_key, "owner_phone_primary")
+        owner_phone_secondary = enriched_fields.get("owner_phone_secondary") or latest_prov_text(cur, lead_key, "owner_phone_secondary")
+        contact_target_role = enriched_fields.get("contact_target_role") or latest_prov_text(cur, lead_key, "contact_target_role")
+        sale_controller_name = enriched_fields.get("sale_controller_contact_name") or latest_prov_text(cur, lead_key, "sale_controller_contact_name")
+        sale_controller_phone_primary = enriched_fields.get("sale_controller_phone_primary") or latest_prov_text(cur, lead_key, "sale_controller_phone_primary")
+        sale_controller_phone_secondary = enriched_fields.get("sale_controller_phone_secondary") or latest_prov_text(cur, lead_key, "sale_controller_phone_secondary")
+        sale_controller_contact_source = enriched_fields.get("sale_controller_contact_source") or latest_prov_text(cur, lead_key, "sale_controller_contact_source")
         published_readiness = readiness
         if is_fsbo:
             published_readiness = str(quality.get("fsbo_actionability_band") or "REVIEW")
@@ -628,13 +635,13 @@ def main() -> None:
             "propertyIdentifier": enriched_fields.get("property_identifier"),
             "ownerName": enriched_fields.get("owner_name"),
             "ownerMail": enriched_fields.get("owner_mail"),
-            "ownerPhonePrimary": enriched_fields.get("owner_phone_primary"),
-            "ownerPhoneSecondary": enriched_fields.get("owner_phone_secondary"),
-            "contactTargetRole": enriched_fields.get("contact_target_role"),
-            "saleControllerName": enriched_fields.get("sale_controller_contact_name"),
-            "saleControllerPhonePrimary": enriched_fields.get("sale_controller_phone_primary"),
-            "saleControllerPhoneSecondary": enriched_fields.get("sale_controller_phone_secondary"),
-            "saleControllerContactSource": enriched_fields.get("sale_controller_contact_source"),
+            "ownerPhonePrimary": owner_phone_primary,
+            "ownerPhoneSecondary": owner_phone_secondary,
+            "contactTargetRole": contact_target_role,
+            "saleControllerName": sale_controller_name,
+            "saleControllerPhonePrimary": sale_controller_phone_primary,
+            "saleControllerPhoneSecondary": sale_controller_phone_secondary,
+            "saleControllerContactSource": sale_controller_contact_source,
             "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
             "noticePhone": enriched_fields.get("notice_phone"),
             "lastSaleDate": enriched_fields.get("last_sale_date"),
