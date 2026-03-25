@@ -335,7 +335,7 @@ class _Doc:
         c.setFont(label_font, label_size)
         c.setFillColor(_GRAY)
         label_y = self.y
-        label_max_w = max(lw - 8, 48)
+        label_max_w = min(max(lw - 8, 48), 120)
         label_lines = _wrap(str(label).strip(), label_font, label_size, label_max_w)
         if len(label_lines) > 2:
             label_lines = label_lines[:2]
@@ -2762,7 +2762,7 @@ def _page_property_snapshot(
     doc.section("Contact & Routing")
     if _contact_pairs:
         for _label, _value in _contact_pairs:
-            doc.kv(_label, _value, lw=150)
+            doc.kv(_label, _value, lw=230)
         doc.body(
             "Trustee contact is included for sale-status, postponement, and file-confirmation checks. "
             "Execution path may still run borrower-side, lender-side, trustee-side, or through auction channel depending on the file.",
