@@ -36,7 +36,8 @@ SYSTEM_STATE_COMPANY = "__falco_system_state__"
 
 
 def _db_path() -> Path:
-    return Path(os.environ.get("FALCO_SQLITE_PATH", "data/falco.db"))
+    configured = Path(os.environ.get("FALCO_SQLITE_PATH", "data/falco.db"))
+    return configured if configured.is_absolute() else (ROOT / configured)
 
 
 def _connect() -> sqlite3.Connection:

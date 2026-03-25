@@ -3,6 +3,7 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -688,9 +689,15 @@ def main() -> None:
     write_listings(out_rows)
     write_vault_audit(out_rows)
     try:
-        from src.automation.site_snapshots import write_site_snapshots
-
-        write_site_snapshots()
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from src.automation.site_snapshots import write_site_snapshots; write_site_snapshots()",
+            ],
+            cwd=str(MAIN_REPO),
+            check=True,
+        )
     except Exception as exc:
         print(f"operator_snapshot_refresh_failed={exc}")
 
