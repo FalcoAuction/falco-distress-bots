@@ -1687,6 +1687,9 @@ def _build_prefc_partner_desk(
     for row in live_rows:
         lead_key = str(row.get("sourceLeadKey") or "").strip()
         trust = trust_map.get(lead_key) or {}
+        owner_phone_primary_meta = _latest_text_with_meta(con, lead_key, "owner_phone_primary")
+        owner_phone_secondary_meta = _latest_text_with_meta(con, lead_key, "owner_phone_secondary")
+        owner_phone_source_meta = _latest_text_with_meta(con, lead_key, "owner_phone_source")
         address_row = con.execute(
             "SELECT address FROM leads WHERE lead_key=? LIMIT 1",
             (lead_key,),
@@ -1697,6 +1700,18 @@ def _build_prefc_partner_desk(
             else str(row.get("address") or row.get("title") or "").strip()
         )
         dnc = _prefc_dnc_assessment(con, lead_key, row.get("ownerPhoneDncStatus"))
+        owner_phone_primary = row.get("ownerPhonePrimary") or owner_phone_primary_meta.get("value")
+        owner_phone_secondary = row.get("ownerPhoneSecondary") or owner_phone_secondary_meta.get("value")
+        owner_phone_source = (
+            owner_phone_source_meta.get("value")
+            or owner_phone_primary_meta.get("source")
+            or owner_phone_secondary_meta.get("source")
+        )
+        owner_phone_checked_at = (
+            owner_phone_primary_meta.get("checkedAt")
+            or owner_phone_secondary_meta.get("checkedAt")
+            or owner_phone_source_meta.get("checkedAt")
+        )
         record_refs = [
             f"Book {row.get('mortgageRecordBook')}" if row.get("mortgageRecordBook") else "",
             f"Page {row.get('mortgageRecordPage')}" if row.get("mortgageRecordPage") else "",
@@ -1715,8 +1730,10 @@ def _build_prefc_partner_desk(
             "lastSaleDate": row.get("lastSaleDate"),
             "recordRefs": " • ".join(part for part in record_refs if part) or "No record refs",
             "contactPathQuality": row.get("contactPathQuality"),
-            "ownerPhonePrimary": row.get("ownerPhonePrimary"),
-            "ownerPhoneSecondary": row.get("ownerPhoneSecondary"),
+            "ownerPhonePrimary": owner_phone_primary,
+            "ownerPhoneSecondary": owner_phone_secondary,
+            "ownerPhoneSource": owner_phone_source,
+            "ownerPhoneCheckedAt": owner_phone_checked_at,
             "contactTargetRole": row.get("contactTargetRole"),
             "saleControllerName": row.get("saleControllerName"),
             "saleControllerPhonePrimary": row.get("saleControllerPhonePrimary"),
