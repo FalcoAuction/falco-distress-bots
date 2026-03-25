@@ -629,6 +629,11 @@ def main() -> None:
             "ownerMail": enriched_fields.get("owner_mail"),
             "ownerPhonePrimary": enriched_fields.get("owner_phone_primary"),
             "ownerPhoneSecondary": enriched_fields.get("owner_phone_secondary"),
+            "contactTargetRole": enriched_fields.get("contact_target_role"),
+            "saleControllerName": enriched_fields.get("sale_controller_contact_name"),
+            "saleControllerPhonePrimary": enriched_fields.get("sale_controller_phone_primary"),
+            "saleControllerPhoneSecondary": enriched_fields.get("sale_controller_phone_secondary"),
+            "saleControllerContactSource": enriched_fields.get("sale_controller_contact_source"),
             "trusteePhonePublic": enriched_fields.get("trustee_phone_public"),
             "noticePhone": enriched_fields.get("notice_phone"),
             "lastSaleDate": enriched_fields.get("last_sale_date"),
@@ -682,6 +687,12 @@ def main() -> None:
     out_rows = out_rows[:MAX_LISTINGS]
     write_listings(out_rows)
     write_vault_audit(out_rows)
+    try:
+        from src.automation.site_snapshots import write_site_snapshots
+
+        write_site_snapshots()
+    except Exception as exc:
+        print(f"operator_snapshot_refresh_failed={exc}")
 
     print(f"synced_listings={len(out_rows)}")
     print(f"copied_packets={copied}")
