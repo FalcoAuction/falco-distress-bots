@@ -109,10 +109,20 @@ def _candidate_publish_issues(payload: dict[str, Any]) -> list[str]:
     if not isinstance(mortgage_amount, (int, float)):
         issues.append("loan amount")
 
-    has_contact = any(
+    has_homeowner_contact = any(
         str(payload.get(key) or "").strip()
-        for key in ("ownerPhonePrimary", "ownerPhoneSecondary", "trusteePhonePublic", "noticePhone")
+        for key in ("ownerPhonePrimary", "ownerPhoneSecondary")
     )
+    has_sale_controller_contact = any(
+        str(payload.get(key) or "").strip()
+        for key in (
+            "saleControllerPhonePrimary",
+            "saleControllerPhoneSecondary",
+            "trusteePhonePublic",
+            "noticePhone",
+        )
+    )
+    has_contact = has_homeowner_contact if sale_status == "pre_foreclosure" else has_sale_controller_contact
     if not has_contact:
         issues.append("contact path")
     if sale_status == "pre_foreclosure":
@@ -149,9 +159,19 @@ def _write_site_rows(rows: dict[str, dict[str, Any]]) -> None:
 
 
 def _has_hard_contact_fields(payload: dict[str, Any]) -> bool:
+    sale_status = str(payload.get("saleStatus") or payload.get("sale_status") or "").strip().lower()
+    if sale_status == "pre_foreclosure":
+        return any(
+            str(payload.get(key) or "").strip() for key in ("ownerPhonePrimary", "ownerPhoneSecondary")
+        )
     return any(
         str(payload.get(key) or "").strip()
-        for key in ("ownerPhonePrimary", "ownerPhoneSecondary", "trusteePhonePublic", "noticePhone")
+        for key in (
+            "saleControllerPhonePrimary",
+            "saleControllerPhoneSecondary",
+            "trusteePhonePublic",
+            "noticePhone",
+        )
     )
 
 
@@ -748,6 +768,14 @@ def _post_conversion_outcomes(targets: list[dict[str, Any]]) -> list[dict[str, A
             debt_blocker_type = _latest_provenance_text(con, lead_key, "debt_reconstruction_blocker_type")
             sale_status = str(lead["sale_status"] or "").strip().lower()
             publish_ready = bool(quality.get("prefc_live_quality")) if sale_status == "pre_foreclosure" else bool(quality.get("vault_publish_ready"))
+            equity_band = str(hydrated.get("equity_band") or lead["equity_band"] or "").strip().upper()
+            data_fixable = bool(
+                county_lookup_next_step
+                or debt_blocker_type
+                or not str(hydrated.get("mortgage_lender") or "").strip()
+                or hydrated.get("mortgage_amount") is None
+                or not str(hydrated.get("last_sale_date") or "").strip()
+            )
 
             if publish_ready:
                 disposition = "publish_ready"
@@ -762,6 +790,22 @@ def _post_conversion_outcomes(targets: list[dict[str, Any]]) -> list[dict[str, A
             else:
                 disposition = "in_recovery"
 
+            if publish_ready:
+                blocker_bucket = "ready"
+                conversion_potential = "ready_now"
+            elif data_fixable and equity_band in {"MED", "HIGH"}:
+                blocker_bucket = "data"
+                conversion_potential = "high"
+            elif data_fixable and equity_band == "UNKNOWN":
+                blocker_bucket = "data"
+                conversion_potential = "medium"
+            elif equity_band in {"LOW", "UNKNOWN"}:
+                blocker_bucket = "economics"
+                conversion_potential = "low"
+            else:
+                blocker_bucket = "other"
+                conversion_potential = "medium"
+
             outcomes.append(
                 {
                     "lead_key": lead_key,
@@ -770,10 +814,12 @@ def _post_conversion_outcomes(targets: list[dict[str, Any]]) -> list[dict[str, A
                     "lane": str(target.get("lane") or "").strip(),
                     "next_action": str(target.get("next_action") or "").strip(),
                     "disposition": disposition,
+                    "blocker_bucket": blocker_bucket,
+                    "conversion_potential": conversion_potential,
                     "vault_publish_ready": publish_ready,
                     "prefc_live_quality": bool(quality.get("prefc_live_quality")),
                     "debt_confidence": str(quality.get("debt_confidence") or "").strip().upper(),
-                    "equity_band": str(hydrated.get("equity_band") or lead["equity_band"] or "").strip().upper(),
+                    "equity_band": equity_band,
                     "county_lookup_status": county_lookup_status,
                     "county_lookup_next_step": county_lookup_next_step,
                     "debt_blocker_type": debt_blocker_type,
@@ -783,6 +829,38 @@ def _post_conversion_outcomes(targets: list[dict[str, Any]]) -> list[dict[str, A
                 }
             )
     return outcomes
+
+
+def _summarize_conversion_outcomes(outcomes: list[dict[str, Any]]) -> dict[str, Any]:
+    summary = {
+        "requested": len(outcomes),
+        "readyNow": 0,
+        "dataFixable": 0,
+        "economicsBlocked": 0,
+        "otherBlocked": 0,
+        "highPotential": 0,
+        "mediumPotential": 0,
+        "lowPotential": 0,
+    }
+    for row in outcomes:
+        bucket = str(row.get("blocker_bucket") or "").strip().lower()
+        potential = str(row.get("conversion_potential") or "").strip().lower()
+        if bucket == "ready":
+            summary["readyNow"] += 1
+        elif bucket == "data":
+            summary["dataFixable"] += 1
+        elif bucket == "economics":
+            summary["economicsBlocked"] += 1
+        else:
+            summary["otherBlocked"] += 1
+
+        if potential == "high":
+            summary["highPotential"] += 1
+        elif potential == "medium":
+            summary["mediumPotential"] += 1
+        elif potential == "low":
+            summary["lowPotential"] += 1
+    return summary
 
 
 def _run_conversion_lane(run_id: str) -> dict[str, Any]:
@@ -861,6 +939,7 @@ def _run_conversion_lane(run_id: str) -> dict[str, Any]:
             else:
                 os.environ[key] = value
 
+    outcomes = _post_conversion_outcomes(targets)
     report = {
         "generated_at": _now_iso(),
         "run_id": run_id,
@@ -876,7 +955,8 @@ def _run_conversion_lane(run_id: str) -> dict[str, Any]:
         "batchdata": batchdata_result,
         "countyLookup": county_lookup_result,
         "debtReconstruction": debt_result,
-        "outcomes": _post_conversion_outcomes(targets),
+        "outcomes": outcomes,
+        "summary": _summarize_conversion_outcomes(outcomes),
     }
     return {
         "attempted": True,
@@ -888,6 +968,7 @@ def _run_conversion_lane(run_id: str) -> dict[str, Any]:
         "countyLookup": county_lookup_result,
         "debtReconstruction": debt_result,
         "targets": targets,
+        "summary": report["summary"],
     }
 
 

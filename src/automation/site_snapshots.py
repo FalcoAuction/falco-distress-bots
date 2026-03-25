@@ -1480,6 +1480,68 @@ def _fetch_scalar(cur: sqlite3.Cursor, sql: str, params: tuple[Any, ...] = ()) -
     return int(row[0] or 0)
 
 
+def _latest_text_with_meta(
+    con: sqlite3.Connection, lead_key: str, field_name: str
+) -> dict[str, Any]:
+    row = con.execute(
+        """
+        SELECT field_value_text, source_channel, created_at
+        FROM lead_field_provenance
+        WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+        ORDER BY created_at DESC, prov_id DESC
+        LIMIT 1
+        """,
+        (lead_key, field_name),
+    ).fetchone()
+    if not row:
+        return {"value": None, "source": None, "checkedAt": None}
+    value = str(row[0]).strip() if row[0] is not None and str(row[0]).strip() else None
+    source = str(row[1]).strip() if row[1] is not None and str(row[1]).strip() else None
+    checked_at = str(row[2]).strip() if row[2] is not None and str(row[2]).strip() else None
+    return {"value": value, "source": source, "checkedAt": checked_at}
+
+
+def _prefc_dnc_assessment(con: sqlite3.Connection, lead_key: str, fallback_status: Any = None) -> dict[str, Any]:
+    status_meta = _latest_text_with_meta(con, lead_key, "owner_phone_dnc_status")
+    source_meta = _latest_text_with_meta(con, lead_key, "owner_phone_source")
+    dnc_status = str(
+        status_meta.get("value") or fallback_status or "UNVERIFIED"
+    ).strip().upper() or "UNVERIFIED"
+    checked_at = status_meta.get("checkedAt") or source_meta.get("checkedAt")
+    source = source_meta.get("value") or status_meta.get("source") or "Unknown"
+
+    if dnc_status == "DNC":
+        call_disposition = "DO_NOT_CALL"
+        note = "A skip-traced homeowner number is flagged DNC. Do not call from this signal alone."
+    elif dnc_status == "MIXED":
+        call_disposition = "REVIEW_REQUIRED"
+        note = "Mixed skip-trace DNC result. Separate numbers before any outreach decision."
+    elif dnc_status == "CLEAR":
+        call_disposition = "REVIEW_REQUIRED"
+        note = "Vendor skip-trace shows clear, but this is not a registry scrub. Review before calling."
+    else:
+        call_disposition = "NOT_SCRUBBED"
+        note = "No DNC signal is persisted yet. Treat as not scrubbed."
+
+    return {
+        "status": dnc_status,
+        "source": source,
+        "checkedAt": checked_at,
+        "callDisposition": call_disposition,
+        "note": note,
+    }
+
+
+def _load_conversion_lane_report() -> dict[str, Any] | None:
+    path = REPORTS_DIR / "conversion_lane.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 def _build_prefc_data_trust_audit(con: sqlite3.Connection) -> dict[str, Any]:
     rows = _load_live_pre_foreclosure_rows()
     audit_rows: list[dict[str, Any]] = []
@@ -1610,6 +1672,9 @@ def _build_prefc_partner_desk(
     pre_foreclosure_promotion: dict[str, Any],
     data_trust_audit: dict[str, Any],
 ) -> dict[str, Any]:
+    conversion_report = _load_conversion_lane_report() or {}
+    conversion_outcomes = conversion_report.get("outcomes") or []
+    conversion_summary = conversion_report.get("summary") or {}
     live_rows = _load_live_pre_foreclosure_rows()
     trust_map = {
         str(row.get("leadKey") or "").strip(): row
@@ -1626,22 +1691,12 @@ def _build_prefc_partner_desk(
             "SELECT address FROM leads WHERE lead_key=? LIMIT 1",
             (lead_key,),
         ).fetchone()
-        dnc_row = con.execute(
-            """
-            SELECT field_value_text
-            FROM lead_field_provenance
-            WHERE lead_key=? AND field_name='owner_phone_dnc_status' AND field_value_text IS NOT NULL
-            ORDER BY created_at DESC, prov_id DESC
-            LIMIT 1
-            """,
-            (lead_key,),
-        ).fetchone()
         display_address = (
             str(address_row[0]).strip()
             if address_row and address_row[0]
             else str(row.get("address") or row.get("title") or "").strip()
         )
-        dnc_status = str(dnc_row[0]).strip().upper() if dnc_row and dnc_row[0] else str(row.get("ownerPhoneDncStatus") or "UNVERIFIED").strip().upper()
+        dnc = _prefc_dnc_assessment(con, lead_key, row.get("ownerPhoneDncStatus"))
         record_refs = [
             f"Book {row.get('mortgageRecordBook')}" if row.get("mortgageRecordBook") else "",
             f"Page {row.get('mortgageRecordPage')}" if row.get("mortgageRecordPage") else "",
@@ -1669,12 +1724,11 @@ def _build_prefc_partner_desk(
             "saleControllerContactSource": row.get("saleControllerContactSource"),
             "noticePhone": row.get("noticePhone"),
             "trusteePhonePublic": row.get("trusteePhonePublic"),
-            "dncStatus": dnc_status,
-            "dncNote": (
-                "Skip-trace DNC signal from BatchData."
-                if dnc_status not in {"", "UNVERIFIED"}
-                else "No DNC scrub is currently persisted in operator data."
-            ),
+            "dncStatus": dnc.get("status"),
+            "dncSource": dnc.get("source"),
+            "dncCheckedAt": dnc.get("checkedAt"),
+            "dncCallDisposition": dnc.get("callDisposition"),
+            "dncNote": dnc.get("note"),
             "trustStatus": trust.get("status") or "unknown",
             "trustIssues": trust.get("issues") or [],
         }
@@ -1720,22 +1774,38 @@ def _build_prefc_partner_desk(
         1 for row in non_live_rows if not _prefc_is_data_blocked(row) and _prefc_is_economics_blocked(row)
     )
     blocked_other = max(len(non_live_rows) - blocked_on_data - blocked_on_economics, 0)
+    data_fixable_rows = [
+        row
+        for row in conversion_outcomes
+        if str(row.get("blocker_bucket") or "").strip().lower() == "data"
+    ]
+    economics_blocked_rows = [
+        row
+        for row in conversion_outcomes
+        if str(row.get("blocker_bucket") or "").strip().lower() == "economics"
+    ]
 
     return {
         "generatedAt": _utc_now(),
         "focus": "Parks pre-foreclosure desk",
-        "coverageNote": "Built for Nashville metro and surrounding counties. DNC is not yet scrubbed in-system.",
+        "coverageNote": "Built for Nashville metro and surrounding counties. DNC status is vendor skip-trace only unless a separate registry scrub is recorded.",
         "safeForParks": safe_for_parks[:8],
         "needsCorrection": needs_correction[:8],
         "conversionScoreboard": {
             "liveNow": len(live_rows),
             "safeToShow": len(safe_for_parks),
             "autoPublishNow": int(pre_foreclosure_promotion.get("autoPublishCount") or 0),
-            "conversionActive": int(pre_foreclosure_promotion.get("autoEnrichCount") or 0),
-            "blockedOnData": blocked_on_data,
-            "blockedOnEconomics": blocked_on_economics,
-            "blockedOther": blocked_other,
+            "conversionActive": int(conversion_summary["requested"]) if "requested" in conversion_summary else int(pre_foreclosure_promotion.get("autoEnrichCount") or 0),
+            "blockedOnData": int(conversion_summary["dataFixable"]) if "dataFixable" in conversion_summary else blocked_on_data,
+            "blockedOnEconomics": int(conversion_summary["economicsBlocked"]) if "economicsBlocked" in conversion_summary else blocked_on_economics,
+            "blockedOther": int(conversion_summary["otherBlocked"]) if "otherBlocked" in conversion_summary else blocked_other,
+            "readyNow": int(conversion_summary["readyNow"]) if "readyNow" in conversion_summary else 0,
+            "highPotential": int(conversion_summary["highPotential"]) if "highPotential" in conversion_summary else 0,
+            "mediumPotential": int(conversion_summary["mediumPotential"]) if "mediumPotential" in conversion_summary else 0,
+            "lowPotential": int(conversion_summary["lowPotential"]) if "lowPotential" in conversion_summary else 0,
         },
+        "dataFixableNearMisses": data_fixable_rows[:8],
+        "economicsBlockedNearMisses": economics_blocked_rows[:8],
     }
 
 
