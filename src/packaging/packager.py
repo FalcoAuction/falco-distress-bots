@@ -102,6 +102,11 @@ def _hydrate_fallback_fields(cur, lead_key: str) -> dict:
         "owner_phone_secondary",
         "notice_phone",
         "trustee_phone_public",
+        "contact_target_role",
+        "sale_controller_contact_name",
+        "sale_controller_phone_primary",
+        "sale_controller_phone_secondary",
+        "sale_controller_contact_source",
         "fsbo_listing_title",
         "fsbo_listing_description",
         "fsbo_signal_labels",
@@ -182,14 +187,15 @@ def _has_foreclosure_contact(cur: sqlite3.Cursor, lead_key: str, fields: Dict[st
     for k in (
         "ft_trustee_name_raw", "notice_trustee_name_raw",
         "ft_trustee_firm",     "notice_trustee_firm",
-        "trustee_phone_public", "owner_phone_primary",
+        "trustee_phone_public",
     ):
         if (fields.get(k) or "").strip():
             return True
 
     # Phone / address / enriched phone fallback via provenance
     for fname in ("notice_phone", "notice_trustee_address",
-                  "trustee_phone_public", "owner_phone_primary"):
+                  "trustee_phone_public", "sale_controller_phone_primary",
+                  "sale_controller_phone_secondary"):
         try:
             row = cur.execute(
                 """
@@ -660,7 +666,7 @@ def run() -> Dict[str, int]:
 
         # Foreclosure contact gate — skip if no outreach signal exists
         _distress_upper = (fields.get("distress_type") or "").upper()
-        if _distress_upper in _FORECLOSURE_DISTRESS_TYPES:
+        if (not _is_pre_foreclosure) and _distress_upper in _FORECLOSURE_DISTRESS_TYPES:
             if not _has_foreclosure_contact(cur, lead_key, fields):
                 print(f"[PACKAGER] skipped lead_key={lead_key!r} reason=missing_foreclosure_contact")
                 skipped_missing_contact += 1

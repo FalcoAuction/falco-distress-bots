@@ -2577,6 +2577,8 @@ def _draw_ownership_section(doc: _Doc, fields: Dict[str, Any]) -> None:
 
 def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     _lead_key = fields.get("lead_key") or ""
+    _sale_status = str(fields.get("sale_status") or "").strip().lower()
+    _is_pre_foreclosure = _sale_status == "pre_foreclosure"
     _nc = _fetch_notice_contact(_lead_key)
     _ft = _fetch_prov_fields(
         _lead_key,
@@ -2610,6 +2612,11 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     _enrich_prov = _fetch_prov_fields(
         _lead_key,
         [
+            "contact_target_role",
+            "sale_controller_contact_name",
+            "sale_controller_phone_primary",
+            "sale_controller_phone_secondary",
+            "sale_controller_contact_source",
             "trustee_phone_public",
             "trustee_phone_source",
             "owner_phone_primary",
@@ -2620,31 +2627,48 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
     _t2_phone = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
     _t3_phone = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
     _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
+    _sale_controller_name = _val(_enrich_prov.get("sale_controller_contact_name"), None) or _trustee_display
+    _sale_controller_phone = _sanitize_phone(_enrich_prov.get("sale_controller_phone_primary")) or _sanitize_phone(_nc.get("notice_phone")) or _t2_phone
+    _sale_controller_phone_2 = _sanitize_phone(_enrich_prov.get("sale_controller_phone_secondary"))
+    if not _sale_controller_phone_2 and _sanitize_phone(_nc.get("notice_phone")) and _t2_phone and _sanitize_phone(_nc.get("notice_phone")) != _t2_phone:
+        _sale_controller_phone_2 = _t2_phone
     _owner_mort = _extract_owner_mortgage(fields)
 
     _contact_pairs: List[Tuple[str, str]] = []
     if _owner_mort.get("owner_name"):
-        _contact_pairs.append(("Owner Name", _owner_mort["owner_name"]))
+        _contact_pairs.append(("Homeowner Name", _owner_mort["owner_name"]))
     if _owner_mort.get("owner_mail"):
-        _contact_pairs.append(("Owner Mailing", _owner_mort["owner_mail"]))
+        _contact_pairs.append(("Homeowner Mailing", _owner_mort["owner_mail"]))
     if fields.get("property_identifier"):
         _contact_pairs.append(("Parcel / APN", _val(fields.get("property_identifier"))))
     if _owner_mort.get("mortgage_lender"):
         _contact_pairs.append(("Mortgage Lender", _owner_mort["mortgage_lender"]))
-    if _trustee_display:
-        _contact_pairs.append(("Trustee / Firm", _trustee_display))
-    if _nc.get("notice_law_firm") and _nc["notice_law_firm"] != _trustee_display:
-        _contact_pairs.append(("Law Firm", _nc["notice_law_firm"]))
-
-    _ph_clean = _sanitize_phone(_nc.get("notice_phone"))
-    if _ph_clean:
-        _contact_pairs.append(("Sale Status Phone", _ph_clean))
-    elif _t2_phone:
-        _contact_pairs.append(("Sale Status Phone", _t2_phone))
-    if _t3_phone:
-        _contact_pairs.append(("Owner Contact", _t3_phone))
-    if _t3_phone_2 and _t3_phone_2 != _t3_phone:
-        _contact_pairs.append(("Owner Contact 2", _t3_phone_2))
+    if _is_pre_foreclosure:
+        if _t3_phone:
+            _contact_pairs.append(("Homeowner Skip-Trace Phone", _t3_phone))
+        if _t3_phone_2 and _t3_phone_2 != _t3_phone:
+            _contact_pairs.append(("Homeowner Skip-Trace Phone 2", _t3_phone_2))
+        if _sale_controller_name:
+            _contact_pairs.append(("Notice / Trustee", _sale_controller_name))
+        if _sale_controller_phone:
+            _contact_pairs.append(("Notice / Trustee Phone", _sale_controller_phone))
+        if _sale_controller_phone_2 and _sale_controller_phone_2 != _sale_controller_phone:
+            _contact_pairs.append(("Notice / Trustee Phone 2", _sale_controller_phone_2))
+    else:
+        if _sale_controller_name:
+            _contact_pairs.append(("Sale Controller", _sale_controller_name))
+        elif _trustee_display:
+            _contact_pairs.append(("Trustee / Firm", _trustee_display))
+        if _nc.get("notice_law_firm") and _nc["notice_law_firm"] != _trustee_display:
+            _contact_pairs.append(("Law Firm", _nc["notice_law_firm"]))
+        if _sale_controller_phone:
+            _contact_pairs.append(("Sale Controller Phone", _sale_controller_phone))
+        if _sale_controller_phone_2 and _sale_controller_phone_2 != _sale_controller_phone:
+            _contact_pairs.append(("Sale Controller Phone 2", _sale_controller_phone_2))
+        if _t3_phone:
+            _contact_pairs.append(("Homeowner Skip-Trace Phone", _t3_phone))
+        if _t3_phone_2 and _t3_phone_2 != _t3_phone:
+            _contact_pairs.append(("Homeowner Skip-Trace Phone 2", _t3_phone_2))
     if _nc.get("notice_email"):
         _contact_pairs.append(("Notice Email", _nc["notice_email"]))
     if _nc.get("notice_trustee_address"):

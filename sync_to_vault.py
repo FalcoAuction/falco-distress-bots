@@ -332,6 +332,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
     influenceability = str(execution.get("influenceability") or "").strip().upper()
     workability = str(execution.get("workability_band") or "").strip().upper()
     lane_confidence = str((quality.get("lane_suggestion") or {}).get("confidence") or "").strip().upper()
+    sale_status_contact = bool(execution.get("sale_status_contact_available"))
 
     county = str(row.get("county") or "").strip().lower()
 
@@ -343,6 +344,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
             readiness in {"GREEN", "YELLOW"}
             and equity_band in {"MED", "HIGH"}
             and debt_confidence == "FULL"
+            and sale_status_contact
             and contact_quality in {"GOOD", "STRONG"}
             and owner_agency in {"HIGH", "MEDIUM"}
             and intervention_window in {"WIDE", "MODERATE"}
@@ -356,6 +358,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
         readiness == "GREEN"
         and equity_band in {"MED", "HIGH"}
         and debt_confidence == "FULL"
+        and sale_status_contact
         and contact_quality in {"GOOD", "STRONG"}
         and owner_agency in {"HIGH", "MEDIUM"}
         and intervention_window in {"WIDE", "MODERATE"}

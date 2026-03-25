@@ -30,6 +30,7 @@ from __future__ import annotations
 import os
 import re
 import sqlite3
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -168,6 +169,140 @@ def _write_optional_prov_field(
     return _write_prov_field(cur, lead_key, field_name, str(value).strip(), source_channel, run_id, created_at)
 
 
+def _latest_attom_raw_json(cur: sqlite3.Cursor, lead_key: str) -> Optional[str]:
+    try:
+        row = cur.execute(
+            """
+            SELECT attom_raw_json
+            FROM attom_enrichments
+            WHERE lead_key=? AND attom_raw_json IS NOT NULL
+            ORDER BY enriched_at DESC, id DESC
+            LIMIT 1
+            """,
+            (lead_key,),
+        ).fetchone()
+        return str(row[0]) if row and row[0] else None
+    except Exception:
+        return None
+
+
+def _attom_owner_context(raw_json: Optional[str]) -> Dict[str, Optional[str]]:
+    if not raw_json:
+        return {}
+    try:
+        blob = json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+        if not isinstance(blob, dict):
+            return {}
+    except Exception:
+        return {}
+
+    owner_blob = blob.get("owner")
+    owner_name = None
+    owner_mail = None
+    subject_one_line = None
+    if isinstance(owner_blob, dict):
+        owner_core = owner_blob.get("owner") or owner_blob
+        if isinstance(owner_core, dict):
+            owner1 = owner_core.get("owner1") or {}
+            if isinstance(owner1, dict):
+                owner_name = (
+                    owner1.get("fullname")
+                    or owner1.get("fullName")
+                    or " ".join(
+                        part for part in [
+                            owner1.get("firstnameandmi") or owner1.get("firstName"),
+                            owner1.get("lastname") or owner1.get("lastName"),
+                        ]
+                        if part
+                    ).strip()
+                    or None
+                )
+            owner_mail = (
+                owner_core.get("mailingaddressoneline")
+                or ((owner_core.get("mailAddress") or {}).get("oneLine") if isinstance(owner_core.get("mailAddress"), dict) else None)
+                or owner_blob.get("mailingaddressoneline")
+            )
+
+    address_blob = blob.get("address")
+    if isinstance(address_blob, dict):
+        subject_one_line = address_blob.get("oneLine")
+        if not subject_one_line:
+            line1 = str(address_blob.get("line1") or "").strip()
+            line2 = str(address_blob.get("line2") or "").strip()
+            if line1 and line2:
+                subject_one_line = f"{line1}, {line2}"
+            elif line1:
+                subject_one_line = line1
+
+    return {
+        "owner_name": str(owner_name).strip() if owner_name else None,
+        "owner_mail": str(owner_mail).strip() if owner_mail else None,
+        "subject_address": str(subject_one_line).strip() if subject_one_line else None,
+    }
+
+
+def _normalized_sale_status(fields: Dict[str, Any]) -> str:
+    return str(fields.get("sale_status") or "").strip().lower()
+
+
+def _is_homeowner_contact_lane(fields: Dict[str, Any]) -> bool:
+    sale_status = _normalized_sale_status(fields)
+    distress_type = str(fields.get("distress_type") or "").strip().upper()
+    return sale_status == "pre_foreclosure" or distress_type == "FSBO"
+
+
+def _refresh_contact_lane_fields(
+    cur: sqlite3.Cursor,
+    lead_key: str,
+    fields: Dict[str, Any],
+    run_id: Optional[str],
+    created_at: str,
+) -> None:
+    homeowner_lane = _is_homeowner_contact_lane(fields)
+    notice_phone = _sanitize_phone(
+        _read_prov_field(cur, lead_key, "notice_phone") or (fields.get("notice_phone") or None)
+    )
+    trustee_phone = _sanitize_phone(
+        _read_prov_field(cur, lead_key, "trustee_phone_public") or (fields.get("trustee_phone_public") or None)
+    )
+    sale_controller_name = _get_best_firm(fields) or _read_prov_field(cur, lead_key, "notice_law_firm")
+    sale_controller_primary = notice_phone or trustee_phone
+    sale_controller_secondary = None
+    if notice_phone and trustee_phone and trustee_phone != notice_phone:
+        sale_controller_secondary = trustee_phone
+
+    contact_target_role = "HOMEOWNER" if homeowner_lane else "SALE_CONTROLLER"
+    fields["contact_target_role"] = contact_target_role
+    _write_prov_field(cur, lead_key, "contact_target_role", contact_target_role, "ContactEnricher", run_id, created_at)
+
+    if sale_controller_name:
+        fields["sale_controller_contact_name"] = sale_controller_name
+        _write_prov_field(
+            cur, lead_key, "sale_controller_contact_name", sale_controller_name, "ContactEnricher", run_id, created_at
+        )
+    if sale_controller_primary:
+        fields["sale_controller_phone_primary"] = sale_controller_primary
+        _write_prov_field(
+            cur, lead_key, "sale_controller_phone_primary", sale_controller_primary, "ContactEnricher", run_id, created_at
+        )
+    if sale_controller_secondary:
+        fields["sale_controller_phone_secondary"] = sale_controller_secondary
+        _write_prov_field(
+            cur, lead_key, "sale_controller_phone_secondary", sale_controller_secondary, "ContactEnricher", run_id, created_at
+        )
+    if sale_controller_primary:
+        source_bits = []
+        if notice_phone:
+            source_bits.append("notice_phone")
+        if trustee_phone:
+            source_bits.append("trustee_phone_public")
+        sale_controller_source = "+".join(source_bits) if source_bits else "sale_controller"
+        fields["sale_controller_contact_source"] = sale_controller_source
+        _write_prov_field(
+            cur, lead_key, "sale_controller_contact_source", sale_controller_source, "ContactEnricher", run_id, created_at
+        )
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
@@ -222,10 +357,32 @@ def enrich_contact_data(
     has_owner_dnc = _has_prov_field(cur, lead_key, "owner_phone_dnc_status")
     if not has_owner_phone or not has_owner_dnc:
         try:
-            address = _get_owner_address(fields)
+            attom_owner = _attom_owner_context(_latest_attom_raw_json(cur, lead_key))
+            if not fields.get("owner_name") and attom_owner.get("owner_name"):
+                fields["owner_name"] = attom_owner["owner_name"]
+                _write_optional_prov_field(
+                    cur, lead_key, "owner_name", attom_owner["owner_name"], "ATTOMOwner", run_id, created_at
+                )
+            if not fields.get("owner_mail") and attom_owner.get("owner_mail"):
+                fields["owner_mail"] = attom_owner["owner_mail"]
+                _write_optional_prov_field(
+                    cur, lead_key, "owner_mail", attom_owner["owner_mail"], "ATTOMOwner", run_id, created_at
+                )
+
+            owner_name = (fields.get("owner_name") or attom_owner.get("owner_name") or None)
+            address = _get_owner_address(fields) or attom_owner.get("subject_address")
+            mailing_address = str(fields.get("owner_mail") or attom_owner.get("owner_mail") or "").strip() or None
             if address:
                 provider = get_skip_trace_provider()
-                result   = provider.trace(address, owner_name=(fields.get("owner_name") or None))
+                result   = provider.trace(address, owner_name=owner_name)
+                if (
+                    not result.owner_phone_primary
+                    and not result.owner_phone_secondary
+                    and not result.owner_phone_dnc_status
+                    and mailing_address
+                    and mailing_address != address
+                ):
+                    result = provider.trace(mailing_address, owner_name=owner_name)
                 _t3_any  = False
 
                 if result.owner_phone_primary:
@@ -312,6 +469,8 @@ def enrich_contact_data(
             if v:
                 fields.setdefault(k, v)
 
+    _refresh_contact_lane_fields(cur, lead_key, fields, run_id, created_at)
+
     # ── contact_ready flag (computed — overwritten every run) ─────────────────
     # A lead is contact_ready ONLY when at least one usable phone exists.
     # Trustee name / firm are useful for packet display but are NOT sufficient.
@@ -328,7 +487,23 @@ def enrich_contact_data(
         _sanitize_phone((fields.get("owner_phone_secondary") or "").strip() or None)
     )
 
-    contact_ready = _notice_phone_ok or _t2_phone_ok or _t3_primary_ok or _t3_secondary_ok
+    _sale_controller_primary_ok = bool(
+        _sanitize_phone((fields.get("sale_controller_phone_primary") or "").strip() or None)
+    )
+    _sale_controller_secondary_ok = bool(
+        _sanitize_phone((fields.get("sale_controller_phone_secondary") or "").strip() or None)
+    )
+
+    homeowner_lane = _is_homeowner_contact_lane(fields)
+    if homeowner_lane:
+        contact_ready = _t3_primary_ok or _t3_secondary_ok
+    else:
+        contact_ready = (
+            _sale_controller_primary_ok
+            or _sale_controller_secondary_ok
+            or _notice_phone_ok
+            or _t2_phone_ok
+        )
     contact_ready_val = "1" if contact_ready else "0"
 
     try:

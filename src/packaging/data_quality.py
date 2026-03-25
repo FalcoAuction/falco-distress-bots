@@ -523,14 +523,24 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     debt_context = debt_context_strict or debt_context_proxy
     dts_days = _int_or_none(enriched.get("dts_days"))
 
-    if owner_contact and sale_status_contact:
-        contact_path_quality = "STRONG"
-    elif owner_contact and owner_profile:
-        contact_path_quality = "GOOD"
-    elif owner_contact or sale_status_contact or owner_profile:
-        contact_path_quality = "PARTIAL"
+    if is_pre_foreclosure:
+        if owner_contact and sale_status_contact:
+            contact_path_quality = "STRONG"
+        elif owner_contact and owner_profile:
+            contact_path_quality = "GOOD"
+        elif owner_contact or sale_status_contact or owner_profile:
+            contact_path_quality = "PARTIAL"
+        else:
+            contact_path_quality = "THIN"
     else:
-        contact_path_quality = "THIN"
+        if sale_status_contact and owner_contact:
+            contact_path_quality = "STRONG"
+        elif sale_status_contact:
+            contact_path_quality = "GOOD"
+        elif owner_contact or owner_profile:
+            contact_path_quality = "PARTIAL"
+        else:
+            contact_path_quality = "THIN"
 
     if dts_days is None:
         intervention_window = "WIDE" if is_pre_foreclosure else "MODERATE"
@@ -543,16 +553,24 @@ def _derive_execution_reality(enriched: Dict[str, Any]) -> Dict[str, Any]:
     else:
         intervention_window = "COMPRESSED"
 
-    if owner_contact and sale_status_contact:
-        control_party = "MIXED"
-    elif owner_contact and owner_profile and (dts_days is None or dts_days > 14):
-        control_party = "OWNER"
-    elif sale_status_contact:
-        control_party = "LENDER / TRUSTEE"
-    elif owner_contact:
-        control_party = "OWNER"
+    if is_pre_foreclosure:
+        if owner_contact and sale_status_contact:
+            control_party = "MIXED"
+        elif owner_contact and owner_profile and (dts_days is None or dts_days > 14):
+            control_party = "OWNER"
+        elif sale_status_contact:
+            control_party = "LENDER / TRUSTEE"
+        elif owner_contact:
+            control_party = "OWNER"
+        else:
+            control_party = "UNCLEAR"
     else:
-        control_party = "UNCLEAR"
+        if owner_contact and sale_status_contact:
+            control_party = "MIXED"
+        elif sale_status_contact:
+            control_party = "LENDER / TRUSTEE"
+        else:
+            control_party = "UNCLEAR"
 
     if control_party == "LENDER / TRUSTEE" and sale_status_contact and intervention_window in {"TIGHT", "COMPRESSED"}:
         lender_control_intensity = "HIGH"
