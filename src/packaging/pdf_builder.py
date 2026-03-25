@@ -2634,12 +2634,15 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
             "trustee_phone_source",
             "owner_phone_primary",
             "owner_phone_secondary",
+            "owner_phone_dnc_status",
             "owner_phone_source",
         ],
     )
     _t2_phone = _sanitize_phone(_enrich_prov.get("trustee_phone_public"))
     _t3_phone = _sanitize_phone(_enrich_prov.get("owner_phone_primary"))
     _t3_phone_2 = _sanitize_phone(_enrich_prov.get("owner_phone_secondary"))
+    _owner_dnc_status = str(_enrich_prov.get("owner_phone_dnc_status") or "").strip().upper()
+    _owner_phone_source = _val(_enrich_prov.get("owner_phone_source"), None)
     _sale_controller_name = _val(_enrich_prov.get("sale_controller_contact_name"), None) or _trustee_display
     _sale_controller_phone = _sanitize_phone(_enrich_prov.get("sale_controller_phone_primary")) or _sanitize_phone(_nc.get("notice_phone")) or _t2_phone
     _sale_controller_phone_2 = _sanitize_phone(_enrich_prov.get("sale_controller_phone_secondary"))
@@ -2661,6 +2664,10 @@ def _contact_routing_pairs(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
             _contact_pairs.append(("Homeowner Skip-Trace Phone", _t3_phone))
         if _t3_phone_2 and _t3_phone_2 != _t3_phone:
             _contact_pairs.append(("Homeowner Skip-Trace Phone 2", _t3_phone_2))
+        if _owner_dnc_status:
+            _dnc_label = _owner_dnc_status.replace("_", " ")
+            _dnc_note = f"{_dnc_label} via {_owner_phone_source}" if _owner_phone_source else _dnc_label
+            _contact_pairs.append(("Homeowner DNC Check", _dnc_note))
         if _sale_controller_name:
             _contact_pairs.append(("Notice / Trustee", _sale_controller_name))
         if _sale_controller_phone:
