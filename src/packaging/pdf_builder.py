@@ -330,10 +330,18 @@ class _Doc:
         if not v or v in ("None", "null", "Unavailable"):
             return
         c = self.c
-        c.setFont("Helvetica-Bold", 8.5)
+        label_font = "Helvetica-Bold"
+        label_size = 8.5
+        c.setFont(label_font, label_size)
         c.setFillColor(_GRAY)
         label_y = self.y
-        c.drawString(ML, label_y, label)
+        label_max_w = max(lw - 8, 48)
+        label_lines = _wrap(str(label).strip(), label_font, label_size, label_max_w)
+        if len(label_lines) > 2:
+            label_lines = label_lines[:2]
+            label_lines[-1] = _trim_line(label_lines[-1], label_font, label_size, label_max_w)
+        for idx, line in enumerate(label_lines):
+            c.drawString(ML, label_y - (idx * 10), line)
         value_font = "Helvetica-Bold" if bold_v else "Helvetica"
         c.setFont(value_font, 8.5)
         c.setFillColor(vc or _SLATE)
@@ -345,7 +353,7 @@ class _Doc:
             lines[-1] = _trim_line(" ".join(lines[-1:]), value_font, 8.5, max_w)
         for idx, line in enumerate(lines):
             c.drawString(value_x, label_y - (idx * 10), line)
-        self.y -= max(13, 10 * len(lines) + 2)
+        self.y -= max(13, 10 * max(len(label_lines), len(lines)) + 2)
 
     def bullet(self, text: str, color=None) -> None:
         c = self.c
@@ -2747,7 +2755,7 @@ def _page_property_snapshot(
     doc.section("Contact & Routing")
     if _contact_pairs:
         for _label, _value in _contact_pairs:
-            doc.kv(_label, _value, lw=110)
+            doc.kv(_label, _value, lw=150)
         doc.body(
             "Trustee contact is included for sale-status, postponement, and file-confirmation checks. "
             "Execution path may still run borrower-side, lender-side, trustee-side, or through auction channel depending on the file.",
