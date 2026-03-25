@@ -1560,6 +1560,143 @@ def _build_prefc_data_trust_audit(con: sqlite3.Connection) -> dict[str, Any]:
     }
 
 
+def _prefc_is_data_blocked(row: dict[str, Any]) -> bool:
+    blockers = [str(item or "").strip() for item in (row.get("executionBlockers") or [])]
+    reasons = [str(item or "").strip() for item in (row.get("prefcLiveReviewReasons") or [])]
+    next_action = str(row.get("recommendedAction") or "").strip().lower()
+    combined = blockers + reasons
+    if next_action in {"county_record_lookup", "reconstruct_debt", "reconstruct_transfer"}:
+        return True
+    return any(
+        marker in combined
+        for marker in (
+            "Mortgage lender missing",
+            "Original loan amount missing",
+            "Last transfer date missing",
+        )
+    )
+
+
+def _prefc_is_economics_blocked(row: dict[str, Any]) -> bool:
+    equity_band = str(row.get("equity_band") or row.get("equityBand") or "").strip().upper()
+    reasons = " ".join(str(item or "").strip() for item in (row.get("prefcLiveReviewReasons") or []))
+    return equity_band in {"LOW", "UNKNOWN"} or "equity band is too weak" in reasons.lower()
+
+
+def _build_prefc_partner_desk(
+    con: sqlite3.Connection,
+    pre_foreclosure_promotion: dict[str, Any],
+    data_trust_audit: dict[str, Any],
+) -> dict[str, Any]:
+    live_rows = _load_live_pre_foreclosure_rows()
+    trust_map = {
+        str(row.get("leadKey") or "").strip(): row
+        for row in (data_trust_audit.get("rows") or [])
+        if str(row.get("leadKey") or "").strip()
+    }
+    safe_for_parks: list[dict[str, Any]] = []
+    needs_correction: list[dict[str, Any]] = []
+
+    for row in live_rows:
+        lead_key = str(row.get("sourceLeadKey") or "").strip()
+        trust = trust_map.get(lead_key) or {}
+        address_row = con.execute(
+            "SELECT address FROM leads WHERE lead_key=? LIMIT 1",
+            (lead_key,),
+        ).fetchone()
+        display_address = (
+            str(address_row[0]).strip()
+            if address_row and address_row[0]
+            else str(row.get("address") or row.get("title") or "").strip()
+        )
+        record_refs = [
+            f"Book {row.get('mortgageRecordBook')}" if row.get("mortgageRecordBook") else "",
+            f"Page {row.get('mortgageRecordPage')}" if row.get("mortgageRecordPage") else "",
+            f"Instrument {row.get('mortgageRecordInstrument')}" if row.get("mortgageRecordInstrument") else "",
+        ]
+        entry = {
+            "leadKey": lead_key,
+            "slug": row.get("slug"),
+            "address": display_address or row.get("title"),
+            "county": row.get("county"),
+            "equityBand": row.get("equityBand"),
+            "debtConfidence": row.get("debtConfidence"),
+            "prefcLiveQuality": bool(row.get("prefcLiveQuality")),
+            "mortgageLender": row.get("mortgageLender"),
+            "mortgageDate": row.get("mortgageDate"),
+            "lastSaleDate": row.get("lastSaleDate"),
+            "recordRefs": " • ".join(part for part in record_refs if part) or "No record refs",
+            "contactPathQuality": row.get("contactPathQuality"),
+            "ownerPhonePrimary": row.get("ownerPhonePrimary"),
+            "ownerPhoneSecondary": row.get("ownerPhoneSecondary"),
+            "noticePhone": row.get("noticePhone"),
+            "trusteePhonePublic": row.get("trusteePhonePublic"),
+            "dncStatus": "UNVERIFIED",
+            "dncNote": "No DNC scrub is currently persisted in operator data.",
+            "trustStatus": trust.get("status") or "unknown",
+            "trustIssues": trust.get("issues") or [],
+        }
+        if (
+            trust.get("status") == "clean"
+            and bool(row.get("prefcLiveQuality"))
+            and str(row.get("debtConfidence") or "").upper() == "FULL"
+            and str(row.get("equityBand") or "").upper() in {"MED", "HIGH"}
+        ):
+            safe_for_parks.append(entry)
+        else:
+            needs_correction.append(entry)
+
+    safe_for_parks.sort(
+        key=lambda row: (
+            prefc_county_priority(row.get("county")),
+            0 if str(row.get("equityBand") or "").upper() == "HIGH" else 1,
+            0 if str(row.get("contactPathQuality") or "").upper() == "STRONG" else 1,
+            str(row.get("address") or ""),
+        )
+    )
+    needs_correction.sort(
+        key=lambda row: (
+            0 if row.get("trustStatus") == "flagged" else 1,
+            prefc_county_priority(row.get("county")),
+            str(row.get("address") or ""),
+        )
+    )
+
+    non_live_rows = [
+        *list(pre_foreclosure_promotion.get("autoPublishCandidates") or []),
+        *list(pre_foreclosure_promotion.get("autoEnrichCandidates") or []),
+        *list(pre_foreclosure_promotion.get("monitorCandidates") or []),
+        *[
+            row
+            for row in (pre_foreclosure_promotion.get("blocked") or [])
+            if not bool(row.get("vaultLive"))
+        ],
+    ]
+
+    blocked_on_data = sum(1 for row in non_live_rows if _prefc_is_data_blocked(row))
+    blocked_on_economics = sum(
+        1 for row in non_live_rows if not _prefc_is_data_blocked(row) and _prefc_is_economics_blocked(row)
+    )
+    blocked_other = max(len(non_live_rows) - blocked_on_data - blocked_on_economics, 0)
+
+    return {
+        "generatedAt": _utc_now(),
+        "focus": "Parks pre-foreclosure desk",
+        "coverageNote": "Built for Nashville metro and surrounding counties. DNC is not yet scrubbed in-system.",
+        "safeForParks": safe_for_parks[:8],
+        "needsCorrection": needs_correction[:8],
+        "conversionScoreboard": {
+            "liveNow": len(live_rows),
+            "safeToShow": len(safe_for_parks),
+            "autoPublishNow": int(pre_foreclosure_promotion.get("autoPublishCount") or 0),
+            "conversionActive": int(pre_foreclosure_promotion.get("autoEnrichCount") or 0),
+            "blockedOnData": blocked_on_data,
+            "blockedOnEconomics": blocked_on_economics,
+            "blockedOther": blocked_other,
+        },
+    }
+
+
 def _operator_snapshot() -> dict[str, Any]:
     con = _connect()
     try:
@@ -1670,6 +1807,7 @@ def _operator_snapshot() -> dict[str, Any]:
         fsbo_lane = _build_fsbo_lane(con, live_slugs)
         lifecycle_events = _build_lifecycle_events(con, live_slugs)
         data_trust_audit = _build_prefc_data_trust_audit(con)
+        prefc_partner_desk = _build_prefc_partner_desk(con, pre_foreclosure_promotion, data_trust_audit)
 
         foreclosure_overview = dict(
             cur.execute(
@@ -1776,6 +1914,7 @@ def _operator_snapshot() -> dict[str, Any]:
             **pre_foreclosure_promotion,
         },
         "prefcDataTrustAudit": data_trust_audit,
+        "prefcPartnerDesk": prefc_partner_desk,
         "credibleShots": credible_shots,
         "fsboLane": fsbo_lane,
     }
