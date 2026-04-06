@@ -645,8 +645,8 @@ def _narrative_intelligence(fields: Dict[str, Any]) -> List[str]:
         elif d > 60:
             lines.append(f"DTS {d}d exceeds 60-day window — monitor for auction slippage.")
 
-    if low is not None and float(low) < 300_000:
-        lines.append(f"AVM low {_fmt_cur(low)} is below the $300k diamond gate — verify buyer-pool depth.")
+    if low is not None and float(low) < 100_000:
+        lines.append(f"AVM low {_fmt_cur(low)} is below the $100k diamond gate — verify buyer-pool depth.")
 
     lines.append(
         "Lien balance and equity are unknown. Do not assume positive equity without "
@@ -678,8 +678,8 @@ def _draw_p1_risk_flags(doc: _Doc, fields: Dict[str, Any]) -> None:
         flags.append((f"DTS {dts_txt} is outside optimal 21–60 day window.", "MED"))
 
     low = fields.get("value_anchor_low")
-    if low is not None and float(low) < 300_000:
-        flags.append((f"AVM low {_fmt_cur(low)} is below $300k diamond gate.", "MED"))
+    if low is not None and float(low) < 100_000:
+        flags.append((f"AVM low {_fmt_cur(low)} is below $100k diamond gate.", "MED"))
 
     doc.section("Risk Flags")
     if not flags:
@@ -720,7 +720,7 @@ def _auction_liquidity(fields: Dict[str, Any]) -> str:
 
     if (
         _is_res
-        and _low is not None and _low >= 300_000
+        and _low is not None and _low >= 100_000
         and _sp  is not None and _sp  <= 0.15
         and _dts is not None and 21 <= _dts <= 60
     ):
@@ -764,7 +764,7 @@ def _partner_verdict(fields: Dict[str, Any]) -> str:
     _is_res = any(tok in pt for tok in _RES_TOKENS) if pt else False
     if (
         _uw_ready
-        and _low is not None and _low >= 300_000
+        and _low is not None and _low >= 100_000
         and _sp  is not None and _sp  <= 0.18
         and _dts is not None and 21 <= _dts <= 60
         and _liq in ("STRONG", "MODERATE")
@@ -1901,6 +1901,26 @@ def _page1_executive(
         size=8.5,
         color=_SLATE,
     )
+    doc.gap(6)
+
+    # 6) Suggested Execution Lane & Debt Confidence
+    _pq = fields.get("packet_quality") if isinstance(fields.get("packet_quality"), dict) else {}
+    _lane = _pq.get("lane_suggestion") if isinstance(_pq.get("lane_suggestion"), dict) else {}
+    _lane_name = _lane.get("lane")
+    _lane_conf = _lane.get("confidence")
+    _lane_reasons = _lane.get("reasons") if isinstance(_lane.get("reasons"), list) else []
+    _debt_conf = str(_pq.get("debt_confidence") or "").strip().upper()
+
+    if _lane_name or _debt_conf:
+        doc.section("Suggested Play")
+        if _lane_name:
+            _lane_display = _lane_name.replace("_", " ").title()
+            _conf_display = f" ({_lane_conf} confidence)" if _lane_conf else ""
+            doc.kv("Execution Lane", f"{_lane_display}{_conf_display}", bold_v=True)
+        if _debt_conf:
+            doc.kv("Debt Confidence", _debt_conf, bold_v=True)
+        for _reason in _lane_reasons[:3]:
+            doc.body(f"  {_reason}", size=8, color=_SLATE)
     doc.gap(6)
 
     # 6) Risk Flags
@@ -3353,7 +3373,7 @@ def _page5_scoring_appendix(
         ("Status = enriched",   (fields.get("attom_status") or "") == "enriched"),
         ("Readiness = GREEN",   readiness == "GREEN"),
         ("DTS in [21, 60]",     dts is not None and 21 <= int(dts) <= 60),
-        ("AVM Low >= $300,000", low is not None and float(low) >= 300_000),
+        ("AVM Low >= $100,000", low is not None and float(low) >= 100_000),
         ("Spread <= 18%",       spread_pct is not None and spread_pct <= 0.18),
         ("Underwriting Complete",  uw_pass),
     ]
@@ -3417,7 +3437,7 @@ def _page5_scoring_appendix(
     doc.bullet("Spread Classification: Tight (<=12), Normal (<=18), Wide (>18)")
     doc.bullet("Bid Cap Guidance = Value Low x 0.85")
     doc.bullet("Target bid window = 21 to 60 days before the scheduled sale")
-    doc.bullet("Minimum Value Threshold = $300,000")
+    doc.bullet("Minimum Value Threshold = $100,000")
 
     doc.gap(12)
 
@@ -3425,7 +3445,7 @@ def _page5_scoring_appendix(
     doc.bullet("Property data must be enriched")
     doc.bullet("Screening status must be GREEN")
     doc.bullet("Days-to-sale must be 21 to 60 days")
-    doc.bullet("Value Low must be at least $300,000")
+    doc.bullet("Value Low must be at least $100,000")
     doc.bullet("Value spread must be 18 percent or less")
     doc.bullet("Falco underwriting must be complete")
 
@@ -3515,7 +3535,7 @@ def _normalize_fields(fields: Dict[str, Any]) -> None:
         (fields.get("attom_status") or "") == "enriched"
         and (fields.get("auction_readiness") or "").upper() == "GREEN"
         and dts is not None and 21 <= int(dts) <= 60
-        and low is not None and float(low) >= 300_000
+        and low is not None and float(low) >= 100_000
         and spread_pct is not None and spread_pct <= 0.18
         and uw_ready_flag
     )

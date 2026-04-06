@@ -79,6 +79,25 @@ def _has_prov_field(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> bool
         return False
 
 
+def _prov_field_fresh(
+    cur: sqlite3.Cursor, lead_key: str, field_name: str, max_age_days: int = 30
+) -> bool:
+    """Return True if a non-empty provenance row exists AND is younger than max_age_days."""
+    try:
+        row = cur.execute(
+            """
+            SELECT 1 FROM lead_field_provenance
+            WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
+              AND created_at > datetime('now', ?)
+            LIMIT 1
+            """,
+            (lead_key, field_name, f"-{max_age_days} days"),
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
 def _read_prov_field(cur: sqlite3.Cursor, lead_key: str, field_name: str) -> Optional[str]:
     """Return the latest non-empty provenance value, or None."""
     try:
@@ -353,8 +372,9 @@ def enrich_contact_data(
             fields.setdefault("trustee_phone_public", v)
 
     # ── Tier 3: Owner skip trace ──────────────────────────────────────────────
-    has_owner_phone = _has_prov_field(cur, lead_key, "owner_phone_primary")
-    has_owner_dnc = _has_prov_field(cur, lead_key, "owner_phone_dnc_status")
+    # Re-trace if phone data is older than 30 days (stale numbers erode trust)
+    has_owner_phone = _prov_field_fresh(cur, lead_key, "owner_phone_primary", max_age_days=30)
+    has_owner_dnc = _prov_field_fresh(cur, lead_key, "owner_phone_dnc_status", max_age_days=30)
     if not has_owner_phone or not has_owner_dnc:
         try:
             attom_owner = _attom_owner_context(_latest_attom_raw_json(cur, lead_key))
@@ -521,6 +541,9 @@ def enrich_contact_data(
         )
         fields["contact_ready"] = contact_ready
     except Exception:
+        # Failed to refresh — be conservative: mark as NOT ready rather than
+        # preserving a potentially stale True value.
+        fields["contact_ready"] = False
         summary["errors"] += 1
 
     return summary

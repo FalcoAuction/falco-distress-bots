@@ -159,7 +159,7 @@ def _load_live_vault_lead_keys() -> set[str]:
     return live
 
 
-def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 25) -> Dict[str, Any]:
+def _build_packet_quality_snapshot(con: sqlite3.Connection, limit: int = 200) -> Dict[str, Any]:
     dts_min, dts_max = get_dts_window("RUN_SUMMARY")
     attom_map = _latest_attom_map(con)
     contact_map = _contact_ready_map(con)
@@ -476,6 +476,46 @@ def _build_packet_snapshot(con: sqlite3.Connection, run_id: str) -> Dict[str, An
     }
 
 
+def _build_source_health(
+    con: sqlite3.Connection,
+    run_id: str,
+    stage_results: Iterable[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Detect dead or broken sources by comparing this run's output to history."""
+    health: Dict[str, Any] = {}
+    for result in stage_results:
+        name = result.get("name", "")
+        if not name:
+            continue
+        if not result.get("ok"):
+            health[name] = {"status": "ERROR", "reason": "bot_failed"}
+            continue
+        r = result.get("result") or {}
+        stored = r.get("stored_leads", r.get("stored_ingests", None))
+        if stored is None:
+            continue  # bot didn't report lead counts (enrichment stages, etc.)
+        if stored == 0:
+            # Check if this bot historically produces leads
+            try:
+                hist = con.execute(
+                    "SELECT COUNT(*) FROM ingest_events WHERE source=? AND run_id != ?",
+                    (name, run_id),
+                ).fetchone()[0]
+            except Exception:
+                hist = 0
+            if hist > 0:
+                health[name] = {
+                    "status": "WARN",
+                    "reason": "zero_leads_this_run",
+                    "historical_count": hist,
+                }
+            else:
+                health[name] = {"status": "OK", "reason": "no_history"}
+        else:
+            health[name] = {"status": "OK", "leads": stored}
+    return health
+
+
 def write_run_summary(
     run_id: str,
     utc_start: str,
@@ -484,18 +524,20 @@ def write_run_summary(
     publish_result: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     con = _connect()
+    _stage_results_list = list(stage_results)
     try:
         report = {
             "run_id": run_id,
             "utc_start": utc_start,
             "utc_end": utc_end,
             "db_path": _db_path(),
-            "stage_results": list(stage_results),
+            "stage_results": _stage_results_list,
             "ingest": _build_ingest_snapshot(con, run_id),
             "packets": _build_packet_snapshot(con, run_id),
             "quality": _build_packet_quality_snapshot(con),
             "county_hit_rates": _build_county_hit_rate_snapshot(con),
             "special_situations": _build_special_situations_snapshot(con),
+            "source_health": _build_source_health(con, run_id, _stage_results_list),
             "publish": publish_result or {"attempted": False},
         }
     finally:

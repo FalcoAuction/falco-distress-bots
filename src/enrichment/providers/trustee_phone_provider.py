@@ -102,7 +102,9 @@ class TableTrusteePhoneProvider(TrusteePhoneProvider):
             return None
         norm = _norm_firm(firm_name)
         for token, phone in self._table:
-            if token in norm:
+            # Word-boundary match to prevent false positives:
+            # "wilson" should match "wilson & associates" but not "williamson county"
+            if re.search(r"\b" + re.escape(token) + r"\b", norm):
                 return phone
         return None
 

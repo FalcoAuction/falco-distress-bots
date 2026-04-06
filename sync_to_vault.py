@@ -72,8 +72,20 @@ def load_existing_listings() -> dict[str, dict]:
 
 
 def write_listings(rows: list[dict]) -> None:
+    import tempfile
+
     payload = "\n".join(json.dumps(r) for r in rows)
-    SITE_LISTINGS_FILE.write_text(payload + ("\n" if payload else ""), encoding="utf-8")
+    content = payload + ("\n" if payload else "")
+    # Atomic write: temp file + os.replace prevents readers seeing partial data
+    tmp_fd, tmp_path = tempfile.mkstemp(dir=str(SITE_DATA_DIR), suffix=".tmp")
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, str(SITE_LISTINGS_FILE))
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
 
 
 def write_vault_audit(rows: list[dict]) -> None:
@@ -520,6 +532,7 @@ def main() -> None:
             "trustee_phone_public": latest_prov_text(cur, lead_key, "trustee_phone_public"),
             "owner_phone_primary": latest_prov_text(cur, lead_key, "owner_phone_primary"),
             "owner_phone_secondary": latest_prov_text(cur, lead_key, "owner_phone_secondary"),
+            "owner_phone_dnc_status": latest_prov_text(cur, lead_key, "owner_phone_dnc_status"),
             "notice_phone": latest_prov_text(cur, lead_key, "notice_phone"),
             "fsbo_listing_title": latest_prov_text(cur, lead_key, "fsbo_listing_title"),
             "fsbo_listing_description": latest_prov_text(cur, lead_key, "fsbo_listing_description"),
@@ -573,6 +586,7 @@ def main() -> None:
         display_mortgage_date = enriched_fields.get("mortgage_date_current") or enriched_fields.get("mortgage_date")
         owner_phone_primary = enriched_fields.get("owner_phone_primary") or latest_prov_text(cur, lead_key, "owner_phone_primary")
         owner_phone_secondary = enriched_fields.get("owner_phone_secondary") or latest_prov_text(cur, lead_key, "owner_phone_secondary")
+        owner_phone_dnc_status = enriched_fields.get("owner_phone_dnc_status") or latest_prov_text(cur, lead_key, "owner_phone_dnc_status")
         contact_target_role = enriched_fields.get("contact_target_role") or latest_prov_text(cur, lead_key, "contact_target_role")
         sale_controller_name = enriched_fields.get("sale_controller_contact_name") or latest_prov_text(cur, lead_key, "sale_controller_contact_name")
         sale_controller_phone_primary = enriched_fields.get("sale_controller_phone_primary") or latest_prov_text(cur, lead_key, "sale_controller_phone_primary")
@@ -602,8 +616,10 @@ def main() -> None:
         row = {
             "slug": slug,
             "title": title,
+            "address": address or "",
             "market": market,
             "county": county or "",
+            "state": state or "TN",
             "status": status,
             "distressType": display_distress_type or distress_type or "Distress Opportunity",
             "auctionWindow": auction_window,
@@ -637,6 +653,7 @@ def main() -> None:
             "ownerMail": enriched_fields.get("owner_mail"),
             "ownerPhonePrimary": owner_phone_primary,
             "ownerPhoneSecondary": owner_phone_secondary,
+            "ownerPhoneDncStatus": owner_phone_dnc_status,
             "contactTargetRole": contact_target_role,
             "saleControllerName": sale_controller_name,
             "saleControllerPhonePrimary": sale_controller_phone_primary,

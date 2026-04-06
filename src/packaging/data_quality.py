@@ -1235,7 +1235,10 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     execution_reality = _derive_execution_reality(enriched)
     lane_suggestion = _derive_lane_suggestion(enriched, execution_reality)
     debt_confidence = _debt_confidence(enriched)
-    equity_is_strong_enough = equity_band in {"MED", "HIGH"}
+    # Pre-foreclosure leads bypass equity gate — the investor goes borrower-side
+    # (sub-to, arrears cure), not bidding on value. Scheduled foreclosures still
+    # need MED/HIGH for auction-exit confidence.
+    equity_is_strong_enough = is_pre_foreclosure or equity_band in {"MED", "HIGH"}
     fsbo_actionability = _derive_fsbo_actionability(enriched) if is_fsbo else {}
 
     total_checks = (

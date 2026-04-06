@@ -35,7 +35,12 @@ def get_allowed_counties_base() -> set[str]:
     # WAR-PLAN DEFAULTS (hard): only these counties unless explicitly overridden by env
     raw = os.getenv(
         "FALCO_ALLOWED_COUNTIES",
-        "Davidson,Williamson,Rutherford,Sumner,Wilson,Maury,Montgomery,Cheatham,Robertson,Dickson,Knox,Hamilton,Blount,Sevier,Washington,Cumberland,Putnam,Sullivan,Loudon,Bradley,Anderson,Bedford",
+        "Anderson,Bedford,Blount,Bradley,Campbell,Carter,Cheatham,Claiborne,Cocke,Coffee,"
+        "Cumberland,Davidson,Dickson,Fayette,Franklin,Giles,Grainger,Greene,Grundy,"
+        "Hamblen,Hamilton,Hancock,Hawkins,Jefferson,Johnson,Knox,Lawrence,Lincoln,"
+        "Loudon,Madison,Marion,Marshall,Maury,McMinn,Meigs,Monroe,Montgomery,Morgan,"
+        "Putnam,Rhea,Roane,Robertson,Rutherford,Scott,Sequatchie,Sevier,Shelby,"
+        "Sullivan,Sumner,Tipton,Unicoi,Union,Warren,Washington,Williamson,Wilson",
     )
     vals: list[str] = []
     for part in raw.split(","):

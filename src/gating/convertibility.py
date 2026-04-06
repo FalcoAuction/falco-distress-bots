@@ -3,9 +3,6 @@
 import re as _re
 
 _INSTITUTIONAL_TOKENS = (
-    "mackie wolf",
-    "western progressive",
-    "winchester sellers foster & steele",
     "auction.com",
     "hubzu",
     "xome",
@@ -38,6 +35,13 @@ def is_institutional(payload: dict) -> bool:
 
 
 def apply_convertibility_gate(payload: dict) -> dict:
+    # Upstream distress types (lis pendens, SOT, NOD) expect institutional
+    # involvement — the bank IS the plaintiff.  Don't filter these out;
+    # the contact target is the homeowner, not the institution.
+    _dtype = str(payload.get("distress_type") or "").strip().upper()
+    if _dtype in ("LIS_PENDENS", "SUBSTITUTION_OF_TRUSTEE", "NOD"):
+        return payload
+
     haystacks = [
         _norm(payload.get(k) or "")
         for k in _SCAN_KEYS

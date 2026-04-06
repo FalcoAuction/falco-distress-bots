@@ -52,7 +52,7 @@ def _hydrate_trustee_from_provenance(cur, lead_key: str) -> dict:
             SELECT field_value_text
             FROM lead_field_provenance
             WHERE lead_key=? AND field_name=? AND field_value_text IS NOT NULL
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, prov_id DESC
             LIMIT 1
             """,
             (lead_key, k),
@@ -519,7 +519,7 @@ def run() -> Dict[str, int]:
             fields.get("attom_status") == "enriched"
             and _readiness == "GREEN"
             and _dts_val is not None and 21 <= int(_dts_val) <= 60
-            and _avm_low is not None and float(_avm_low) >= 300_000
+            and _avm_low is not None and float(_avm_low) >= 100_000
             and _spread_pct is not None and _spread_pct <= 0.18
         )
 

@@ -46,7 +46,7 @@ def score_equity(avm_low: Optional[float], avm_high: Optional[float]) -> (int, s
 
     if spread < 0.08:
         return 18, "HIGH"
-    if spread < 0.15:
+    if spread < 0.25:
         return 12, "MED"
     return 6, "LOW"
 
@@ -275,7 +275,7 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
             sale_date = date.fromisoformat(sale_date_raw)
             dts = (sale_date - today).days
 
-        dts_score = score_dts(dts) if dts is not None else 8
+        dts_score = score_dts(dts) if dts is not None else 0
         equity_score, equity_band = score_equity(r["avm_low"], r["avm_high"])
         property_detail = _extract_property_detail(r["attom_raw_json"])
         owner_mortgage = _extract_owner_mortgage(r["attom_raw_json"])

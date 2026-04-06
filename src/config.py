@@ -33,28 +33,66 @@ GLOBAL_DTS_WINDOW = (21, 90)
 # Default allowed counties if env not set and TARGET_COUNTIES empty.
 # (Bots treat this as "base county names" without "County")
 DEFAULT_ALLOWED_COUNTIES_BASE = [
-    "Davidson",
-    "Rutherford",
-    "Sumner",
-    "Williamson",
-    "Wilson",
-    "Maury",
-    "Montgomery",
-    "Cheatham",
-    "Robertson",
-    "Dickson",
-    "Knox",
-    "Hamilton",
-    "Blount",
-    "Sevier",
-    "Washington",
-    "Cumberland",
-    "Putnam",
-    "Sullivan",
-    "Loudon",
-    "Bradley",
+    # --- Original 22 (Middle + East TN metro) ---
     "Anderson",
     "Bedford",
+    "Blount",
+    "Bradley",
+    "Cheatham",
+    "Cumberland",
+    "Davidson",
+    "Dickson",
+    "Hamilton",
+    "Knox",
+    "Loudon",
+    "Maury",
+    "Montgomery",
+    "Putnam",
+    "Robertson",
+    "Rutherford",
+    "Sevier",
+    "Sullivan",
+    "Sumner",
+    "Washington",
+    "Williamson",
+    "Wilson",
+    # --- Expansion: West TN ---
+    "Shelby",
+    "Madison",
+    "Tipton",
+    "Fayette",
+    # --- Expansion: Middle TN fill ---
+    "Coffee",
+    "Franklin",
+    "Giles",
+    "Grundy",
+    "Lawrence",
+    "Lincoln",
+    "Marion",
+    "Marshall",
+    "Sequatchie",
+    "Warren",
+    # --- Expansion: East TN fill ---
+    "Campbell",
+    "Carter",
+    "Claiborne",
+    "Cocke",
+    "Grainger",
+    "Greene",
+    "Hamblen",
+    "Hancock",
+    "Hawkins",
+    "Jefferson",
+    "Johnson",
+    "McMinn",
+    "Meigs",
+    "Monroe",
+    "Morgan",
+    "Rhea",
+    "Roane",
+    "Scott",
+    "Unicoi",
+    "Union",
 ]
 
 
@@ -99,6 +137,12 @@ TNFN_DTS_WINDOW = (21, 90)
 # ============================================================
 SEED_URLS_COUNTY_TAX = []
 TAXPAGES_DTS_WINDOW = (0, 365)
+
+
+# ============================================================
+# PROPSTREAM (CSV export ingestion)
+# ============================================================
+PROPSTREAM_DTS_WINDOW = (0, 180)
 
 
 # ============================================================

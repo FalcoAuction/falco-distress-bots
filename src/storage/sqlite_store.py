@@ -330,7 +330,11 @@ def upsert_lead(
                     address       = excluded.address,
                     county        = excluded.county,
                     state         = excluded.state,
-                    distress_type = COALESCE(excluded.distress_type, leads.distress_type),
+                    distress_type = CASE
+                        WHEN excluded.distress_type IS NULL THEN leads.distress_type
+                        WHEN leads.distress_type IS NULL THEN excluded.distress_type
+                        ELSE excluded.distress_type
+                    END,
                     last_seen_at  = excluded.last_seen_at
                 """,
                 (lead_key, address, county_norm or "", state, now, now, distress_type),
