@@ -725,6 +725,24 @@ def main() -> None:
     except Exception as exc:
         print(f"operator_snapshot_refresh_failed={exc}")
 
+    # Push listings to Supabase via the falco-site sync endpoint
+    _sync_url = os.environ.get("FALCO_SITE_SYNC_URL", "").strip()
+    _sync_secret = os.environ.get("FALCO_APPROVAL_SECRET", "").strip()
+    if _sync_url and _sync_secret:
+        try:
+            import requests as _req
+            _resp = _req.post(
+                _sync_url,
+                json={"secret": _sync_secret},
+                timeout=30,
+            )
+            _sj = _resp.json() if _resp.ok else {}
+            print(f"supabase_sync=ok synced={_sj.get('synced', '?')} errors={_sj.get('errors', '?')}")
+        except Exception as _se:
+            print(f"supabase_sync=failed error={_se}")
+    else:
+        print("supabase_sync=skipped (FALCO_SITE_SYNC_URL or FALCO_APPROVAL_SECRET not set)")
+
     print(f"synced_listings={len(out_rows)}")
     print(f"copied_packets={copied}")
     print(f"skipped_no_packet={skipped_no_packet}")
