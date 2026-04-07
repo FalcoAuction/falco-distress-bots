@@ -9,8 +9,8 @@ _INSTITUTIONAL_TOKENS = (
 )
 
 _MIXED_TOKENS = (
-    "burr & forman",
-    "rochelle mcculloch",
+    # Cleared — these are substitute trustee law firms, not institutional
+    # auction platforms. Borrower-side control is still viable.
 )
 
 _SCAN_KEYS = (
