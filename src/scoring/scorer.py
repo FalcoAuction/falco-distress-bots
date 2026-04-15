@@ -451,45 +451,37 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
         )
         inside_green_window = dts is not None and 21 <= dts <= 60
 
+        # ── Readiness tiers (investor-facing action labels) ──────────
+        # READY_TO_CALL: has phone + AVM + debt + active sale date + not expired
+        # REVIEW_FIRST:  has phone + AVM + not expired, OR pre-foreclosure with phone
+        # EARLY_STAGE:   pre-foreclosure + has phone or mailing, no sale date yet
+        # MONITOR:       missing phone, missing enrichment, or expired
+
+        has_phone = contact_ready
+        not_expired = dts is None or dts >= 0
+        has_sale_date = dts is not None
+
         if (
-            total_score >= 80
+            has_phone
             and has_valuation
-            and has_owner_pair
-            and has_debt_pair
-            and execution_reality["contact_path_quality"] != "THIN"
-            and inside_green_window
-            and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
-            and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
-            and execution_reality["lender_control_intensity"] != "HIGH"
-            and execution_reality["influenceability"] == "HIGH"
-            and execution_reality["workability_band"] == "STRONG"
-            and execution_reality["execution_posture"] != "NEEDS MORE CONTROL CLARITY"
+            and (has_debt_pair or has_debt_proxy)
+            and has_sale_date
+            and not_expired
         ):
-            readiness = "GREEN"
+            readiness = "READY_TO_CALL"
         elif (
-            total_score >= 55
+            has_phone
             and has_valuation
-            and dts is not None
-            and dts <= 75
-            and execution_reality["lender_control_intensity"] != "HIGH"
-            and execution_reality["workability_band"] != "LIMITED"
+            and not_expired
         ):
-            readiness = "YELLOW"
+            readiness = "REVIEW_FIRST"
         elif (
             is_pre_foreclosure
-            and total_score >= 60
-            and has_owner_pair
-            and (has_debt_pair or has_debt_proxy)
-            and execution_reality["contact_path_quality"] != "THIN"
-            and execution_reality["control_party"] != "UNCLEAR"
-            and execution_reality["owner_agency"] in {"HIGH", "MEDIUM"}
-            and execution_reality["intervention_window"] in {"WIDE", "MODERATE"}
-            and execution_reality["influenceability"] in {"HIGH", "MEDIUM"}
-            and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
+            and (has_phone or has_owner_pair)
         ):
-            readiness = "PARTIAL"
+            readiness = "EARLY_STAGE"
         else:
-            readiness = "RED"
+            readiness = "MONITOR"
 
         _scored_at = utc_now_iso()
         conn.execute("""

@@ -354,7 +354,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
 
     if county in _PREFERRED_COUNTIES:
         return bool(
-            readiness in {"GREEN", "YELLOW"}
+            readiness in {"GREEN", "YELLOW", "READY_TO_CALL", "REVIEW_FIRST"}
             and equity_band in {"MED", "HIGH"}
             and debt_confidence == "FULL"
             and sale_status_contact
@@ -368,7 +368,7 @@ def _scheduled_live_ready(quality: dict, row: dict) -> bool:
         )
 
     return bool(
-        readiness == "GREEN"
+        readiness in {"GREEN", "READY_TO_CALL"}
         and equity_band in {"MED", "HIGH"}
         and debt_confidence == "FULL"
         and sale_status_contact
@@ -390,7 +390,7 @@ def _vault_sort_key(row: dict) -> tuple:
         0 if county in _PREFERRED_COUNTIES else 1,
         0 if bool(row.get("topTierReady")) else 1,
         0 if bool(row.get("prefcLiveQuality")) else 1,
-        0 if str(row.get("auctionReadiness") or "").strip().upper() == "GREEN" else 1,
+        0 if str(row.get("auctionReadiness") or "").strip().upper() in {"GREEN", "READY_TO_CALL"} else 1,
         0 if str(row.get("equityBand") or "").strip().upper() in {"HIGH", "MED"} else 1,
         0 if str(row.get("contactPathQuality") or "").strip().upper() in {"STRONG", "GOOD"} else 1,
         0 if str(row.get("workabilityBand") or "").strip().upper() == "STRONG" else 1,
@@ -427,7 +427,7 @@ def main() -> None:
             first_seen_at,
             last_seen_at
         FROM leads
-        WHERE COALESCE(auction_readiness, '') IN ('GREEN', 'YELLOW', 'PARTIAL')
+        WHERE COALESCE(auction_readiness, '') IN ('GREEN', 'YELLOW', 'PARTIAL', 'READY_TO_CALL', 'REVIEW_FIRST', 'EARLY_STAGE')
            OR sale_status = 'pre_foreclosure'
            OR (
                 sale_status = 'scheduled'
@@ -437,8 +437,11 @@ def main() -> None:
         ORDER BY
             CASE WHEN sale_status = 'pre_foreclosure' THEN 1 ELSE 0 END,
             CASE auction_readiness
+                WHEN 'READY_TO_CALL' THEN 1
                 WHEN 'GREEN' THEN 1
+                WHEN 'REVIEW_FIRST' THEN 2
                 WHEN 'YELLOW' THEN 2
+                WHEN 'EARLY_STAGE' THEN 3
                 WHEN 'PARTIAL' THEN 3
                 ELSE 4
             END,
@@ -595,9 +598,9 @@ def main() -> None:
         published_readiness = readiness
         if is_fsbo:
             published_readiness = str(quality.get("fsbo_actionability_band") or "REVIEW")
-        if readiness == "GREEN" and not quality["top_tier_ready"]:
-            published_readiness = "YELLOW"
-        if sale_status == "pre_foreclosure" and published_readiness not in {"GREEN", "YELLOW", "PARTIAL"}:
+        if readiness in {"GREEN", "READY_TO_CALL"} and not quality["top_tier_ready"]:
+            published_readiness = "REVIEW_FIRST"
+        if sale_status == "pre_foreclosure" and published_readiness not in {"GREEN", "YELLOW", "PARTIAL", "READY_TO_CALL", "REVIEW_FIRST", "EARLY_STAGE"}:
             published_readiness = "PARTIAL"
 
         packet_file_name = f"{slug}.pdf"
