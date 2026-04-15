@@ -35,12 +35,16 @@ def get_allowed_counties_base() -> set[str]:
     # WAR-PLAN DEFAULTS (hard): only these counties unless explicitly overridden by env
     raw = os.getenv(
         "FALCO_ALLOWED_COUNTIES",
-        "Anderson,Bedford,Blount,Bradley,Campbell,Carter,Cheatham,Claiborne,Cocke,Coffee,"
-        "Cumberland,Davidson,Dickson,Fayette,Franklin,Giles,Grainger,Greene,Grundy,"
-        "Hamblen,Hamilton,Hancock,Hawkins,Jefferson,Johnson,Knox,Lawrence,Lincoln,"
-        "Loudon,Madison,Marion,Marshall,Maury,McMinn,Meigs,Monroe,Montgomery,Morgan,"
-        "Putnam,Rhea,Roane,Robertson,Rutherford,Scott,Sequatchie,Sevier,Shelby,"
-        "Sullivan,Sumner,Tipton,Unicoi,Union,Warren,Washington,Williamson,Wilson",
+        "Anderson,Bedford,Benton,Bledsoe,Blount,Bradley,Campbell,Cannon,Carroll,Carter,"
+        "Cheatham,Chester,Claiborne,Clay,Cocke,Coffee,Crockett,Cumberland,Davidson,"
+        "Decatur,DeKalb,Dickson,Dyer,Fayette,Fentress,Franklin,Gibson,Giles,Grainger,"
+        "Greene,Grundy,Hamblen,Hamilton,Hancock,Hardeman,Hardin,Hawkins,Haywood,"
+        "Henderson,Henry,Hickman,Houston,Humphreys,Jackson,Jefferson,Johnson,Knox,"
+        "Lake,Lauderdale,Lawrence,Lewis,Lincoln,Loudon,Macon,Madison,Marion,Marshall,"
+        "Maury,McMinn,McNairy,Meigs,Monroe,Montgomery,Moore,Morgan,Obion,Overton,"
+        "Perry,Pickett,Polk,Putnam,Rhea,Roane,Robertson,Rutherford,Scott,Sequatchie,"
+        "Sevier,Shelby,Smith,Stewart,Sullivan,Sumner,Tipton,Trousdale,Unicoi,Union,"
+        "Van Buren,Warren,Washington,Wayne,Weakley,White,Williamson,Wilson",
     )
     vals: list[str] = []
     for part in raw.split(","):
