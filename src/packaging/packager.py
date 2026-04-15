@@ -517,7 +517,7 @@ def run() -> Dict[str, int]:
         _readiness  = (fields.get("auction_readiness") or "").upper()
         fields["diamond_proxy"] = bool(
             fields.get("attom_status") == "enriched"
-            and _readiness == "GREEN"
+            and _readiness in ("GREEN", "READY_TO_CALL")
             and _dts_val is not None and 21 <= int(_dts_val) <= 60
             and _avm_low is not None and float(_avm_low) >= 100_000
             and _spread_pct is not None and _spread_pct <= 0.18
@@ -651,12 +651,12 @@ def run() -> Dict[str, int]:
             continue
         # LP leads without AVM proceed but default to YELLOW readiness pending enrichment
         if _is_lp and not _has_avm:
-            fields.setdefault("auction_readiness", "YELLOW")
+            fields.setdefault("auction_readiness", "REVIEW_FIRST")
         if _is_pre_foreclosure:
-            if str(fields.get("auction_readiness") or "").upper() == "RED":
-                fields["auction_readiness"] = "PARTIAL"
+            if str(fields.get("auction_readiness") or "").upper() in ("RED", "MONITOR"):
+                fields["auction_readiness"] = "EARLY_STAGE"
             else:
-                fields.setdefault("auction_readiness", "PARTIAL")
+                fields.setdefault("auction_readiness", "EARLY_STAGE")
 
         # HARD GEO GATE (WAR-PLAN)
         _county_gate = (fields.get("county") or "").strip()
@@ -726,11 +726,11 @@ def run() -> Dict[str, int]:
         if _is_fsbo:
             actionability_band = str(quality.get("fsbo_actionability_band") or "").upper()
             if actionability_band == "ACTIONABLE_NOW":
-                fields["auction_readiness"] = "GREEN"
+                fields["auction_readiness"] = "READY_TO_CALL"
             elif actionability_band == "REVIEW":
-                fields["auction_readiness"] = "YELLOW"
+                fields["auction_readiness"] = "REVIEW_FIRST"
             else:
-                fields["auction_readiness"] = "PARTIAL"
+                fields["auction_readiness"] = "EARLY_STAGE"
 
         if quality["vault_publish_ready"] or quality.get("pre_foreclosure_review_ready"):
             vault_ready += 1

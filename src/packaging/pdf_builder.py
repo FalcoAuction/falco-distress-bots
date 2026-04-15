@@ -454,8 +454,8 @@ def _draw_val_bar(doc: _Doc, low: float, mid: float, high: float) -> None:
 # ─── KPI tile row ─────────────────────────────────────────────────────────────
 
 _READINESS_LABELS: Dict[str, str] = {
-    "GREEN":     "GREEN",
-    "YELLOW":    "PARTIAL",
+    "GREEN":     "GREEN", "READY_TO_CALL": "READY TO CALL",
+    "YELLOW":    "PARTIAL", "REVIEW_FIRST": "REVIEW FIRST",
     "RED":       "RED",
     "UW_READY":  "UNDERWRITTEN",
     "NOT_READY": "NEEDS UW",
@@ -504,7 +504,7 @@ def _draw_kpi_tiles(doc: _Doc, fields: Dict[str, Any]) -> None:
 
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
     diamond   = bool(fields.get("diamond_proxy"))
-    rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
+    rc        = {"GREEN": _GREEN, "READY_TO_CALL": _GREEN, "YELLOW": _AMBER, "REVIEW_FIRST": _AMBER, "RED": _RED, "MONITOR": _RED}.get(readiness, _GRAY)
     tiles = [
         ("Days Until Scheduled Sale", _val(fields.get("dts_days"), "—"), _SLATE),
         ("Readiness",    _readiness_label(readiness),                   rc),
@@ -668,8 +668,8 @@ def _draw_p1_risk_flags(doc: _Doc, fields: Dict[str, Any]) -> None:
         flags.append(("Property detail record unavailable — physical characteristics unverified.", "MED"))
 
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
-    if readiness != "GREEN":
-        sev = "MED" if readiness in ("YELLOW", "UW_READY") else "HIGH"
+    if readiness not in ("GREEN", "READY_TO_CALL"):
+        sev = "MED" if readiness in ("YELLOW", "REVIEW_FIRST", "UW_READY") else "HIGH"
         flags.append((f"Readiness: {_readiness_label(readiness)} — diamond criteria not yet met.", sev))
 
     dts = fields.get("dts_days")
@@ -815,7 +815,7 @@ def _risk_flags(fields: Dict[str, Any]) -> List[Tuple[str, str]]:
             "HIGH",
         ))
     rd = (fields.get("auction_readiness") or "").upper()
-    if rd not in ("GREEN",):
+    if rd not in ("GREEN", "READY_TO_CALL"):
         _rd_label = _readiness_label(rd) if rd else "UNKNOWN"
         flags.append((
             f"Readiness: {_rd_label} — diamond criteria not yet met.",
@@ -848,9 +848,9 @@ def _deterministic_narratives(fields: Dict[str, Any]) -> Dict[str, str]:
 
     score_txt    = f"{score}/100" if score is not None else "unscored"
     dts_txt      = f"{dts} days" if dts is not None else "timeline pending"
-    readiness_adj = {"GREEN": "favorable", "YELLOW": "moderate", "RED": "elevated-risk", "UW_READY": "underwritten"}.get(readiness, "unclassified")
+    readiness_adj = {"GREEN": "favorable", "READY_TO_CALL": "favorable", "YELLOW": "moderate", "REVIEW_FIRST": "moderate", "RED": "elevated-risk", "MONITOR": "elevated-risk", "UW_READY": "underwritten"}.get(readiness, "unclassified")
     spread_conf   = {"TIGHT": "strong", "NORMAL": "moderate", "WIDE": "limited"}.get(spread_band, "unknown")
-    bid_adj       = {"GREEN": "competitive", "YELLOW": "moderate", "RED": "limited"}.get(readiness, "unknown")
+    bid_adj       = {"GREEN": "competitive", "READY_TO_CALL": "competitive", "YELLOW": "moderate", "REVIEW_FIRST": "moderate", "RED": "limited", "MONITOR": "limited"}.get(readiness, "unknown")
 
     exec_summary = (
         f"Subject property at {loc} presents a {readiness_adj} auction profile "
@@ -884,7 +884,7 @@ def _deterministic_narratives(fields: Dict[str, Any]) -> Dict[str, str]:
         risk_items.append(
             f"AVM spread of {_fmt_pct(spread_pct)} exceeds 18% — low valuation confidence"
         )
-    if readiness not in ("GREEN",):
+    if readiness not in ("GREEN", "READY_TO_CALL"):
         risk_items.append(f"screening status is {_readiness_label(readiness)} - priority criteria not yet met")
     if low is not None and float(low) < 150_000:
         risk_items.append("estimated value below $150k — verify market depth and institutional buyer pool")
@@ -3354,7 +3354,7 @@ def _page5_scoring_appendix(
     doc.page_header("Screening Appendix")
 
     readiness = (fields.get("auction_readiness") or "UNKNOWN").upper()
-    rc        = {"GREEN": _GREEN, "YELLOW": _AMBER, "RED": _RED}.get(readiness, _GRAY)
+    rc        = {"GREEN": _GREEN, "READY_TO_CALL": _GREEN, "YELLOW": _AMBER, "REVIEW_FIRST": _AMBER, "RED": _RED, "MONITOR": _RED}.get(readiness, _GRAY)
 
     doc.section("Screening Summary")
     doc.kv("Screening Status",       _readiness_label(readiness), vc=rc, bold_v=True)
@@ -3371,7 +3371,7 @@ def _page5_scoring_appendix(
     uw_pass = int(fields.get("uw_ready") or 0) == 1
     gates: List[Tuple[str, bool]] = [
         ("Status = enriched",   (fields.get("attom_status") or "") == "enriched"),
-        ("Readiness = GREEN",   readiness == "GREEN"),
+        ("Readiness = Ready to Call",   readiness in ("GREEN", "READY_TO_CALL")),
         ("DTS in [21, 60]",     dts is not None and 21 <= int(dts) <= 60),
         ("AVM Low >= $100,000", low is not None and float(low) >= 100_000),
         ("Spread <= 18%",       spread_pct is not None and spread_pct <= 0.18),
@@ -3533,7 +3533,7 @@ def _normalize_fields(fields: Dict[str, Any]) -> None:
 
     fields["diamond_proxy"] = bool(
         (fields.get("attom_status") or "") == "enriched"
-        and (fields.get("auction_readiness") or "").upper() == "GREEN"
+        and (fields.get("auction_readiness") or "").upper() in ("GREEN", "READY_TO_CALL")
         and dts is not None and 21 <= int(dts) <= 60
         and low is not None and float(low) >= 100_000
         and spread_pct is not None and spread_pct <= 0.18

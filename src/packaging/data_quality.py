@@ -1260,7 +1260,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
     top_tier_ready = (
         len(vault_blockers) == 0
         and not is_fsbo
-        and str(enriched.get("auction_readiness") or "").upper() == "GREEN"
+        and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "READY_TO_CALL"}
         and _has_actionable_outreach(enriched)
         and execution_reality["contact_path_quality"] != "THIN"
         and execution_reality["control_party"] != "UNCLEAR"
@@ -1321,7 +1321,7 @@ def assess_packet_data(fields: Dict[str, Any]) -> Dict[str, Any]:
         and execution_reality["influenceability"] == "HIGH"
         and execution_reality["execution_posture"] in {"OWNER ACTIONABLE", "MIXED / OPERATOR REVIEW"}
         and execution_reality["workability_band"] in {"STRONG", "MODERATE"}
-        and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "YELLOW", "PARTIAL"}
+        and str(enriched.get("auction_readiness") or "").upper() in {"GREEN", "YELLOW", "PARTIAL", "READY_TO_CALL", "REVIEW_FIRST", "EARLY_STAGE"}
     )
     weak_live_prefc_reasons: List[str] = []
     if is_pre_foreclosure:
