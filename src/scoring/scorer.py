@@ -457,7 +457,16 @@ def _score_rows(conn: sqlite3.Connection, rows, run_id: str):
         # EARLY_STAGE:   pre-foreclosure + has phone or mailing, no sale date yet
         # MONITOR:       missing phone, missing enrichment, or expired
 
-        has_phone = contact_ready
+        # Check actual phone presence in provenance, not just the contact_ready flag.
+        # contact_ready can be 0 for entity-owned properties (LLCs, trusts) even
+        # when a phone exists — but an investor can still call that number.
+        _phone_check = conn.execute(
+            "SELECT 1 FROM lead_field_provenance WHERE lead_key=? "
+            "AND field_name IN ('owner_phone_primary', 'sale_controller_phone_primary', 'trustee_phone_public', 'notice_phone') "
+            "AND field_value_text IS NOT NULL AND field_value_text != '' LIMIT 1",
+            (r["lead_key"],)
+        ).fetchone()
+        has_phone = bool(_phone_check) or contact_ready
         not_expired = dts is None or dts >= 0
         has_sale_date = dts is not None
 
