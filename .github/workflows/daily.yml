@@ -46,18 +46,11 @@ jobs:
       - name: Run Falco pipeline
         run: python -m src.run_all
 
-      - name: Sync enriched leads → falco.llc Supabase
-        # Pushes the latest distress-data + ATTOM enrichment up to the
-        # /admin lead inbox so the closer can see the full TN distress queue,
-        # not just form submissions. Idempotent (upserts on pipeline_lead_key).
-        # Continues even if it fails — we don't want a sync hiccup to fail
-        # the whole pipeline.
-        if: always()
-        continue-on-error: true
-        env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-        run: python -m src.sync.site_sync --limit 200
+      # NOTE: site_sync.py is intentionally NOT run here in CI.
+      # The bot pipeline doesn't persist SQLite state across CI runs
+      # (data/falco.db is local-dev only), so there's nothing for the
+      # sync to read. Patrick runs `python -m src.sync.site_sync` locally
+      # after his local pipeline run, same pattern as sync_to_vault.py.
 
       - name: Upload run status artifacts
         if: always()
