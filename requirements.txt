@@ -2,3 +2,4 @@ requests==2.32.3
 beautifulsoup4==4.12.3
 python-dateutil==2.9.0.post0
 reportlab==4.2.5
+supabase>=2.7.0
