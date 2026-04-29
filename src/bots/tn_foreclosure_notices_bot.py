@@ -6,13 +6,7 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
-from ..notion_client import (
-    build_properties,
-    create_lead,
-    update_lead,
-    find_existing_by_lead_key,
-    NOTION_WRITE_ENABLED,
-)
+from ..storage.supabase_store import upsert_lead, find_existing_by_lead_key
 from ..gating.convertibility import apply_convertibility_gate
 from ..scoring import days_to_sale
 from ..settings import (
@@ -346,21 +340,13 @@ def run():
             }
 
             payload = apply_convertibility_gate(payload)
-            props = build_properties(payload)
 
             existing_id = find_existing_by_lead_key(lead_key)
+            result = upsert_lead(payload)
             if existing_id:
-                update_lead(existing_id, props)
-                if NOTION_WRITE_ENABLED:
-                    updated += 1
-                else:
-                    would_update += 1
+                updated += 1 if result == "inserted" else 0
             else:
-                create_lead(props)
-                if NOTION_WRITE_ENABLED:
-                    created += 1
-                else:
-                    would_create += 1
+                created += 1 if result == "inserted" else 0
 
             filtered_in += 1
 

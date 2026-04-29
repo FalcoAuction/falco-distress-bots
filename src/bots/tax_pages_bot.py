@@ -6,7 +6,7 @@ from ..utils import (
     extract_contact, extract_address, extract_trustee_or_attorney,
     make_lead_key
 )
-from ..notion_client import build_properties, create_lead, update_lead, find_existing_by_lead_key
+from ..storage.supabase_store import upsert_lead, find_existing_by_lead_key
 from ..scoring import days_to_sale, detect_risk_flags, triage, score_v2, label
 
 
@@ -46,24 +46,19 @@ def run():
         title = f"{distress_type} ({status}) ({county or 'TN'})"
         lead_key = make_lead_key(distress_type, county, sale_date, address, trustee, url)
 
-        props = build_properties(
-            title=title,
-            source="County Page",
-            distress_type=distress_type,
-            county=county,
-            address=address,
-            sale_date_iso=sale_date,
-            trustee_attorney=trustee,
-            contact_info=contact if contact else reason,
-            raw_snippet=text[:2000],
-            url=url,
-            score=score,
-            status=status,
-            lead_key=lead_key,
-        )
-
-        existing_id = find_existing_by_lead_key(lead_key)
-        if existing_id:
-            update_lead(existing_id, props)
-        else:
-            create_lead(props)
+        payload = {
+            "title": title,
+            "source": "County Page",
+            "distress_type": distress_type,
+            "county": county,
+            "address": address,
+            "sale_date_iso": sale_date,
+            "trustee_attorney": trustee,
+            "contact_info": contact if contact else reason,
+            "raw_snippet": text[:2000],
+            "url": url,
+            "score": score,
+            "status": status,
+            "lead_key": lead_key,
+        }
+        upsert_lead(payload)

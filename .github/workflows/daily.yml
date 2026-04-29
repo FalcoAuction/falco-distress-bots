@@ -10,26 +10,19 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ===== Bot scrapers + enrichment =====
-      FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
-      FALCO_BATCHDATA_API_KEY: ${{ secrets.FALCO_BATCHDATA_API_KEY }}
-      NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
-      NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-
-      # ===== Supabase sync (powers /admin + dialer) =====
+      # ===== Bot scrapers (write directly to Supabase) =====
+      # Bots ingest leads from public sources and upsert into the
+      # falco-site Supabase homeowner_requests table. The dialer + /admin
+      # read this live. Notion was removed 2026-04-29.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
-      # ===== Cost control =====
-      FALCO_ENRICH_DEBUG: "1"
-      FALCO_MAX_ENRICH_PER_RUN: "10"
-      FALCO_MAX_BATCHDATA_ENRICH_PER_RUN: "20"
-      FALCO_ENRICH_NO_RESULT_COOLDOWN_HOURS: "72"
-      FALCO_MAX_COMPS_PER_RUN: "6"
-      FALCO_COMPS_RADIUS_MILES: "1.0"
-      FALCO_COMPS_LOOKBACK_DAYS: "180"
-      FALCO_TIER2_MIN_EQUITY_PCT: "0.15"
-      FALCO_TIER2_MIN_AVM_CONF: "60"
+      # ===== Optional enrichment APIs (currently unused in CI) =====
+      # Stage 2/3 enrichment is gated off by default; runs via Vercel cron
+      # at /api/cron/refresh-dialer. Set FALCO_ENABLE_LEGACY_STAGES=1 to
+      # opt back in to running them here.
+      FALCO_BATCHDATA_API_KEY: ${{ secrets.FALCO_BATCHDATA_API_KEY }}
+      FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
 
     steps:
       - name: Checkout repo
@@ -40,47 +33,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      # ---------------------------------------------------------------
-      # Restore SQLite state from prior run.
-      # The bots track scrape history + enrichment cache + dedup keys
-      # in data/falco.db. Without persistence between runs, every run
-      # would start fresh and re-do work it already did.
-      #
-      # Using actions/cache: key is stable so each run reads the most
-      # recent cache. New writes save a fresh cache on success.
-      # ---------------------------------------------------------------
-      - name: Restore SQLite state
-        id: cache-sqlite
-        uses: actions/cache@v4
-        with:
-          path: data/falco.db
-          # Cache key includes the day so we get a new save daily but
-          # the restore-keys fallback grabs whatever was most recent.
-          key: falco-sqlite-${{ github.run_id }}
-          restore-keys: |
-            falco-sqlite-
-
-      - name: Ensure data dir exists
-        run: mkdir -p data
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Run Falco pipeline (scrape + enrich + score)
+      - name: Run Falco pipeline (bot scrapers \u2192 Supabase)
         run: python -m src.run_all
-
-      # ---------------------------------------------------------------
-      # Sync to Supabase: push fresh bot leads up to homeowner_requests
-      # so they appear in the dialer queue and /admin Pipeline tab.
-      # Idempotent — upserts on pipeline_lead_key.
-      # Skipped if Supabase secrets aren't configured.
-      # ---------------------------------------------------------------
-      - name: Sync to Supabase
-        if: env.SUPABASE_SERVICE_ROLE_KEY != ''
-        run: python -m src.sync.site_sync
-        continue-on-error: true
 
       - name: Upload run status artifacts
         if: always()
@@ -93,12 +52,3 @@ jobs:
             out/reports/conversion_lane.json
           if-no-files-found: ignore
           retention-days: 30
-
-      - name: Save SQLite state for next run
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: falco-sqlite-snapshot-${{ github.run_id }}
-          path: data/falco.db
-          if-no-files-found: warn
-          retention-days: 14

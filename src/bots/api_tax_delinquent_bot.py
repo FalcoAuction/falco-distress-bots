@@ -3,13 +3,7 @@ import os
 
 from src.gating.convertibility import apply_convertibility_gate
 from ..utils import make_lead_key
-from ..notion_client import (
-    build_properties,
-    create_lead,
-    update_lead,
-    find_existing_by_lead_key,
-    NOTION_WRITE_ENABLED,
-)
+from ..storage.supabase_store import upsert_lead, find_existing_by_lead_key
 
 
 def _normalize_gate_decision(decision, payload):
@@ -98,20 +92,12 @@ def run():
         seen_in_run.add(lead_key)
         dedupe_kept += 1
 
-        props = build_properties(payload)
         existing = find_existing_by_lead_key(payload["lead_key"])
+        result = upsert_lead(payload)
         if existing:
-            update_lead(existing, props)
-            if NOTION_WRITE_ENABLED:
-                updated += 1
-            else:
-                would_update += 1
+            updated += 1 if result == "inserted" else 0
         else:
-            create_lead(props)
-            if NOTION_WRITE_ENABLED:
-                created += 1
-            else:
-                would_create += 1
+            created += 1 if result == "inserted" else 0
 
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
     print(
