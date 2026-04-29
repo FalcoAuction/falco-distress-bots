@@ -341,12 +341,11 @@ def run():
 
             payload = apply_convertibility_gate(payload)
 
-            existing_id = find_existing_by_lead_key(lead_key)
             result = upsert_lead(payload)
-            if existing_id:
-                updated += 1 if result == "inserted" else 0
-            else:
-                created += 1 if result == "inserted" else 0
+            if result == "inserted":
+                created += 1
+            elif result == "updated":
+                updated += 1
 
             filtered_in += 1
 

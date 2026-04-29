@@ -169,10 +169,14 @@ def _build_row(payload: Dict[str, Any]) -> Dict[str, Any]:
 def upsert_lead(payload: Dict[str, Any]) -> str:
     """Upsert a single bot-discovered lead into homeowner_requests.
 
-    Returns a status string for caller logging:
-        "inserted" - row was newly created (or updated; we can't easily
-                     distinguish without a separate read, and it doesn't
-                     matter for bot summaries)
+    The unique index on pipeline_lead_key is PARTIAL
+    (WHERE pipeline_lead_key IS NOT NULL), which Supabase's upsert API
+    can't target via on_conflict. So we do explicit existence-check then
+    insert-or-update.
+
+    Returns:
+        "inserted" - new row created
+        "updated"  - existing row updated
         "noop"     - Supabase not configured; no write performed
         "error"    - write failed (logged but not raised)
     """
@@ -186,21 +190,32 @@ def upsert_lead(payload: Dict[str, Any]) -> str:
         print(f"[supabase_store] payload validation error: {e}")
         return "error"
 
+    lead_key = row["pipeline_lead_key"]
+
     try:
-        # Upsert on pipeline_lead_key. The partial unique index requires
-        # we include WHERE pipeline_lead_key IS NOT NULL — supabase-py
-        # handles this via on_conflict.
-        result = (
+        # Look up by pipeline_lead_key to decide insert vs update.
+        existing = (
             client.table(SUPABASE_TABLE)
-            .upsert(row, on_conflict="pipeline_lead_key")
+            .select("id")
+            .eq("pipeline_lead_key", lead_key)
+            .eq("source", "bot")
+            .limit(1)
             .execute()
         )
-        if hasattr(result, "data") and result.data:
+        rows = getattr(existing, "data", None) or []
+        if rows:
+            # UPDATE path — don't reset submitted_at on existing rows
+            update_payload = {k: v for k, v in row.items() if k != "submitted_at"}
+            client.table(SUPABASE_TABLE).update(update_payload).eq(
+                "id", rows[0]["id"]
+            ).execute()
+            return "updated"
+        else:
+            # INSERT path
+            client.table(SUPABASE_TABLE).insert(row).execute()
             return "inserted"
-        return "inserted"
     except Exception as e:
-        # Don't crash the bot on a single bad row — log and move on.
-        print(f"[supabase_store] upsert failed for {row.get('pipeline_lead_key')}: {e}")
+        print(f"[supabase_store] write failed for {lead_key}: {e}")
         return "error"
 
 

@@ -92,12 +92,11 @@ def run():
         seen_in_run.add(lead_key)
         dedupe_kept += 1
 
-        existing = find_existing_by_lead_key(payload["lead_key"])
         result = upsert_lead(payload)
-        if existing:
-            updated += 1 if result == "inserted" else 0
-        else:
-            created += 1 if result == "inserted" else 0
+        if result == "inserted":
+            created += 1
+        elif result == "updated":
+            updated += 1
 
     print(f"[API_TaxDelinquentBot] Valid rows: {valid_rows} | Invalid rows: {invalid_rows}")
     print(
