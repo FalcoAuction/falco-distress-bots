@@ -34,6 +34,104 @@ except ImportError:
 
 SUPABASE_TABLE = "homeowner_requests"
 
+
+# ----------------------------------------------------------------------------
+# Address normalization for cross-slug dedup
+# ----------------------------------------------------------------------------
+# Same property gets imported under different slugs whenever the slug scheme
+# changes — historically `<county>-foreclosure-<hex>` then later `sha40` of
+# the address. Without normalization we accumulate duplicate rows.
+#
+# Strategy: derive a stable canonical key from the property address and look
+# it up before inserting. If found, update that row's lead_key to the new
+# scheme rather than creating a new row. Self-healing dedup over time.
+
+import re
+
+_STREET_SUFFIX_MAP = {
+    "street": "st", "str": "st", "st": "st",
+    "avenue": "ave", "ave": "ave", "av": "ave",
+    "road": "rd", "rd": "rd",
+    "drive": "dr", "dr": "dr",
+    "lane": "ln", "ln": "ln",
+    "boulevard": "blvd", "blvd": "blvd",
+    "court": "ct", "ct": "ct",
+    "circle": "cir", "cir": "cir",
+    "place": "pl", "pl": "pl",
+    "terrace": "ter", "ter": "ter",
+    "highway": "hwy", "hwy": "hwy",
+    "parkway": "pkwy", "pkwy": "pkwy",
+    "way": "way",
+    "trail": "trl", "trl": "trl",
+}
+
+_DIRECTIONAL_MAP = {
+    "north": "n", "n": "n",
+    "south": "s", "s": "s",
+    "east": "e", "e": "e",
+    "west": "w", "w": "w",
+    "northeast": "ne", "ne": "ne",
+    "northwest": "nw", "nw": "nw",
+    "southeast": "se", "se": "se",
+    "southwest": "sw", "sw": "sw",
+}
+
+
+def _normalize_address(addr: Optional[str]) -> Optional[str]:
+    """Derive a canonical key from a free-form address.
+
+    "720 Sweetbrier Rd, Brentwood, TN 37027"
+    "720 SWEETBRIER ROAD, Brentwood TN, 37027"
+    "720 Sweetbrier Road"
+        → all yield "720 sweetbrier rd|brentwood|37027"
+
+    Returns None if the input is too sparse to dedup on (no number+street).
+    """
+    if not addr:
+        return None
+    s = str(addr).strip().lower()
+    # Strip everything in parens and double spaces
+    s = re.sub(r"\([^)]*\)", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    # Split into street / city / state-zip components by commas
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    if not parts:
+        return None
+
+    # Tokenize the street portion (first comma-segment)
+    street_tokens = re.findall(r"[a-z0-9]+", parts[0])
+    if not street_tokens:
+        return None
+    # Require at least a number (or alphanumeric like "1A") + something else
+    if len(street_tokens) < 2:
+        return None
+
+    norm_tokens = []
+    for tok in street_tokens:
+        if tok in _STREET_SUFFIX_MAP:
+            norm_tokens.append(_STREET_SUFFIX_MAP[tok])
+        elif tok in _DIRECTIONAL_MAP:
+            norm_tokens.append(_DIRECTIONAL_MAP[tok])
+        else:
+            norm_tokens.append(tok)
+    street_key = " ".join(norm_tokens)
+
+    # City — second segment if present
+    city_key = ""
+    if len(parts) >= 2:
+        city_tokens = re.findall(r"[a-z]+", parts[1])
+        # Strip trailing state if it slipped into city ("brentwood tn")
+        if city_tokens and city_tokens[-1] in {"tn", "tennessee", "ky", "ms", "ga", "al", "nc", "va", "ar", "mo"}:
+            city_tokens = city_tokens[:-1]
+        city_key = " ".join(city_tokens)
+
+    # ZIP — find any 5-digit run anywhere
+    zip_match = re.search(r"\b(\d{5})(?:-\d{4})?\b", s)
+    zip_key = zip_match.group(1) if zip_match else ""
+
+    return f"{street_key}|{city_key}|{zip_key}"
+
 # Track whether we've warned about missing creds this process
 _WARNED_MISSING = False
 # Cache the client per process to avoid re-creating on every upsert
@@ -193,7 +291,7 @@ def upsert_lead(payload: Dict[str, Any]) -> str:
     lead_key = row["pipeline_lead_key"]
 
     try:
-        # Look up by pipeline_lead_key to decide insert vs update.
+        # Step 1: look up by pipeline_lead_key (exact match).
         existing = (
             client.table(SUPABASE_TABLE)
             .select("id")
@@ -204,16 +302,50 @@ def upsert_lead(payload: Dict[str, Any]) -> str:
         )
         rows = getattr(existing, "data", None) or []
         if rows:
-            # UPDATE path — don't reset submitted_at on existing rows
             update_payload = {k: v for k, v in row.items() if k != "submitted_at"}
             client.table(SUPABASE_TABLE).update(update_payload).eq(
                 "id", rows[0]["id"]
             ).execute()
             return "updated"
-        else:
-            # INSERT path
-            client.table(SUPABASE_TABLE).insert(row).execute()
-            return "inserted"
+
+        # Step 2: address-based dedup. The slug scheme has changed mid-stream
+        # (legacy `<county>-foreclosure-<hex>` → newer sha40 keys), which
+        # produced 10+ duplicate addresses in production. Before inserting,
+        # check whether ANY existing row matches this property by canonical
+        # address. If so, claim that row by updating its lead_key to the
+        # current one — self-healing dedup over time.
+        addr_key = _normalize_address(row.get("property_address"))
+        if addr_key:
+            # Pull all bot rows in the same county to keep the search bounded;
+            # then match on normalized address client-side. Cheap (N is small).
+            county = row.get("county")
+            q = client.table(SUPABASE_TABLE).select(
+                "id, property_address"
+            ).eq("source", "bot")
+            if county:
+                q = q.eq("county", county)
+            else:
+                # Without county we have to scan; still bounded by source='bot'.
+                pass
+            scan = q.limit(2000).execute()
+            scan_rows = getattr(scan, "data", None) or []
+            match_id = None
+            for sr in scan_rows:
+                if _normalize_address(sr.get("property_address")) == addr_key:
+                    match_id = sr.get("id")
+                    break
+            if match_id:
+                update_payload = {
+                    k: v for k, v in row.items() if k != "submitted_at"
+                }
+                client.table(SUPABASE_TABLE).update(update_payload).eq(
+                    "id", match_id
+                ).execute()
+                return "updated"
+
+        # Step 3: genuinely new — INSERT.
+        client.table(SUPABASE_TABLE).insert(row).execute()
+        return "inserted"
     except Exception as e:
         print(f"[supabase_store] write failed for {lead_key}: {e}")
         return "error"
