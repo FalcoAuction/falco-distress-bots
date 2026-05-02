@@ -40,6 +40,15 @@ jobs:
 
       - name: Run Falco pipeline (bot scrapers \u2192 Supabase)
         run: python -m src.run_all
+        continue-on-error: true   # don't let legacy bots block new ones
+
+      - name: Run NEW staging scrapers (\u2192 homeowner_requests_staging)
+        # The new framework writes to a staging table for review at
+        # /admin/staging before promotion. Each scraper inherits health
+        # monitoring from BotBase \u2014 silent failures get caught in
+        # bot_run_health.
+        run: python -m src.bots._run_new
+        continue-on-error: true
 
       - name: Upload run status artifacts
         if: always()

@@ -31,10 +31,13 @@ SEEDS = [
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Falco Distress Bot)"}
 
-# Defaults mirror global DTS window unless overridden for this bot
-_DTS_MIN_DEFAULT, _DTS_MAX_DEFAULT = get_dts_window("PUBLIC_NOTICES")
-_DTS_MIN = int(os.getenv("FALCO_PUBLIC_DTS_MIN", str(_DTS_MIN_DEFAULT)))
-_DTS_MAX = int(os.getenv("FALCO_PUBLIC_DTS_MAX", str(_DTS_MAX_DEFAULT)))
+# Public-notice publications hit the press 1-3 weeks before the actual sale.
+# The global default DTS window is 21-90 days, which silently rejected ALL
+# 80 notices in the 2026-05-02 audit (every notice's sale was 5-19 days
+# out — below the 21-day floor). Override with a wider 5-180 default
+# specifically for this bot. Still env-overridable.
+_DTS_MIN = int(os.getenv("FALCO_PUBLIC_DTS_MIN", "5"))
+_DTS_MAX = int(os.getenv("FALCO_PUBLIC_DTS_MAX", "180"))
 
 MAX_LIST_PAGES = int(os.getenv("FALCO_PUBLIC_MAX_LIST_PAGES", "8"))
 MAX_NOTICE_LINKS = int(os.getenv("FALCO_PUBLIC_MAX_NOTICE_LINKS", "200"))

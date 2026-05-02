@@ -251,11 +251,21 @@ class BotBase:
         staged_count, duplicate_count = self._write_staging(leads)
         finished_at = datetime.now(timezone.utc)
 
-        # Decide final status
+        # Decide final status — distinguish three cases:
+        #   "failed"     — scraper crashed, error_message captured
+        #   "zero_yield" — scraper RAN but produced no leads at all (likely broken,
+        #                  needs investigation; alerting threshold)
+        #   "all_dupes"  — scraper found leads but all already-staged (healthy
+        #                  but no new supply this run; not an alert)
+        #   "ok"         — scraper produced new leads above expected_min_yield
         if error_message:
             status = "failed"
-        elif len(leads) == 0 or staged_count < self.expected_min_yield:
+        elif len(leads) == 0:
             status = "zero_yield"
+        elif staged_count == 0 and duplicate_count > 0:
+            status = "all_dupes"
+        elif staged_count < self.expected_min_yield:
+            status = "below_threshold"
         else:
             status = "ok"
 
