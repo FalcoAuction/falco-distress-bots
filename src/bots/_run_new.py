@@ -19,12 +19,16 @@ from . import nashville_codes_bot
 from . import memphis_codes_bot
 from . import craigslist_tn_bot
 from . import usda_rhs_bot
+from . import knoxville_poh_bot
+from . import tn_tax_delinquent_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 NEW_BOTS = [
     ("hud_reo", hud_reo_bot.run),
     ("nashville_codes", nashville_codes_bot.run),
     ("memphis_codes", memphis_codes_bot.run),
+    ("knoxville_poh", knoxville_poh_bot.run),
+    ("tn_tax_delinquent", tn_tax_delinquent_bot.run),
     ("craigslist_tn", craigslist_tn_bot.run),
     ("usda_rhs", usda_rhs_bot.run),
 ]
