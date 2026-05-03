@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload, _supabase, make_session
+from ._provenance import record_field
 
 
 PADCTN_BASE = "https://portal.padctn.org"
@@ -151,6 +152,22 @@ class DavidsonAssessorBot(BotBase):
                 try:
                     client.table(table).update(update).eq("id", row["id"]).execute()
                     enriched += 1
+                    # Record per-field provenance (live table only — staging
+                    # rows get rewritten when promoted; provenance follows
+                    # promotion via the _promote_staged_lead flow)
+                    if table == "homeowner_requests":
+                        meta = {
+                            "account_id": hit.get("account_id"),
+                            "parcel": hit.get("parcel"),
+                        }
+                        if "property_value" in update:
+                            record_field(client, row["id"], "property_value",
+                                          update["property_value"], "davidson_assessor",
+                                          confidence=1.0, metadata=meta)
+                        if "owner_name_records" in update:
+                            record_field(client, row["id"], "owner_name_records",
+                                          update["owner_name_records"], "davidson_assessor",
+                                          confidence=1.0, metadata=meta)
                 except Exception as e:
                     self.logger.warning(f"  update failed id={row['id']}: {e}")
         except Exception as e:

@@ -29,6 +29,7 @@ from . import memphis_daily_news_bot
 from . import hamilton_county_herald_bot
 from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
+from . import tn_public_notice_bot
 from . import notice_enricher_bot
 from . import phone_classifier_bot
 from . import tpad_enricher_bot
@@ -57,6 +58,7 @@ NEW_BOTS = [
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
     ("tn_probate", tn_probate_bot.run),
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
+    ("tn_public_notice", tn_public_notice_bot.run),
     ("craigslist_tn", craigslist_tn_bot.run),
     ("usda_rhs", usda_rhs_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
