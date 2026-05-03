@@ -25,6 +25,7 @@ from . import knoxville_poh_bot
 from . import tn_tax_delinquent_bot
 from . import hamilton_tax_delinquent_bot
 from . import nashville_ledger_bot
+from . import memphis_daily_news_bot
 from . import tn_probate_bot
 from . import notice_enricher_bot
 from . import phone_classifier_bot
@@ -47,6 +48,7 @@ NEW_BOTS = [
     ("tn_tax_delinquent", tn_tax_delinquent_bot.run),
     ("hamilton_tax_delinquent", hamilton_tax_delinquent_bot.run),
     ("nashville_ledger", nashville_ledger_bot.run),
+    ("memphis_daily_news", memphis_daily_news_bot.run),
     ("tn_probate", tn_probate_bot.run),
     ("craigslist_tn", craigslist_tn_bot.run),
     ("usda_rhs", usda_rhs_bot.run),
