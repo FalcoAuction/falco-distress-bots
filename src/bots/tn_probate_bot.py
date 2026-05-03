@@ -43,10 +43,18 @@ from ._base import BotBase, LeadPayload
 
 
 LEDGER_BASE = "https://www.tnledger.com"
-INDEX_URL = LEDGER_BASE + "/Notices.aspx"
-DETAIL_URL = LEDGER_BASE + "/Search/Details/ViewNotice.aspx"
+LEDGER_INDEX = LEDGER_BASE + "/Notices.aspx"
+LEDGER_DETAIL = LEDGER_BASE + "/Search/Details/ViewNotice.aspx"
 
-CL_ID_RE = re.compile(r"OpenChildFT2\('(CL\d+)','([^']+)'\)")
+MDN_BASE = "https://www.memphisdailynews.com"
+MDN_INDEX_TEMPLATE = MDN_BASE + "/notices/{year}/{month}/{day}/"
+MDN_DETAIL = MDN_BASE + "/Search/Details/ViewNotice.aspx"
+
+LEDGER_CL_RE = re.compile(r"OpenChildFT2\('(CL\d+)','([^']+)'\)")
+MDN_CD_RE = re.compile(r"OpenChildFT2\('(CD\d+)','([^']+)'\)")
+
+MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 # Body-text patterns
 PROBATE_FLAG_RE = re.compile(
@@ -105,32 +113,56 @@ ATTORNEY_PATTERNS = (
 
 class TnProbateBot(BotBase):
     name = "tn_probate"
-    description = "TN probate Notice to Creditors via Nashville Ledger CL notices"
-    throttle_seconds = 1.5
-    expected_min_yield = 5  # typical Friday: 50-80 court notices, most probate
+    description = "TN probate Notice to Creditors via Nashville Ledger (CL) + Memphis Daily News (CD)"
+    throttle_seconds = 1.0
+    expected_min_yield = 10  # typical Friday: 76 Ledger CL + 98 MDN CD ≈ 130-170 probate
 
     weeks_to_scan = 4
+    mdn_days_to_scan = 14
 
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
-        seen_ids: set[str] = set()
+        seen_keys: set[str] = set()  # source|id key to dedup across pubs
 
+        # Nashville Ledger (CL prefix, weekly Friday publication, Middle TN)
         for pub_date in self._recent_friday_dates(self.weeks_to_scan):
-            ids = self._fetch_index(pub_date)
-            self.logger.info(f"{pub_date.isoformat()}: {len(ids)} court-notice IDs")
+            ids = self._fetch_ledger_index(pub_date)
+            self.logger.info(f"Ledger {pub_date.isoformat()}: {len(ids)} CL court-notice IDs")
             for cl_id in ids:
-                if cl_id in seen_ids:
+                key = f"ledger|{cl_id}"
+                if key in seen_keys:
                     continue
-                seen_ids.add(cl_id)
-                detail = self._fetch_detail(cl_id, pub_date)
+                seen_keys.add(key)
+                detail = self._fetch_ledger_detail(cl_id, pub_date)
                 if detail is None:
                     continue
-                lead = self._build_lead(detail, cl_id, pub_date)
+                lead = self._build_lead(detail, cl_id, pub_date,
+                                         source="ledger",
+                                         detail_url=LEDGER_DETAIL)
+                if lead is not None:
+                    leads.append(lead)
+
+        # Memphis Daily News (CD prefix, daily-ish publication, Shelby + West TN)
+        for pub_date in self._recent_mdn_dates(self.mdn_days_to_scan):
+            ids = self._fetch_mdn_index(pub_date)
+            if ids:
+                self.logger.info(f"MDN {pub_date.isoformat()}: {len(ids)} CD court-notice IDs")
+            for cd_id in ids:
+                key = f"mdn|{cd_id}"
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                detail = self._fetch_mdn_detail(cd_id, pub_date)
+                if detail is None:
+                    continue
+                lead = self._build_lead(detail, cd_id, pub_date,
+                                         source="memphis_daily_news",
+                                         detail_url=MDN_DETAIL)
                 if lead is not None:
                     leads.append(lead)
         return leads
 
-    # ── Index walk ──────────────────────────────────────────────────────────
+    # ── Index walks ─────────────────────────────────────────────────────────
 
     @staticmethod
     def _recent_friday_dates(weeks: int) -> List[date]:
@@ -139,25 +171,57 @@ class TnProbateBot(BotBase):
         latest_friday = today - timedelta(days=days_since_friday)
         return [latest_friday - timedelta(days=7 * i) for i in range(weeks)]
 
-    def _fetch_index(self, pub_date: date) -> List[str]:
+    @staticmethod
+    def _recent_mdn_dates(days: int) -> List[date]:
+        today = date.today()
+        # Skip Sundays — no publication
+        return [today - timedelta(days=i) for i in range(days)
+                if (today - timedelta(days=i)).weekday() != 6]
+
+    def _fetch_ledger_index(self, pub_date: date) -> List[str]:
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        res = self.fetch(INDEX_URL, params={"noticesDate": date_param})
+        res = self.fetch(LEDGER_INDEX, params={"noticesDate": date_param})
         if res is None or res.status_code != 200:
             return []
-        ids = []
+        ids: List[str] = []
         seen: set[str] = set()
-        for m in CL_ID_RE.finditer(res.text):
+        for m in LEDGER_CL_RE.finditer(res.text):
             cl_id = m.group(1)
             if cl_id not in seen:
                 seen.add(cl_id)
                 ids.append(cl_id)
         return ids
 
-    # ── Detail fetch ────────────────────────────────────────────────────────
+    def _fetch_mdn_index(self, pub_date: date) -> List[str]:
+        url = MDN_INDEX_TEMPLATE.format(
+            year=pub_date.year,
+            month=MONTH_ABBR[pub_date.month - 1],
+            day=pub_date.day,
+        )
+        res = self.fetch(url)
+        if res is None or res.status_code != 200:
+            return []
+        ids: List[str] = []
+        seen: set[str] = set()
+        for m in MDN_CD_RE.finditer(res.text):
+            cd_id = m.group(1)
+            if cd_id not in seen:
+                seen.add(cd_id)
+                ids.append(cd_id)
+        return ids
 
-    def _fetch_detail(self, cl_id: str, pub_date: date) -> Optional[Dict]:
+    # ── Detail fetches ──────────────────────────────────────────────────────
+
+    def _fetch_ledger_detail(self, cl_id: str, pub_date: date) -> Optional[Dict]:
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        res = self.fetch(DETAIL_URL, params={"id": cl_id, "date": date_param})
+        res = self.fetch(LEDGER_DETAIL, params={"id": cl_id, "date": date_param})
+        if res is None or res.status_code != 200:
+            return None
+        return self._parse_detail(res.text)
+
+    def _fetch_mdn_detail(self, cd_id: str, pub_date: date) -> Optional[Dict]:
+        date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
+        res = self.fetch(MDN_DETAIL, params={"id": cd_id, "date": date_param})
         if res is None or res.status_code != 200:
             return None
         return self._parse_detail(res.text)
@@ -171,7 +235,9 @@ class TnProbateBot(BotBase):
 
     # ── Lead construction ───────────────────────────────────────────────────
 
-    def _build_lead(self, detail: Dict, cl_id: str, pub_date: date) -> Optional[LeadPayload]:
+    def _build_lead(self, detail: Dict, notice_id: str, pub_date: date,
+                     source: str = "ledger",
+                     detail_url: str = LEDGER_DETAIL) -> Optional[LeadPayload]:
         body = detail.get("body") or ""
         if not PROBATE_FLAG_RE.search(body):
             return None  # skip non-probate court notices (some are guardianship etc)
@@ -219,9 +285,10 @@ class TnProbateBot(BotBase):
                 break
 
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        source_url = f"{DETAIL_URL}?id={cl_id}&date={date_param}"
+        source_url = f"{detail_url}?id={notice_id}&date={date_param}"
+        pub_label = "Nashville Ledger" if source == "ledger" else "Memphis Daily News"
 
-        admin_parts = [f"Nashville Ledger {cl_id}", f"pub {pub_date.isoformat()}"]
+        admin_parts = [f"{pub_label} {notice_id}", f"pub {pub_date.isoformat()}"]
         if county:
             admin_parts.append(f"county={county}")
         if docket:
@@ -237,7 +304,7 @@ class TnProbateBot(BotBase):
 
         return LeadPayload(
             bot_source=self.name,
-            pipeline_lead_key=self.make_lead_key(self.name, cl_id),
+            pipeline_lead_key=self.make_lead_key(self.name, f"{source}-{notice_id}"),
             full_name=decedent,
             owner_name_records=decedent,
             county=county,
@@ -245,6 +312,7 @@ class TnProbateBot(BotBase):
             admin_notes=" · ".join(admin_parts),
             source_url=source_url,
             raw_payload={
+                "publication": source,
                 "decedent": decedent,
                 "county": county,
                 "docket": docket,
