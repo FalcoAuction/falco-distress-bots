@@ -56,6 +56,7 @@ from . import davidson_assessor_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
+from . import hamilton_assessor_bot
 from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
@@ -94,6 +95,7 @@ NEW_BOTS = [
     ("williamson_assessor", williamson_assessor_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
+    ("hamilton_assessor", hamilton_assessor_bot.run),
     ("mortgage_estimator", mortgage_estimator_bot.run),
     ("probate_property_enricher", probate_property_enricher_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),

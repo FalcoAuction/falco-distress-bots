@@ -230,10 +230,13 @@ class DecisionEngineBot(BotBase):
     max_leads_per_run = 500   # ~$0.40/run at Haiku
 
     model = "gpt-5-mini"
-    # gpt-5-mini is a reasoning model — ~60-100 hidden reasoning tokens
-    # per call before visible output. Budget = reasoning + JSON output.
-    # JSON action object is ~150-250 visible tokens; 800 gives headroom.
-    max_output_tokens = 800
+    # gpt-5-mini is a reasoning model — empirically uses 200-1500 hidden
+    # reasoning tokens per call before producing visible output. The
+    # first end-to-end run had 97/140 LLM calls return empty content
+    # because reasoning ate the entire 800-token budget. Bumped to 2500
+    # to give reasoning room while preserving cost (only billed for
+    # actual tokens used).
+    max_output_tokens = 2500
 
     def __init__(self):
         super().__init__()
@@ -295,11 +298,18 @@ class DecisionEngineBot(BotBase):
             self.logger.info(f"{len(candidates)} leads to grade")
 
             for row in candidates[:self.max_leads_per_run]:
+                table = row["__table__"]
+                existing_meta = row.get("phone_metadata") or {}
+                if not isinstance(existing_meta, dict):
+                    existing_meta = {}
+
                 # Step 1: try fast rules first (no LLM)
                 fast_result = self._fast_rules(row)
                 if fast_result:
                     rule_decided += 1
-                    self._write_decision(client, row["id"], fast_result, source="rule_engine")
+                    self._write_decision(client, row["id"], fast_result,
+                                          source="rule_engine",
+                                          table=table, existing_meta=existing_meta)
                     action_breakdown[fast_result["action"]] = (
                         action_breakdown.get(fast_result["action"], 0) + 1
                     )
@@ -317,7 +327,9 @@ class DecisionEngineBot(BotBase):
                     errors += 1
                     continue
 
-                self._write_decision(client, row["id"], decision, source="llm_haiku")
+                self._write_decision(client, row["id"], decision,
+                                      source="llm_openai",
+                                      table=table, existing_meta=existing_meta)
                 action_breakdown[decision["action"]] = (
                     action_breakdown.get(decision["action"], 0) + 1
                 )
@@ -386,29 +398,41 @@ class DecisionEngineBot(BotBase):
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
             "admin_notes, source, priority_score"
         )
+        # PostgREST has a 1000-row server-side max per query. Paginate
+        # via .range(start, end) to walk the entire ungraded population.
+        PAGE_SIZE = 1000
+        MAX_PAGES = 20  # 20 × 1000 = 20K leads/run cap (plenty)
         out = []
         for table, fields in (
             ("homeowner_requests_staging", STAGING_FIELDS),
             ("homeowner_requests", LIVE_FIELDS),
         ):
-            try:
-                q = (
-                    client.table(table)
-                    .select(fields)
-                    .is_("priority_score", "null")  # only ungraded
-                    .limit(2500)
-                    .execute()
-                )
-                rows = getattr(q, "data", None) or []
-                for r in rows:
-                    r["__table__"] = table
-                    # Normalize 'source' → 'bot_source' for live rows so
-                    # downstream code can reference one field name
-                    if "source" in r and "bot_source" not in r:
-                        r["bot_source"] = r["source"]
-                    out.append(r)
-            except Exception as e:
-                self.logger.warning(f"candidate query on {table} failed: {e}")
+            for page in range(MAX_PAGES):
+                start = page * PAGE_SIZE
+                end = start + PAGE_SIZE - 1
+                try:
+                    q = (
+                        client.table(table)
+                        .select(fields)
+                        .is_("priority_score", "null")
+                        .order("id")           # stable ordering for pagination
+                        .range(start, end)
+                        .execute()
+                    )
+                    rows = getattr(q, "data", None) or []
+                    if not rows:
+                        break
+                    for r in rows:
+                        r["__table__"] = table
+                        if "source" in r and "bot_source" not in r:
+                            r["bot_source"] = r["source"]
+                        out.append(r)
+                    if len(rows) < PAGE_SIZE:
+                        break  # last page
+                except Exception as e:
+                    self.logger.warning(f"candidate query on {table} "
+                                          f"page {page} failed: {e}")
+                    break
         return out
 
     # ── Fast rules (no LLM) ─────────────────────────────────────────────────
@@ -433,6 +457,39 @@ class DecisionEngineBot(BotBase):
         ):
             return self._mk_decision("HOLD_FOR_DATA", 0,
                                        "Missing property_address (non-court lead)", "none", 1.0)
+
+        # Rule 1b: missing AVM (property_value) AND no mortgage data →
+        # HOLD via fast rule. Without AVM we can't compute equity, the
+        # core grading factor. Owner name alone (often a business name
+        # the LLM still has to investigate) is not enough signal to
+        # warrant burning $0.002 + 10-20s on an LLM call.
+        if not row.get("property_value") and not row.get("mortgage_balance"):
+            return self._mk_decision(
+                "HOLD_FOR_DATA", 0,
+                "Missing AVM + mortgage — wait for enricher backfill",
+                "none", 0.95,
+            )
+
+        # Rule 1c: business owner via expanded keyword set (owner_classifier
+        # only catches LLC/INC suffixes; many TN-tax-delinquent leads have
+        # no formal-suffix business names like "VICKYS BOUTIQUE",
+        # "UPPERCUT PROPERTY SVCS", "ABC TRAINING" that owner_classifier
+        # misses).
+        owner_upper = (row.get("owner_name_records") or "").upper()
+        BUSINESS_KEYWORDS = (
+            "BOUTIQUE", "TRAINING", "PROPERTY SVCS", "PROPERTIES",
+            "ENTERPRISES", "MINISTRIES", "MARKET", "STORE", "RESTAURANT",
+            "AUTO ", "BUILDERS", "CONSTRUCTION", "FUND ", "HOLDINGS",
+            "INVESTMENT", "VENTURES", "CAPITAL", "GROUP", "PARTNERS",
+            "REALTY", "ASSOC ", "ASSOCIATES",
+        )
+        for kw in BUSINESS_KEYWORDS:
+            if kw in owner_upper:
+                return self._mk_decision(
+                    "REJECT_BUSINESS", 0,
+                    f"Owner name contains business keyword: {kw.strip()}",
+                    "none", 0.85, flags=["NON_HOMEOWNER"],
+                )
 
         # Rule 2: business owner
         owner = (row.get("owner_name_records") or row.get("full_name") or "").upper()
@@ -620,34 +677,49 @@ class DecisionEngineBot(BotBase):
 
     # ── LLM call ────────────────────────────────────────────────────────────
 
-    def _llm_decide(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        msg = build_user_message(row)
-        # OpenAI chat completion with JSON-mode response.
-        # gpt-5-mini auto-caches the system-prompt prefix (no explicit
-        # cache_control directive needed); identical system prompts
-        # across calls are billed at the cached-input rate.
-        resp = self._client.chat.completions.create(
-            model=self.model,
-            max_completion_tokens=self.max_output_tokens,
-            response_format={"type": "json_object"},
-            messages=[
+    def _call_llm(self, user_msg: str, json_mode: bool) -> Optional[str]:
+        """Single LLM round-trip. Returns the raw response text or None
+        on empty-content."""
+        kwargs = {
+            "model": self.model,
+            "max_completion_tokens": self.max_output_tokens,
+            "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": msg},
+                {"role": "user", "content": user_msg},
             ],
-        )
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except Exception as e:
+            self.logger.warning(f"  LLM API error: {e}")
+            return None
         self._llm_calls += 1
         usage = getattr(resp, "usage", None)
         if usage is not None:
             self._llm_input_tokens_total += getattr(usage, "prompt_tokens", 0) or 0
             self._llm_output_tokens_total += getattr(usage, "completion_tokens", 0) or 0
-
-        # Parse the JSON from the response
         choice = resp.choices[0] if getattr(resp, "choices", None) else None
         if choice is None or not choice.message or not choice.message.content:
-            self.logger.warning("  LLM returned empty response")
             return None
-        text = choice.message.content.strip()
-        # JSON-mode usually returns clean JSON, but strip markdown fences just in case
+        return choice.message.content
+
+    def _llm_decide(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        msg = build_user_message(row)
+        # gpt-5-mini reasoning model can burn the entire token budget on
+        # internal reasoning before emitting visible JSON. We try
+        # JSON-mode first; if it returns empty (reasoning truncation),
+        # retry once with plain text (still parse via regex).
+        text = self._call_llm(msg, json_mode=True)
+        if text is None:
+            text = self._call_llm(msg, json_mode=False)
+        if text is None:
+            self.logger.warning("  LLM returned empty after retry")
+            return None
+
+        # Strip markdown fences
+        text = text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text
         if text.endswith("```"):
@@ -685,33 +757,53 @@ class DecisionEngineBot(BotBase):
     # ── Persistence ─────────────────────────────────────────────────────────
 
     def _write_decision(self, client, lead_id: str, decision: Dict[str, Any],
-                         source: str) -> None:
-        """Write decision to lead row + record provenance."""
-        # Find which table
-        for table in ("homeowner_requests", "homeowner_requests_staging"):
+                         source: str, table: str = None,
+                         existing_meta: Dict[str, Any] = None) -> None:
+        """Write decision to lead row + record provenance.
+
+        `table` and `existing_meta` are passed from the caller so we don't
+        re-fetch (the candidates query already pulled phone_metadata).
+        Falls back to the discovery loop if not provided (legacy path).
+        """
+        meta_payload = {
+            "decision_engine": {
+                "action": decision["action"],
+                "priority_score": decision["priority_score"],
+                "reasoning": decision["reasoning"],
+                "suggested_outreach": decision["suggested_outreach"],
+                "confidence": decision["confidence"],
+                "flags": decision.get("flags", []),
+                "source": source,
+                "decided_at": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+
+        # Fast path: caller passed table + existing_meta from the candidates row
+        if table and existing_meta is not None:
+            em = dict(existing_meta) if isinstance(existing_meta, dict) else {}
+            em.update(meta_payload)
+            update = {
+                "phone_metadata": em,
+                "priority_score": decision["priority_score"],
+            }
             try:
-                # Update phone_metadata.decision_engine + priority_score column
-                # if it exists. Otherwise stash in phone_metadata only.
-                update: Dict[str, Any] = {}
-                # priority_score column may or may not exist yet. If migration
-                # has been applied, write to it. If not, the update will fail
-                # silently and we still have phone_metadata.
-                # Try the full update first; fall back if priority_score doesn't exist.
-                meta_payload = {
-                    "decision_engine": {
-                        "action": decision["action"],
-                        "priority_score": decision["priority_score"],
-                        "reasoning": decision["reasoning"],
-                        "suggested_outreach": decision["suggested_outreach"],
-                        "confidence": decision["confidence"],
-                        "flags": decision.get("flags", []),
-                        "source": source,
-                        "decided_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                }
-                # Read existing meta + merge
+                client.table(table).update(update).eq("id", lead_id).execute()
+            except Exception as e:
+                self.logger.debug(f"  write {table} {lead_id} failed: {e}")
+                return
+            if table == "homeowner_requests":
+                record_field(client, lead_id, "decision_engine_action",
+                              decision["action"], source,
+                              confidence=decision.get("confidence", 0),
+                              metadata={"score": decision["priority_score"],
+                                        "reasoning": decision["reasoning"]})
+            return
+
+        # Legacy slow path (kept for safety): discover the table
+        for tbl in ("homeowner_requests", "homeowner_requests_staging"):
+            try:
                 existing = (
-                    client.table(table)
+                    client.table(tbl)
                     .select("phone_metadata")
                     .eq("id", lead_id)
                     .limit(1)
@@ -724,17 +816,12 @@ class DecisionEngineBot(BotBase):
                 if not isinstance(em, dict):
                     em = {}
                 em.update(meta_payload)
-                update["phone_metadata"] = em
-
-                # Try with priority_score column (may not exist)
-                try:
-                    update_with_score = {**update, "priority_score": decision["priority_score"]}
-                    client.table(table).update(update_with_score).eq("id", lead_id).execute()
-                except Exception:
-                    # Column not present — fall back to just phone_metadata
-                    client.table(table).update(update).eq("id", lead_id).execute()
-
-                if table == "homeowner_requests":
+                update = {
+                    "phone_metadata": em,
+                    "priority_score": decision["priority_score"],
+                }
+                client.table(tbl).update(update).eq("id", lead_id).execute()
+                if tbl == "homeowner_requests":
                     record_field(client, lead_id, "decision_engine_action",
                                   decision["action"], source,
                                   confidence=decision.get("confidence", 0),
@@ -742,7 +829,7 @@ class DecisionEngineBot(BotBase):
                                             "reasoning": decision["reasoning"]})
                 return
             except Exception as e:
-                self.logger.debug(f"  write attempt on {table} failed: {e}")
+                self.logger.debug(f"  write attempt on {tbl} failed: {e}")
                 continue
 
 
