@@ -357,6 +357,54 @@ class MortgageEstimatorBot(BotBase):
                 except (ValueError, TypeError):
                     pass
 
+        # Hamilton assessor (Chattanooga CSV)
+        h = raw.get("hamilton_assessor") or {}
+        if isinstance(h, dict):
+            if not sale_price and h.get("last_sale_price"):
+                try:
+                    sale_price = float(h["last_sale_price"])
+                except (ValueError, TypeError):
+                    pass
+            if not sale_date and h.get("last_sale_date"):
+                sale_date = h["last_sale_date"]
+            if not avm and h.get("appraised"):
+                try:
+                    avm = float(h["appraised"])
+                except (ValueError, TypeError):
+                    pass
+
+        # Shelby ArcGIS
+        sh = raw.get("shelby_arcgis") or {}
+        if isinstance(sh, dict):
+            if not sale_price and sh.get("last_sale_price"):
+                try:
+                    sale_price = float(sh["last_sale_price"])
+                except (ValueError, TypeError):
+                    pass
+            if not sale_date and sh.get("last_sale_date"):
+                sale_date = sh["last_sale_date"]
+            if not avm and sh.get("appraised"):
+                try:
+                    avm = float(sh["appraised"])
+                except (ValueError, TypeError):
+                    pass
+
+        # Rutherford ArcGIS
+        rc = raw.get("rutherford_arcgis") or {}
+        if isinstance(rc, dict):
+            if not sale_price and rc.get("last_sale_price"):
+                try:
+                    sale_price = float(rc["last_sale_price"])
+                except (ValueError, TypeError):
+                    pass
+            if not sale_date and rc.get("last_sale_date"):
+                sale_date = rc["last_sale_date"]
+            if not avm and rc.get("appraised"):
+                try:
+                    avm = float(rc["appraised"])
+                except (ValueError, TypeError):
+                    pass
+
         # Fallback: row-level property_value
         if not avm and row.get("property_value"):
             try:
