@@ -26,6 +26,7 @@ from . import tn_tax_delinquent_bot
 from . import hamilton_tax_delinquent_bot
 from . import nashville_ledger_bot
 from . import memphis_daily_news_bot
+from . import hamilton_county_herald_bot
 from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
 from . import notice_enricher_bot
@@ -53,6 +54,7 @@ NEW_BOTS = [
     ("hamilton_tax_delinquent", hamilton_tax_delinquent_bot.run),
     ("nashville_ledger", nashville_ledger_bot.run),
     ("memphis_daily_news", memphis_daily_news_bot.run),
+    ("hamilton_county_herald", hamilton_county_herald_bot.run),
     ("tn_probate", tn_probate_bot.run),
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
     ("craigslist_tn", craigslist_tn_bot.run),
