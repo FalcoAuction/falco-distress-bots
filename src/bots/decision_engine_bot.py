@@ -363,22 +363,37 @@ class DecisionEngineBot(BotBase):
     # ── Candidates ──────────────────────────────────────────────────────────
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
-        """Pull staged + live leads needing a fresh decision."""
+        """Pull staged + live leads needing a fresh decision.
+
+        Schema-tolerant: bot_source column only exists on the staging
+        table, so we omit it for the live-table query.
+        """
+        STAGING_FIELDS = (
+            "id, property_address, county, owner_name_records, full_name, "
+            "distress_type, property_value, mortgage_balance, "
+            "trustee_sale_date, phone, raw_payload, phone_metadata, "
+            "admin_notes, bot_source"
+        )
+        LIVE_FIELDS = (
+            "id, property_address, county, owner_name_records, full_name, "
+            "distress_type, property_value, mortgage_balance, "
+            "trustee_sale_date, phone, raw_payload, phone_metadata, "
+            "admin_notes, source"
+        )
         out = []
-        for table in ("homeowner_requests_staging", "homeowner_requests"):
+        for table, fields in (
+            ("homeowner_requests_staging", STAGING_FIELDS),
+            ("homeowner_requests", LIVE_FIELDS),
+        ):
             try:
-                q = (
-                    client.table(table)
-                    .select("id, property_address, county, owner_name_records, full_name, "
-                            "distress_type, property_value, mortgage_balance, "
-                            "trustee_sale_date, phone, raw_payload, phone_metadata, "
-                            "admin_notes, bot_source")
-                    .limit(2500)
-                    .execute()
-                )
+                q = client.table(table).select(fields).limit(2500).execute()
                 rows = getattr(q, "data", None) or []
                 for r in rows:
                     r["__table__"] = table
+                    # Normalize 'source' → 'bot_source' for live rows so
+                    # downstream code can reference one field name
+                    if "source" in r and "bot_source" not in r:
+                        r["bot_source"] = r["source"]
                     out.append(r)
             except Exception as e:
                 self.logger.warning(f"candidate query on {table} failed: {e}")
