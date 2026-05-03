@@ -5,3 +5,4 @@ reportlab==4.2.5
 supabase>=2.7.0
 pdfplumber>=0.11.0
 phonenumbers>=8.13.0
+anthropic>=0.39.0

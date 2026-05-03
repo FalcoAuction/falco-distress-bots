@@ -43,7 +43,9 @@ from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
 from . import skip_trace_enricher_bot
+from . import phone_resolver_bot
 from . import stacked_distress_aggregator_bot
+from . import decision_engine_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -80,7 +82,10 @@ NEW_BOTS = [
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
+    ("phone_resolver", phone_resolver_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
+    # Autonomous brain — runs LAST so it sees fully-enriched leads
+    ("decision_engine", decision_engine_bot.run),
 ]
 
 
