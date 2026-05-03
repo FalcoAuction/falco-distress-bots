@@ -43,11 +43,27 @@ from .davidson_assessor_bot import (
 from .williamson_assessor_bot import (
     INIGO_HOME, INIGO_SEARCH, INIGO_DETAIL, CSRF_FORM_RE,
 )
+from .tpad_enricher_bot import (
+    TPAD_BASE, TPAD_SEARCH, COUNTY_CODES, _build_session as _tpad_session,
+    search_by_owner as tpad_search_by_owner,
+)
 from .probate_property_enricher_bot import _decedent_to_owner_query
 
 
 # Court IDs that map plausibly to Davidson + Williamson
 DAVIDSON_WILLIAMSON_COURTS = ("tnmb",)
+
+# Middle TN counties covered by TPAD (excludes Davidson/Williamson which
+# have their own bots, and the other EXTERNAL TPAD counties). These are
+# the counties tnmb federal bankruptcy court has jurisdiction over.
+TNMB_TPAD_COUNTIES = (
+    "wilson", "sumner", "cheatham", "robertson", "maury", "dickson",
+    "cannon", "coffee", "franklin", "lincoln", "marshall", "moore",
+    "trousdale", "smith", "macon", "clay", "dekalb", "jackson",
+    "putnam", "pickett", "overton", "fentress", "houston", "stewart",
+    "humphreys", "perry", "lawrence", "wayne", "lewis",
+    "grundy", "sequatchie", "vanburen", "white", "cumberland",
+)
 
 
 class BankruptcyPropertyEnricherBot(BotBase):
@@ -61,6 +77,7 @@ class BankruptcyPropertyEnricherBot(BotBase):
     def __init__(self):
         super().__init__()
         self._williamson_csrf: Optional[str] = None
+        self._tpad_session = None
 
     def scrape(self) -> List[Any]:
         return []
@@ -82,10 +99,11 @@ class BankruptcyPropertyEnricherBot(BotBase):
             return {"name": self.name, "status": "no_supabase",
                     "enriched": 0, "skipped": 0, "staged": 0, "duplicates": 0, "fetched": 0}
 
-        # Init both assessor sessions
+        # Init all three assessor sessions
         self.fetch(PADCTN_HOME)
         self.fetch(PADCTN_QUICKSEARCH)
         self._init_williamson()
+        self._tpad_session = _tpad_session()
 
         enriched = 0
         ambiguous = 0
@@ -110,11 +128,14 @@ class BankruptcyPropertyEnricherBot(BotBase):
                 davidson_hits = self._lookup_padctn(query) or []
                 # Try Williamson second
                 williamson_hits = self._lookup_williamson(query) or []
+                # Try TPAD-covered Middle TN counties third
+                tpad_hits = self._lookup_tpad_middle_tn(query) or []
 
                 # Combine + classify
                 hits = (
                     [("davidson", h) for h in davidson_hits]
                     + [("williamson", h) for h in williamson_hits]
+                    + tpad_hits  # already (county, hit) tuples
                 )
                 if len(hits) == 0:
                     not_found += 1
@@ -272,6 +293,39 @@ class BankruptcyPropertyEnricherBot(BotBase):
             if rec.get("account_id"):
                 out.append(rec)
         return out
+
+    # ── TPAD Middle-TN sweep ────────────────────────────────────────────────
+
+    def _lookup_tpad_middle_tn(self, query: str) -> List[tuple]:
+        """Walk every TPAD-covered Middle TN county for the debtor name.
+        Returns list of (county_name, hit_dict) tuples. Uses the LASTNAME,
+        FIRST format the other lookups use; TPAD owner search accepts that.
+        """
+        if not self._tpad_session:
+            return []
+        results: List[tuple] = []
+        for county in TNMB_TPAD_COUNTIES:
+            jur = COUNTY_CODES.get(county)
+            if not jur:
+                continue
+            try:
+                hits = tpad_search_by_owner(self._tpad_session, jur, query)
+            except Exception as e:
+                self.logger.warning(f"  TPAD {county} ({jur}) search failed: {e}")
+                continue
+            for h in hits or []:
+                results.append((
+                    county,
+                    {
+                        "owner": h.get("owner"),
+                        "parcel": h.get("parcel") or h.get("parcelNumber"),
+                        "property_address": h.get("address") or h.get("propertyAddress"),
+                        "appraised": None,  # TPAD search doesn't include appraisal — would need detail fetch
+                        "tpad_jur": jur,
+                        "tpad_raw": h,
+                    },
+                ))
+        return results
 
     # ── Williamson Inigo lookup ─────────────────────────────────────────────
 

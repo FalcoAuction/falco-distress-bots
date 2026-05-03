@@ -36,6 +36,7 @@ from . import williamson_assessor_bot
 from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
+from . import stacked_distress_aggregator_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -65,6 +66,7 @@ NEW_BOTS = [
     ("probate_property_enricher", probate_property_enricher_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
+    ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
 ]
 
 
