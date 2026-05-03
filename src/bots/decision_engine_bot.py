@@ -14,8 +14,15 @@ The LLM is given full context per lead (raw_payload + all enrichments
 + provenance + history) and a FALCO operating manual (~5K tokens of
 system prompt). OpenAI's automatic prompt caching makes the system
 prompt nearly-free across calls (cached prefix tokens billed at
-discounted rate). Per-lead cost: ~2K input + 200 output via gpt-5-mini
-≈ $0.0009. At 1500 leads/day ≈ $1.35/day total.
+discounted rate).
+
+Per-lead cost via gpt-5-mini (reasoning model — completion includes
+hidden reasoning_tokens billed at the same rate as visible output):
+  - ~2K input × $0.25/M (cached: $0.025/M after first call) = $0.0001
+  - ~80 reasoning + 200 output completion × $2/M = $0.0006
+  - Total: ~$0.0007/lead with prompt caching active
+  - First-run total for 2,901 leads (no cache yet): ~$3.20
+  - Steady-state at 1,500 leads/day with cache: ~$1.05/day
 
 Why LLM and not pure rules:
   - Rules handle the 90% of leads that fit clean patterns (auto-
@@ -223,7 +230,10 @@ class DecisionEngineBot(BotBase):
     max_leads_per_run = 500   # ~$0.40/run at Haiku
 
     model = "gpt-5-mini"
-    max_output_tokens = 400
+    # gpt-5-mini is a reasoning model — ~60-100 hidden reasoning tokens
+    # per call before visible output. Budget = reasoning + JSON output.
+    # JSON action object is ~150-250 visible tokens; 800 gives headroom.
+    max_output_tokens = 800
 
     def __init__(self):
         super().__init__()
