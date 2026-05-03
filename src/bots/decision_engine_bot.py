@@ -367,18 +367,24 @@ class DecisionEngineBot(BotBase):
 
         Schema-tolerant: bot_source column only exists on the staging
         table, so we omit it for the live-table query.
+
+        Idempotency: skip leads that already have a priority_score set
+        (decision_engine wrote one previously). Re-grading happens only
+        when priority_score is NULL — i.e., a fresh staged lead, or a
+        lead whose priority_score was explicitly cleared (e.g., by an
+        enricher that significantly changed the data).
         """
         STAGING_FIELDS = (
             "id, property_address, county, owner_name_records, full_name, "
             "distress_type, property_value, mortgage_balance, "
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
-            "admin_notes, bot_source"
+            "admin_notes, bot_source, priority_score"
         )
         LIVE_FIELDS = (
             "id, property_address, county, owner_name_records, full_name, "
             "distress_type, property_value, mortgage_balance, "
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
-            "admin_notes, source"
+            "admin_notes, source, priority_score"
         )
         out = []
         for table, fields in (
@@ -386,7 +392,13 @@ class DecisionEngineBot(BotBase):
             ("homeowner_requests", LIVE_FIELDS),
         ):
             try:
-                q = client.table(table).select(fields).limit(2500).execute()
+                q = (
+                    client.table(table)
+                    .select(fields)
+                    .is_("priority_score", "null")  # only ungraded
+                    .limit(2500)
+                    .execute()
+                )
                 rows = getattr(q, "data", None) or []
                 for r in rows:
                     r["__table__"] = table
