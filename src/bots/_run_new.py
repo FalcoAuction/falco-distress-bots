@@ -23,8 +23,10 @@ from . import craigslist_tn_bot
 from . import usda_rhs_bot
 from . import knoxville_poh_bot
 from . import tn_tax_delinquent_bot
+from . import nashville_ledger_bot
 from . import notice_enricher_bot
 from . import phone_classifier_bot
+from . import tpad_enricher_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -38,11 +40,13 @@ NEW_BOTS = [
     ("johnson_city_bdsr", johnson_city_bdsr_bot.run),
     ("knoxville_poh", knoxville_poh_bot.run),
     ("tn_tax_delinquent", tn_tax_delinquent_bot.run),
+    ("nashville_ledger", nashville_ledger_bot.run),
     ("craigslist_tn", craigslist_tn_bot.run),
     ("usda_rhs", usda_rhs_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
     ("notice_enricher", notice_enricher_bot.run),
     ("phone_classifier", phone_classifier_bot.run),
+    ("tpad_enricher", tpad_enricher_bot.run),
 ]
 
 
