@@ -4,3 +4,4 @@ python-dateutil==2.9.0.post0
 reportlab==4.2.5
 supabase>=2.7.0
 pdfplumber>=0.11.0
+phonenumbers>=8.13.0
