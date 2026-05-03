@@ -30,6 +30,7 @@ from . import notice_enricher_bot
 from . import phone_classifier_bot
 from . import tpad_enricher_bot
 from . import davidson_assessor_bot
+from . import probate_property_enricher_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -53,6 +54,7 @@ NEW_BOTS = [
     ("phone_classifier", phone_classifier_bot.run),
     ("tpad_enricher", tpad_enricher_bot.run),
     ("davidson_assessor", davidson_assessor_bot.run),
+    ("probate_property_enricher", probate_property_enricher_bot.run),
 ]
 
 
