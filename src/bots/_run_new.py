@@ -10,9 +10,26 @@ Add new scrapers to NEW_BOTS as you build them.
 
 from __future__ import annotations
 
+import os
 import sys
 import traceback
+from pathlib import Path
 from typing import List, Type
+
+# Load env vars from .env file at repo root (one place for all credentials).
+# Searches up from this file's location to find a .env.
+try:
+    from dotenv import load_dotenv
+    # Walk up until we find .env or hit filesystem root
+    _here = Path(__file__).resolve()
+    for _parent in [_here.parent, *_here.parents]:
+        candidate = _parent / ".env"
+        if candidate.exists():
+            load_dotenv(candidate, override=False)
+            break
+except ImportError:
+    # python-dotenv not installed; rely on env vars set externally
+    pass
 
 from . import hud_reo_bot
 from . import nashville_codes_bot

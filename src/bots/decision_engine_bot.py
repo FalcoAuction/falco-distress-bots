@@ -1,6 +1,6 @@
 """
 Decision engine — autonomous lead-grading + action-recommendation
-brain powered by Claude Haiku.
+brain powered by OpenAI gpt-5-mini.
 
 This is the autonomous front-to-back orchestrator. It runs daily AFTER
 all enrichers, walks every staged + live lead, and decides:
@@ -11,9 +11,11 @@ all enrichers, walks every staged + live lead, and decides:
   - whether to ESCALATE to Patrick for edge cases
 
 The LLM is given full context per lead (raw_payload + all enrichments
-+ provenance + history) and a prompt-cached FALCO operating manual
-(~30K tokens cached once across all calls). Per-lead cost: ~2K input
-+ 200 output via Haiku ≈ $0.0008. At 1500 leads/day ≈ $1.20/day total.
++ provenance + history) and a FALCO operating manual (~5K tokens of
+system prompt). OpenAI's automatic prompt caching makes the system
+prompt nearly-free across calls (cached prefix tokens billed at
+discounted rate). Per-lead cost: ~2K input + 200 output via gpt-5-mini
+≈ $0.0009. At 1500 leads/day ≈ $1.35/day total.
 
 Why LLM and not pure rules:
   - Rules handle the 90% of leads that fit clean patterns (auto-
@@ -64,9 +66,9 @@ from ._base import BotBase, _supabase
 from ._provenance import record_field
 
 try:
-    import anthropic
+    from openai import OpenAI
 except ImportError:
-    anthropic = None
+    OpenAI = None
 
 
 # ─── Cached system prompt ──────────────────────────────────────────────────
@@ -220,15 +222,15 @@ class DecisionEngineBot(BotBase):
     expected_min_yield = 1
     max_leads_per_run = 500   # ~$0.40/run at Haiku
 
-    model = "claude-haiku-4-5"
+    model = "gpt-5-mini"
     max_output_tokens = 400
 
     def __init__(self):
         super().__init__()
         self._client: Optional[Any] = None
-        self._anthropic_calls = 0
-        self._anthropic_input_tokens_total = 0
-        self._anthropic_output_tokens_total = 0
+        self._llm_calls = 0
+        self._llm_input_tokens_total = 0
+        self._llm_output_tokens_total = 0
 
     def scrape(self) -> List[Any]:
         return []
@@ -236,14 +238,14 @@ class DecisionEngineBot(BotBase):
     def _ensure_client(self) -> bool:
         if self._client is not None:
             return True
-        if anthropic is None:
-            self.logger.error("anthropic SDK not installed; pip install anthropic")
+        if OpenAI is None:
+            self.logger.error("openai SDK not installed; pip install openai")
             return False
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
-            self.logger.error("ANTHROPIC_API_KEY not set in env")
+            self.logger.error("OPENAI_API_KEY not set in env")
             return False
-        self._client = anthropic.Anthropic(api_key=api_key)
+        self._client = OpenAI(api_key=api_key)
         return True
 
     def run(self) -> Dict[str, Any]:
@@ -267,9 +269,9 @@ class DecisionEngineBot(BotBase):
             self._report_health(
                 status="failed", started_at=started, finished_at=datetime.now(timezone.utc),
                 fetched_count=0, parsed_count=0, staged_count=0, duplicate_count=0,
-                error_message="anthropic_unavailable",
+                error_message="openai_unavailable",
             )
-            return {"name": self.name, "status": "no_anthropic",
+            return {"name": self.name, "status": "no_openai",
                     "decided": 0, "errors": 0, "staged": 0, "duplicates": 0, "fetched": 0}
 
         decided = 0
@@ -332,16 +334,16 @@ class DecisionEngineBot(BotBase):
         )
         self.logger.info(
             f"rule_decided={rule_decided} llm_decided={decided} errors={errors} "
-            f"input_tokens={self._anthropic_input_tokens_total} "
-            f"output_tokens={self._anthropic_output_tokens_total} "
+            f"input_tokens={self._llm_input_tokens_total} "
+            f"output_tokens={self._llm_output_tokens_total} "
             f"breakdown={action_breakdown}"
         )
         return {
             "name": self.name, "status": status,
             "rule_decided": rule_decided, "llm_decided": decided,
             "errors": errors,
-            "input_tokens": self._anthropic_input_tokens_total,
-            "output_tokens": self._anthropic_output_tokens_total,
+            "input_tokens": self._llm_input_tokens_total,
+            "output_tokens": self._llm_output_tokens_total,
             "action_breakdown": action_breakdown,
             "error": error_message,
             "staged": decided + rule_decided, "duplicates": 0,
@@ -583,31 +585,32 @@ class DecisionEngineBot(BotBase):
 
     def _llm_decide(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         msg = build_user_message(row)
-        # Anthropic call with prompt caching
-        resp = self._client.messages.create(
+        # OpenAI chat completion with JSON-mode response.
+        # gpt-5-mini auto-caches the system-prompt prefix (no explicit
+        # cache_control directive needed); identical system prompts
+        # across calls are billed at the cached-input rate.
+        resp = self._client.chat.completions.create(
             model=self.model,
-            max_tokens=self.max_output_tokens,
-            system=[
-                {
-                    "type": "text",
-                    "text": SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            max_completion_tokens=self.max_output_tokens,
+            response_format={"type": "json_object"},
             messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": msg},
             ],
         )
-        self._anthropic_calls += 1
+        self._llm_calls += 1
         usage = getattr(resp, "usage", None)
         if usage is not None:
-            self._anthropic_input_tokens_total += getattr(usage, "input_tokens", 0)
-            self._anthropic_output_tokens_total += getattr(usage, "output_tokens", 0)
+            self._llm_input_tokens_total += getattr(usage, "prompt_tokens", 0) or 0
+            self._llm_output_tokens_total += getattr(usage, "completion_tokens", 0) or 0
 
         # Parse the JSON from the response
-        text = "".join(b.text for b in resp.content if hasattr(b, "text"))
-        # Strip markdown fences if present
-        text = text.strip()
+        choice = resp.choices[0] if getattr(resp, "choices", None) else None
+        if choice is None or not choice.message or not choice.message.content:
+            self.logger.warning("  LLM returned empty response")
+            return None
+        text = choice.message.content.strip()
+        # JSON-mode usually returns clean JSON, but strip markdown fences just in case
         if text.startswith("```"):
             text = text.split("\n", 1)[1] if "\n" in text else text
         if text.endswith("```"):
@@ -616,7 +619,6 @@ class DecisionEngineBot(BotBase):
         try:
             decision = json.loads(text)
         except json.JSONDecodeError:
-            # Try to extract JSON object from response
             import re
             m = re.search(r"\{[\s\S]+\}", text)
             if not m:
