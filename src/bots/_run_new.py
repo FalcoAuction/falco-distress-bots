@@ -37,9 +37,12 @@ from . import phone_classifier_bot
 from . import tpad_enricher_bot
 from . import davidson_assessor_bot
 from . import williamson_assessor_bot
+from . import shelby_assessor_bot
+from . import rutherford_assessor_bot
 from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
+from . import skip_trace_enricher_bot
 from . import stacked_distress_aggregator_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
@@ -70,10 +73,13 @@ NEW_BOTS = [
     ("tpad_enricher", tpad_enricher_bot.run),
     ("davidson_assessor", davidson_assessor_bot.run),
     ("williamson_assessor", williamson_assessor_bot.run),
+    ("shelby_assessor", shelby_assessor_bot.run),
+    ("rutherford_assessor", rutherford_assessor_bot.run),
     ("mortgage_estimator", mortgage_estimator_bot.run),
     ("probate_property_enricher", probate_property_enricher_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
+    ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
 ]
 
