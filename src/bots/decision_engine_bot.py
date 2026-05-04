@@ -130,13 +130,21 @@ For each lead, output a single JSON object with one of these actions:
 # Scoring framework
 
 priority_score factors (you weight them):
-  - DTS urgency: trustee_sale_date within 7 days → +25; 14d → +15;
-    30d → +8; >60d or null → 0
+  - DTS urgency: trustee_sale_date within 7 days → +50; 14d → +35;
+    30d → +20; 60d → +10; >60d or null → 0. An imminent trustee sale
+    is the highest-value signal — a literal auction we can route.
   - Equity: equity_pct ≥ 0.50 → +20; 0.30-0.49 → +14; 0.15-0.29 → +6;
-    <0.15 → 0; unknown → use mortgage_estimator confidence to decide
+    <0.15 → 0. CRITICAL: only score equity when the underlying mortgage
+    figure is trustworthy — either it came from a real foreclosure
+    notice (no mortgage_estimate blob) or mortgage_estimate.confidence
+    ≥ 0.4. If mortgage_estimate.source == "avm_only_tn_median" the
+    equity number is a TN-statewide population guess (AVM × 0.42), not
+    a per-lead fact — give it +4 max regardless of computed equity_pct.
   - Distress severity: BANKRUPTCY (Ch.13) → +18; PRE_FORECLOSURE → +16;
     TAX_LIEN with cumulative_owed > $5K → +12; PROBATE → +12; FSBO → +8;
     CODE_VIOLATION → +6; REO → +4
+  - Tax-lien severity penalty: TAX_LIEN with cumulative_owed < $1K →
+    -10 (forgetful homeowner, not motivated seller); $1K-$5K → -6.
   - Stacked-distress bonus: signal_count ≥ 3 → +15; 2 → +8
   - Absentee + out-of-state: out_of_state_owner=true → +10;
     distance_owner_to_property_miles > 200 → +5
@@ -146,6 +154,17 @@ priority_score factors (you weight them):
 
 Cap at 100. Subtract 20 if owner_class != "homeowner". Subtract 30 if
 trustee_sale_date is in the past.
+
+# Action thresholds
+
+  - PROMOTE_HOT: priority_score ≥ 80 (use this for imminent trustee
+    sales, BK with equity, stacked distress with phone). Do not
+    withhold HOT for missing phone alone — mail/door-knock paths
+    cover that.
+  - PROMOTE_WARM: priority_score 50-79
+  - PROMOTE_COLD: priority_score 20-49
+  - score < 20 with valid distress signal → PROMOTE_COLD or HOLD
+  - score < 20 with no actionable signal → REJECT_*
 
 # Safety rails (override LLM judgment)
 
@@ -293,17 +312,29 @@ class DecisionEngineBot(BotBase):
         action_breakdown: Dict[str, int] = {}
         error_message: Optional[str] = None
 
+        # Concurrency for LLM calls — gpt-5-mini latency is ~20-30s/call
+        # so a serial loop on 800 gray-area leads is 6-7 hours. With 8
+        # workers we get ~3-4s effective per call → 50 min for the same
+        # workload. OpenAI default rate limits comfortably handle 8
+        # concurrent gpt-5-mini calls (Tier 1 is 500 RPM).
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import threading
+        LLM_WORKERS = 8
+        write_lock = threading.Lock()
+
         try:
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} leads to grade")
 
+            # Pass 1: apply fast rules sequentially. Cheap, no LLM.
+            # Build the gray-area worklist for the parallel LLM pass.
+            gray_area = []
             for row in candidates[:self.max_leads_per_run]:
                 table = row["__table__"]
                 existing_meta = row.get("phone_metadata") or {}
                 if not isinstance(existing_meta, dict):
                     existing_meta = {}
 
-                # Step 1: try fast rules first (no LLM)
                 fast_result = self._fast_rules(row)
                 if fast_result:
                     rule_decided += 1
@@ -313,27 +344,59 @@ class DecisionEngineBot(BotBase):
                     action_breakdown[fast_result["action"]] = (
                         action_breakdown.get(fast_result["action"], 0) + 1
                     )
-                    continue
+                else:
+                    gray_area.append(row)
 
-                # Step 2: gray-area → LLM
+            self.logger.info(
+                f"Pass 1 done: {rule_decided} rule-decided. "
+                f"{len(gray_area)} leads → LLM pass with {LLM_WORKERS} workers"
+            )
+
+            # Pass 2: parallel LLM calls. Each worker handles one lead end-
+            # to-end (LLM call + DB write). Lock the DB writes only — the
+            # API itself is naturally I/O-parallel.
+            def _process_one(row):
                 try:
                     decision = self._llm_decide(row)
                 except Exception as e:
                     self.logger.warning(f"  LLM call failed id={row['id']}: {e}")
-                    errors += 1
-                    continue
-
+                    return ("error", None)
                 if not decision:
-                    errors += 1
-                    continue
+                    return ("error", None)
+                table = row["__table__"]
+                existing_meta = row.get("phone_metadata") or {}
+                if not isinstance(existing_meta, dict):
+                    existing_meta = {}
+                with write_lock:
+                    self._write_decision(client, row["id"], decision,
+                                          source="llm_openai",
+                                          table=table, existing_meta=existing_meta)
+                return ("ok", decision)
 
-                self._write_decision(client, row["id"], decision,
-                                      source="llm_openai",
-                                      table=table, existing_meta=existing_meta)
-                action_breakdown[decision["action"]] = (
-                    action_breakdown.get(decision["action"], 0) + 1
-                )
-                decided += 1
+            if gray_area:
+                completed_count = 0
+                log_every = max(10, len(gray_area) // 20)
+                with ThreadPoolExecutor(max_workers=LLM_WORKERS) as pool:
+                    futures = [pool.submit(_process_one, row) for row in gray_area]
+                    for fut in as_completed(futures):
+                        try:
+                            status, decision = fut.result()
+                        except Exception as e:
+                            self.logger.warning(f"  worker exc: {e}")
+                            errors += 1
+                            continue
+                        if status == "error":
+                            errors += 1
+                            continue
+                        decided += 1
+                        action_breakdown[decision["action"]] = (
+                            action_breakdown.get(decision["action"], 0) + 1
+                        )
+                        completed_count += 1
+                        if completed_count % log_every == 0:
+                            self.logger.info(
+                                f"  LLM progress: {completed_count}/{len(gray_area)}"
+                            )
 
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{tb.format_exc()}"
@@ -470,24 +533,55 @@ class DecisionEngineBot(BotBase):
                 "none", 0.95,
             )
 
-        # Rule 1c: business owner via expanded keyword set (owner_classifier
-        # only catches LLC/INC suffixes; many TN-tax-delinquent leads have
-        # no formal-suffix business names like "VICKYS BOUTIQUE",
-        # "UPPERCUT PROPERTY SVCS", "ABC TRAINING" that owner_classifier
-        # misses).
+        # Rule 1c: business owner via expanded keyword set. The
+        # owner_classifier upstream catches the obvious LLC/INC, but the
+        # corpus audit found 471 (15.7%) leads with business-keyword
+        # owner names slipping through because the classifier was running
+        # on a narrow word list. Every business that gets here would
+        # otherwise burn an LLM call — so we mirror the expanded
+        # classifier list here as a hard reject.
         owner_upper = (row.get("owner_name_records") or "").upper()
         BUSINESS_KEYWORDS = (
-            "BOUTIQUE", "TRAINING", "PROPERTY SVCS", "PROPERTIES",
-            "ENTERPRISES", "MINISTRIES", "MARKET", "STORE", "RESTAURANT",
-            "AUTO ", "BUILDERS", "CONSTRUCTION", "FUND ", "HOLDINGS",
-            "INVESTMENT", "VENTURES", "CAPITAL", "GROUP", "PARTNERS",
-            "REALTY", "ASSOC ", "ASSOCIATES",
+            # Generic legal forms (suffix-style; require space boundary)
+            " LLC ", " LLC.", " INC ", " INC.", " CORP", " CO.",
+            " LP ", " LP.", " LIMITED ", " LTD",
+            " PA ", " PA.", " PLLC", " PARTNERSHIP",
+            # Generic biz words
+            "BOUTIQUE", "TRAINING", "PROPERTIES", "ENTERPRISES",
+            "MINISTRIES", "MARKET", "STORE", "RESTAURANT", "BUILDERS",
+            "CONSTRUCTION", "FUND ", "HOLDINGS", "INVESTMENT", "VENTURES",
+            "CAPITAL", "GROUP", "PARTNERS", "REALTY", "ASSOC ",
+            "ASSOCIATES", "MANAGEMENT",
+            # Trade / service businesses (audit found these leaking)
+            "PAINTING", "CONTRACTING", "REMODELING", "EXCAVATING",
+            "EXCAVATION", "IRRIGATION", "LANDSCAPING", "TOWING",
+            "PLUMBING", "ROOFING", "FLOORING", "HVAC",
+            "CLEANING", "JANITORIAL", "DETAILING",
+            "CAR WASH", "CARWASH", "AUTO ", "TIRE",
+            "GRAPHICS", "PRINTING",
+            "SALON", "BARBER", "SPA",
+            "GYM", "FITNESS",
+            "STUDIO", "CHIROPRACTIC", "DENTAL",
+            "GRILL", "CAFE", "DINER", "BURGER", "PIZZA", "BBQ",
+            "SERVICES", "SVCS", "SVC ", "SOLUTIONS", "CONSULTING",
+            "MILLS", "HEMP", "FARMS", "INDUSTRIES", "MANUFACTURING",
+            "PRESSURE WASHING",
         )
         for kw in BUSINESS_KEYWORDS:
             if kw in owner_upper:
                 return self._mk_decision(
                     "REJECT_BUSINESS", 0,
                     f"Owner name contains business keyword: {kw.strip()}",
+                    "none", 0.85, flags=["NON_HOMEOWNER"],
+                )
+
+        # Rule 1d: glued-on business suffixes (SUBSURFACEPRO, AUTOPRO, etc.)
+        import re as _re
+        for suffix in ("PRO", "SVCS", "SVC"):
+            if _re.search(rf"\b[A-Z]{{5,}}{suffix}\b", owner_upper):
+                return self._mk_decision(
+                    "REJECT_BUSINESS", 0,
+                    f"Owner name has glued business suffix: {suffix}",
                     "none", 0.85, flags=["NON_HOMEOWNER"],
                 )
 
@@ -505,16 +599,28 @@ class DecisionEngineBot(BotBase):
                                        "Owner name contains LLC/INC/Corp suffix",
                                        "none", 0.95, flags=["NON_HOMEOWNER"])
 
-        # Rule 3: AVM out of residential range
+        # Rule 3: AVM out of residential range. Hard-REJECT the obvious
+        # commercial / rental / land cases ($1, $100, $25M, etc.) — these
+        # are mostly Craigslist parser artifacts (rental prices being
+        # written to property_value) or commercial parcels that slipped
+        # through county filters. Don't burn LLM cycles on these.
         pv = row.get("property_value")
         if pv is not None:
             try:
                 pv_n = float(pv)
-                if pv_n < 20000 or pv_n > 5000000:
+                if pv_n < 20000:
                     return self._mk_decision(
-                        "ESCALATE_TO_PATRICK", 25,
-                        f"property_value=${pv_n:,.0f} outside residential range",
-                        "none", 0.9, flags=["ANOMALOUS_AVM"],
+                        "REJECT_NOT_RESIDENTIAL", 0,
+                        f"property_value=${pv_n:,.0f} below residential floor "
+                        f"(likely rental price or land lot)",
+                        "none", 0.95, flags=["ANOMALOUS_AVM"],
+                    )
+                if pv_n > 5000000:
+                    return self._mk_decision(
+                        "REJECT_NOT_RESIDENTIAL", 0,
+                        f"property_value=${pv_n:,.0f} above residential ceiling "
+                        f"(likely commercial parcel)",
+                        "none", 0.95, flags=["ANOMALOUS_AVM"],
                     )
             except (ValueError, TypeError):
                 pass
@@ -606,30 +712,54 @@ class DecisionEngineBot(BotBase):
         return flags
 
     def _compute_priority(self, row: Dict[str, Any]) -> int:
-        """Quick rule-based priority_score (0-100)."""
+        """Quick rule-based priority_score (0-100).
+
+        Weights are tuned so an upcoming-trustee-sale lead with phone +
+        equity reliably scores 80+ (PROMOTE_HOT). An 11-day-out trustee
+        sale is the highest-value lead in the corpus — a literal auction
+        we can route — and should not get COLD just because the owner
+        name reads ambiguous.
+        """
         score = 0
         pm = row.get("phone_metadata") or {}
         if not isinstance(pm, dict):
             pm = {}
 
-        # DTS urgency
+        # DTS urgency — bumped weights so 14d-out trustee sales clear
+        # the HOT threshold (was 25/15/8; now 50/35/20).
         sale_date = row.get("trustee_sale_date")
         if sale_date:
             try:
                 d = (datetime.fromisoformat(str(sale_date)[:10]).date()
                      - datetime.now(timezone.utc).date()).days
                 if 0 <= d <= 7:
-                    score += 25
+                    score += 50
                 elif 0 <= d <= 14:
-                    score += 15
+                    score += 35
                 elif 0 <= d <= 30:
-                    score += 8
+                    score += 20
+                elif 0 <= d <= 60:
+                    score += 10
             except Exception:
                 pass
 
-        # Equity
+        # Equity — only count when mortgage_estimate is HIGH/MED confidence.
+        # The TN-median fallback (avm_only_tn_median, conf=0.2) is a
+        # population guess, not a per-lead signal; treating it as real
+        # equity inflates every Hamilton tax-delinquent lead with a fake
+        # 58% number.
         pv, mb = row.get("property_value"), row.get("mortgage_balance")
-        if pv and mb:
+        me = pm.get("mortgage_estimate") or {}
+        me_conf = me.get("confidence", 0) if isinstance(me, dict) else 0
+        me_source = me.get("source") if isinstance(me, dict) else None
+        # Trust equity if (a) mortgage from a real foreclosure notice
+        # (no estimate blob — pv+mb came from ROD/lis-pendens), or (b)
+        # estimate confidence ≥ 0.4 (sale-based or avm_plus_age path).
+        equity_trustworthy = (
+            (pv and mb and not me) or  # real ROD-derived mortgage
+            (me_conf >= 0.4)
+        )
+        if pv and mb and equity_trustworthy:
             try:
                 pv_n, mb_n = float(pv), float(mb)
                 if pv_n > 0:
@@ -642,6 +772,10 @@ class DecisionEngineBot(BotBase):
                         score += 6
             except Exception:
                 pass
+        # Soft equity credit when only the TN-median guess is available
+        # — give 4 points so it's not zero, but doesn't dominate.
+        elif pv and mb and me_source == "avm_only_tn_median":
+            score += 4
 
         # Distress severity
         dt = row.get("distress_type")
@@ -649,6 +783,18 @@ class DecisionEngineBot(BotBase):
             "BANKRUPTCY": 18, "PRE_FORECLOSURE": 16, "TAX_LIEN": 12,
             "PROBATE": 12, "FSBO": 8, "CODE_VIOLATION": 6, "REO": 4,
         }.get(dt, 0)
+
+        # Tax-lien severity penalty: low-amount Hamilton-style liens
+        # (<$5K cumulative) are forgetful homeowners, not motivated
+        # sellers. Cancel out most of the +12 distress weight.
+        if dt == "TAX_LIEN":
+            tax_amt = self._extract_tax_amount(row)
+            if tax_amt is not None:
+                if tax_amt < 1000:
+                    score -= 10  # net -2 from TAX_LIEN's +12
+                elif tax_amt < 5000:
+                    score -= 6   # net +6
+                # >= 5000: keep full +12
 
         # Stacked
         stack = pm.get("distress_stack") or {}
@@ -668,12 +814,46 @@ class DecisionEngineBot(BotBase):
         if row.get("phone"):
             score += 5
 
-        # Mortgage confidence boost
-        me = pm.get("mortgage_estimate") or {}
-        if me.get("confidence", 0) >= 0.7:
+        # Mortgage confidence boost (real-mortgage signal, not estimate)
+        if me_conf >= 0.7:
             score += 3
 
         return min(100, max(0, score))
+
+    @staticmethod
+    def _extract_tax_amount(row: Dict[str, Any]) -> Optional[float]:
+        """Pull the cumulative tax-lien amount from raw_payload — Hamilton
+        and other counties use different keys, so check several."""
+        raw = row.get("raw_payload") or {}
+        if not isinstance(raw, dict):
+            return None
+        # Hamilton tax-delinquent
+        h = raw.get("hamilton_tax_delinquent") or raw.get("hamilton_assessor") or {}
+        if isinstance(h, dict):
+            for k in ("cumulative_tax_owed", "total_due", "tax_amount",
+                      "amount_due", "balance_due", "total_owed"):
+                if h.get(k) is not None:
+                    try:
+                        return float(str(h[k]).replace(",", "").replace("$", ""))
+                    except (TypeError, ValueError):
+                        pass
+        # TN tax delinquent (state-level)
+        t = raw.get("tn_tax_delinquent") or {}
+        if isinstance(t, dict):
+            for k in ("cumulative_tax_owed", "total_due", "tax_amount", "amount_due"):
+                if t.get(k) is not None:
+                    try:
+                        return float(str(t[k]).replace(",", "").replace("$", ""))
+                    except (TypeError, ValueError):
+                        pass
+        # Top-level fallback
+        for k in ("cumulative_tax_owed", "total_due", "tax_amount", "amount_due"):
+            if raw.get(k) is not None:
+                try:
+                    return float(str(raw[k]).replace(",", "").replace("$", ""))
+                except (TypeError, ValueError):
+                    pass
+        return None
 
     # ── LLM call ────────────────────────────────────────────────────────────
 
