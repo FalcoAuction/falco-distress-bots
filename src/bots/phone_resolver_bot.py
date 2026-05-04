@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._field_confidence import phone_trust
 from ._provenance import record_field
 
 try:
@@ -293,8 +294,13 @@ class PhoneResolverBot(BotBase):
                         continue
 
                     update: Dict[str, Any] = {}
-                    # Only set phone if currently null OR confidence beats existing
+                    # Only set phone if currently null OR confidence beats the
+                    # best known global phone confidence (BatchData, prior
+                    # resolver, etc). Notice-body attorney phones must not
+                    # overwrite a stronger homeowner skip trace.
                     current_conf = existing_resolver.get("confidence", 0)
+                    global_conf = phone_trust(row).confidence if row.get("phone") else 0
+                    current_conf = max(current_conf, global_conf)
                     if not row.get("phone") or best["confidence"] > current_conf:
                         update["phone"] = phone
 

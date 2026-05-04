@@ -70,6 +70,13 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
+from ._field_confidence import (
+    deep_merge_dict,
+    equity_trust,
+    mortgage_balance_trust,
+    phone_trust,
+    property_value_trust,
+)
 from ._provenance import record_field
 
 try:
@@ -153,6 +160,12 @@ priority_score factors (you weight them):
   - Mortgage confidence: foreclosure_notice or schedule_d → +5;
     amortization_estimate confidence ≥ 0.5 → +3
 
+2026-05-04 trust-gate override: field_trust is authoritative. Do not
+hard reject or auto-promote from equity unless property_value and
+mortgage_balance are trusted_for_hard_gate. Address-only stacked distress
+is capped at +20/+14/+8. Phone points require right-person, non-DNC
+confidence; notice-body phones are usually trustee/attorney phones.
+
 Cap at 100. Subtract 20 if owner_class != "homeowner". Subtract 30 if
 trustee_sale_date is in the past.
 
@@ -218,6 +231,11 @@ def build_user_message(lead: Dict[str, Any]) -> str:
         "distress_type": lead.get("distress_type"),
         "property_value": lead.get("property_value"),
         "mortgage_balance": lead.get("mortgage_balance"),
+        "field_trust": {
+            "property_value": property_value_trust(lead).as_dict(),
+            "mortgage_balance": mortgage_balance_trust(lead).as_dict(),
+            "phone": phone_trust(lead).as_dict(),
+        },
         "trustee_sale_date": lead.get("trustee_sale_date"),
         "phone": lead.get("phone"),
         "phone_confidence": (pm.get("phone_resolver") or {}).get("confidence"),
@@ -452,13 +470,13 @@ class DecisionEngineBot(BotBase):
         """
         STAGING_FIELDS = (
             "id, property_address, county, owner_name_records, full_name, "
-            "distress_type, property_value, mortgage_balance, "
+            "distress_type, property_value, property_value_source, mortgage_balance, "
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
             "admin_notes, bot_source, priority_score"
         )
         LIVE_FIELDS = (
             "id, property_address, county, owner_name_records, full_name, "
-            "distress_type, property_value, mortgage_balance, "
+            "distress_type, property_value, property_value_source, mortgage_balance, "
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
             "admin_notes, source, priority_score"
         )
@@ -667,10 +685,11 @@ class DecisionEngineBot(BotBase):
 
         # Rule 5: underwater
         mb = row.get("mortgage_balance")
+        eq_trust = equity_trust(row)
         if pv is not None and mb is not None:
             try:
                 pv_n, mb_n = float(pv), float(mb)
-                if pv_n > 0 and (mb_n / pv_n) >= 0.95:
+                if pv_n > 0 and (mb_n / pv_n) >= 0.95 and eq_trust["hard_gate_allowed"]:
                     return self._mk_decision(
                         "REJECT_NO_EQUITY", 0,
                         f"underwater: ${mb_n:,.0f} / ${pv_n:,.0f} = {mb_n/pv_n:.0%}",
@@ -681,8 +700,10 @@ class DecisionEngineBot(BotBase):
 
         # Rule 6: very-clear high-equity hot lead, full data — auto-promote
         skip_trace = pm.get("skip_trace") or {}
+        phone_ok = phone_trust(row).trusted_for_hard_gate
         if (pv and mb and float(pv) > 0 and float(mb) / float(pv) <= 0.50
-                and row.get("phone")
+                and eq_trust["hard_gate_allowed"]
+                and phone_ok
                 and owner_class == "homeowner"
                 and row.get("distress_type") in ("PRE_FORECLOSURE", "BANKRUPTCY", "PROBATE", "TAX_LIEN")):
             score = self._compute_priority(row)
@@ -767,38 +788,28 @@ class DecisionEngineBot(BotBase):
             except Exception:
                 pass
 
-        # Equity — only count when mortgage_estimate is HIGH/MED confidence.
-        # The TN-median fallback (avm_only_tn_median, conf=0.2) is a
-        # population guess, not a per-lead signal; treating it as real
-        # equity inflates every Hamilton tax-delinquent lead with a fake
-        # 58% number.
+        # Equity - only count when shared field-trust rules allow it.
         pv, mb = row.get("property_value"), row.get("mortgage_balance")
-        me = pm.get("mortgage_estimate") or {}
-        me_conf = me.get("confidence", 0) if isinstance(me, dict) else 0
-        me_source = me.get("source") if isinstance(me, dict) else None
-        # Trust equity if (a) mortgage from a real foreclosure notice
-        # (no estimate blob — pv+mb came from ROD/lis-pendens), or (b)
-        # estimate confidence ≥ 0.4 (sale-based or avm_plus_age path).
-        equity_trustworthy = (
-            (pv and mb and not me) or  # real ROD-derived mortgage
-            (me_conf >= 0.4)
-        )
-        if pv and mb and equity_trustworthy:
+        eqt = equity_trust(row)
+        mortgage_trust = eqt["mortgage"]
+        # Medium confidence gets half credit; hard-gate confidence gets full credit.
+        if pv and mb and eqt["scoring_allowed"]:
             try:
                 pv_n, mb_n = float(pv), float(mb)
                 if pv_n > 0:
                     eq = (pv_n - mb_n) / pv_n
+                    multiplier = 1.0 if eqt["hard_gate_allowed"] else 0.5
                     if eq >= 0.50:
-                        score += 20
+                        score += round(20 * multiplier)
                     elif eq >= 0.30:
-                        score += 14
+                        score += round(14 * multiplier)
                     elif eq >= 0.15:
-                        score += 6
+                        score += round(6 * multiplier)
             except Exception:
                 pass
         # Soft equity credit when only the TN-median guess is available
         # — give 4 points so it's not zero, but doesn't dominate.
-        elif pv and mb and me_source == "avm_only_tn_median":
+        elif pv and mb and mortgage_trust.source == "avm_only_tn_median":
             score += 4
 
         # Distress severity
@@ -820,19 +831,14 @@ class DecisionEngineBot(BotBase):
                     score -= 6   # net +6
                 # >= 5000: keep full +12
 
-        # Stacked-distress — multiple distress signals on the same property
-        # are massively more valuable than any one signal alone. Two signals
-        # = the homeowner has multiple problems (correlated motivation).
-        # Three+ = the situation is acute. Bumped from +15/+8 → +25/+15
-        # to lift legitimately-stacked leads out of the COLD/DEAD bucket.
+        # Stacked distress is useful, but address-only matching is not parcel proof.
         stack = pm.get("distress_stack") or {}
         if stack.get("signal_count", 0) >= 4:
-            score += 35  # acute multi-signal — almost always worth a call
+            score += 20
         elif stack.get("signal_count", 0) >= 3:
-            score += 25
+            score += 14
         elif stack.get("signal_count", 0) >= 2:
-            score += 15
-
+            score += 8
         # Absentee
         skip = pm.get("skip_trace") or {}
         if skip.get("is_out_of_state_owner"):
@@ -840,12 +846,15 @@ class DecisionEngineBot(BotBase):
         elif skip.get("is_absentee_owner"):
             score += 5
 
-        # Phone freshness
-        if row.get("phone"):
+        # Phone freshness/right-person confidence
+        pt = phone_trust(row)
+        if pt.trusted_for_hard_gate:
             score += 5
+        elif pt.confidence >= 0.40 and pt.source != "phone_resolver:notice_body":
+            score += 2
 
-        # Mortgage confidence boost (real-mortgage signal, not estimate)
-        if me_conf >= 0.7:
+        # Mortgage confidence boost
+        if mortgage_trust.confidence >= 0.7 and mortgage_trust.trusted_for_hard_gate:
             score += 3
 
         return min(100, max(0, score))
@@ -990,8 +999,7 @@ class DecisionEngineBot(BotBase):
 
         # Fast path: caller passed table + existing_meta from the candidates row
         if table and existing_meta is not None:
-            em = dict(existing_meta) if isinstance(existing_meta, dict) else {}
-            em.update(meta_payload)
+            em = deep_merge_dict(existing_meta, meta_payload)
             update = {
                 "phone_metadata": em,
                 "priority_score": decision["priority_score"],
@@ -1025,7 +1033,7 @@ class DecisionEngineBot(BotBase):
                 em = rows[0].get("phone_metadata") or {}
                 if not isinstance(em, dict):
                     em = {}
-                em.update(meta_payload)
+                em = deep_merge_dict(em, meta_payload)
                 update = {
                     "phone_metadata": em,
                     "priority_score": decision["priority_score"],

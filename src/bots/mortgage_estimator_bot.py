@@ -462,9 +462,9 @@ class MortgageEstimatorBot(BotBase):
         t = raw.get("tpad") or {}
         if isinstance(t, dict):
             if not sale_price and t.get("last_sale_price"):
-                sale_price = float(t["last_sale_price"])
-            if not sale_date and t.get("last_sale_date"):
-                sale_date = t["last_sale_date"]
+                sale_price = float(str(t["last_sale_price"]).replace(",", ""))
+            if not sale_date and (t.get("last_sale_date") or t.get("last_sale")):
+                sale_date = t.get("last_sale_date") or t.get("last_sale")
             if not avm and t.get("appraised_value"):
                 try:
                     avm = float(str(t["appraised_value"]).replace(",", ""))

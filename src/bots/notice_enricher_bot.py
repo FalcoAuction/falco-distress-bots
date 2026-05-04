@@ -62,6 +62,11 @@ except ImportError:
 from io import BytesIO
 from urllib.parse import urljoin
 
+try:
+    from ._field_confidence import deep_merge_dict
+except ImportError:
+    from _field_confidence import deep_merge_dict
+
 
 # Patterns matching how various scrapers store source URLs in admin_notes.
 # We'll regex-extract since the live homeowner_requests table doesn't have
@@ -374,8 +379,10 @@ def update_lead(
     # Promote borrower to owner_name_records when present and current is empty
     if details.get("borrower") and not lead.get("owner_name_records"):
         update["owner_name_records"] = details["borrower"]
-    # Mortgage balance estimate: if we got original principal, compute a
-    # 4%-amortized balance over time-since-DOT-date.
+    mortgage_signals: List[Dict[str, Any]] = []
+    # Original principal is useful context, but it is not current payoff.
+    # Keep the amortized estimate in metadata instead of poisoning the
+    # mortgage_balance column that downstream math treats as payoff.
     if "original_principal_value" in details and details.get("dot_date"):
         try:
             dot_dt = datetime.strptime(details["dot_date"], "%B %d, %Y")
@@ -385,13 +392,37 @@ def update_lead(
             paid = min(yrs * 12, n)
             remaining = (((1 + r) ** n) - ((1 + r) ** paid)) / (((1 + r) ** n) - 1)
             est_balance = round(details["original_principal_value"] * remaining)
-            update["mortgage_balance"] = est_balance
             details["amortized_balance_estimate"] = est_balance
+            mortgage_signals.append({
+                "source": "notice_enricher",
+                "kind": "original_principal",
+                "amount": est_balance,
+                "confidence": 0.45,
+                "original_principal": details["original_principal_value"],
+                "dot_date": details.get("dot_date"),
+                "note": "Amortized original principal estimate; not verified current payoff.",
+            })
         except Exception:
             pass
-    # If current_debt is present, prefer it
+    # Default/arrears amount is also not payoff. Preserve it as a signal.
     if "default_amount_value" in details:
-        update["mortgage_balance"] = int(details["default_amount_value"])
+        mortgage_signals.append({
+            "source": "notice_enricher",
+            "kind": "default_amount",
+            "amount": int(details["default_amount_value"]),
+            "confidence": 0.30,
+            "note": "Default/arrears amount from notice; not current payoff.",
+        })
+
+    if mortgage_signals:
+        existing_meta = lead.get("phone_metadata") or {}
+        signal = mortgage_signals[0]
+        if any(s.get("kind") == "default_amount" for s in mortgage_signals):
+            signal = next(s for s in mortgage_signals if s.get("kind") == "default_amount")
+        update["phone_metadata"] = deep_merge_dict(existing_meta, {
+            "mortgage_signal": signal,
+            "mortgage_signals": mortgage_signals,
+        })
 
     # Append to admin_notes — both for the live (no-raw_payload) path
     # and as a human-readable summary for the staging path
@@ -439,13 +470,13 @@ def run() -> Dict[str, Any]:
         (
             "homeowner_requests_staging",
             "id, source_url, owner_name_records, admin_notes, raw_payload, "
-            "property_address, mortgage_balance",
+            "property_address, mortgage_balance, phone_metadata",
         ),
         # live table has no source_url column; URL lives in admin_notes
         (
             "homeowner_requests",
             "id, owner_name_records, admin_notes, "
-            "property_address, mortgage_balance",
+            "property_address, mortgage_balance, phone_metadata",
         ),
     ]
     for table, columns in table_specs:

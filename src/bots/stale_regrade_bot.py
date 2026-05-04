@@ -24,6 +24,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
+from ._field_confidence import equity_trust, phone_trust
 
 
 # How long a grade is considered "fresh enough" before we re-check.
@@ -114,8 +115,9 @@ class StaleRegradeBot(BotBase):
             try:
                 q = (
                     client.table(table)
-                    .select("id, priority_score, property_value, mortgage_balance, "
-                            "phone, phone_metadata, raw_payload")
+                    .select("id, priority_score, property_value, property_value_source, "
+                            "mortgage_balance, phone, owner_name_records, "
+                            "phone_metadata, raw_payload")
                     .not_.is_("priority_score", "null")
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
@@ -152,8 +154,16 @@ class StaleRegradeBot(BotBase):
         action = de.get("action") if isinstance(de, dict) else None
         graded_at = de.get("decided_at") if isinstance(de, dict) else None
 
+        if action == "REJECT_NO_EQUITY" and not equity_trust(row)["hard_gate_allowed"]:
+            return True
+
         # (a) HOLD_FOR_DATA → re-grade if AVM now exists
-        if action == "HOLD_FOR_DATA" and row.get("property_value"):
+        if action == "HOLD_FOR_DATA" and (
+            row.get("property_value")
+            or row.get("mortgage_balance")
+            or row.get("phone")
+            or row.get("owner_name_records")
+        ):
             return True
 
         # (b) age-based: parse graded_at and compare
@@ -173,6 +183,9 @@ class StaleRegradeBot(BotBase):
         if action == "HOLD_FOR_DATA" and (
             row.get("property_value") or row.get("phone")
         ):
+            return True
+
+        if equity_trust(row)["hard_gate_allowed"] or phone_trust(row).trusted_for_hard_gate:
             return True
 
         return False

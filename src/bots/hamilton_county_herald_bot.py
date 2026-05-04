@@ -225,7 +225,6 @@ class HamiltonCountyHeraldBot(BotBase):
             county="hamilton",
             full_name=borrower,
             owner_name_records=borrower,
-            mortgage_balance=principal or delinquent,
             distress_type="PRE_FORECLOSURE",
             admin_notes=" · ".join(admin_parts),
             source_url=url,

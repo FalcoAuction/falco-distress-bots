@@ -125,6 +125,18 @@ def _norm_county(county: str) -> Optional[str]:
     return None
 
 
+def _iso_date(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    s = str(value).strip()
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s[:10], fmt).date().isoformat()
+        except ValueError:
+            continue
+    return s[:10] if re.match(r"^\d{4}-\d{2}-\d{2}$", s[:10]) else None
+
+
 def _build_session() -> "requests.Session":
     s = requests.Session()
     s.headers["User-Agent"] = "FALCO-Lead-Research/1.0 (+ops@falco.llc)"
@@ -200,6 +212,8 @@ def fetch_detail(
         "tax_year": r"Tax Year[:\s]+(\d{4})",
         "reappraisal_year": r"Reappraisal Year[:\s]+(\d{4})",
         "property_class": r"Property Class[:\s]+([A-Za-z][A-Za-z0-9 ,/-]*?)(?:\s{2,}|$)",
+        "last_sale_price": r"(?:Last Sale Price|Sale Price)[:\s]*\$?([\d,]+)",
+        "last_sale_date": r"(?:Last Sale Date|Sale Date)[:\s]+(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})",
     }
     for field, pat in field_patterns.items():
         m = re.search(pat, text, re.IGNORECASE)
@@ -215,12 +229,14 @@ def fetch_detail(
         out["mailing_address"] = mail_m.group(1).strip()
 
     # Normalize values to floats where possible
-    for k in ("appraised_value", "appraised_value_alt", "land_value", "building_value"):
+    for k in ("appraised_value", "appraised_value_alt", "land_value", "building_value", "last_sale_price"):
         if k in out:
             try:
                 out[k.replace("_alt", "") + "_num"] = float(out[k].replace(",", ""))
             except ValueError:
                 pass
+    if out.get("last_sale_date"):
+        out["last_sale_date"] = _iso_date(out["last_sale_date"])
 
     return out
 
@@ -315,6 +331,8 @@ def enrich_lead(
         return True, {"match_only": True, "match": match}
 
     detail = fetch_detail(session, parcel_id, jur, parcel_key)
+    last_sale_raw = match.get("dateOfSaleShort")
+    last_sale_date = detail.get("last_sale_date") or _iso_date(last_sale_raw)
     out = {
         "tpad": {
             "parcel_id": parcel_id,
@@ -327,7 +345,9 @@ def enrich_lead(
             "lot": match.get("lotNumber"),
             "class": match.get("class"),
             "property_type": match.get("propertyType"),
-            "last_sale": match.get("dateOfSaleShort"),
+            "last_sale": last_sale_raw,
+            "last_sale_date": last_sale_date,
+            "last_sale_price": detail.get("last_sale_price_num"),
             "tax_year": match.get("taxYear"),
             "gis_map": match.get("gisMap"),
             **detail,

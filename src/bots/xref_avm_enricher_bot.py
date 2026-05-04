@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._field_confidence import deep_merge_dict, property_value_trust
 from ._provenance import record_field
 
 
@@ -55,12 +56,24 @@ def _normalize_address(addr: str) -> str:
     )
     for pat, repl in abbrev_map:
         s = re.sub(pat, repl, s)
-    # Drop directional modifiers that vary across sources
-    s = re.sub(r"\b(NORTH|SOUTH|EAST|WEST|N|S|E|W)\b\.?", "", s)
+    # Preserve directional modifiers. Dropping them makes 123 E Main and
+    # 123 W Main collapse to the same parcel, which is worse than a miss.
+    directional_map = (
+        (r"\bN\.?\b", "NORTH"), (r"\bS\.?\b", "SOUTH"),
+        (r"\bE\.?\b", "EAST"), (r"\bW\.?\b", "WEST"),
+    )
+    for pat, repl in directional_map:
+        s = re.sub(pat, repl, s)
     # Normalize commas + whitespace
     s = re.sub(r"[,.]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s
+
+
+def _norm_county(county: Optional[str]) -> str:
+    if not county:
+        return ""
+    return re.sub(r"\s+county$", "", str(county).strip().lower())
 
 
 class XrefAvmEnricherBot(BotBase):
@@ -119,15 +132,18 @@ class XrefAvmEnricherBot(BotBase):
                 recipients = [(t, r) for t, r in group if not r.get("property_value")]
                 if not donors or not recipients:
                     continue
-                # Pick the donor with highest property_value confidence
-                # (proxy: prefer one whose phone_metadata has lead_field_provenance
-                # entries; fallback: any donor with non-null AVM).
+                donors.sort(key=lambda item: property_value_trust(item[1]).confidence, reverse=True)
                 donor_table, donor_row = donors[0]
                 donor_avm = donor_row.get("property_value")
                 donor_owner = donor_row.get("owner_name_records")
                 donor_county = donor_row.get("county")
 
                 for rcpt_table, rcpt_row in recipients:
+                    rcpt_county = rcpt_row.get("county")
+                    if donor_county and rcpt_county and _norm_county(donor_county) != _norm_county(rcpt_county):
+                        skipped += 1
+                        continue
+                    confidence = 0.65 if donor_county and rcpt_county else 0.55
                     update: Dict[str, Any] = {"property_value": donor_avm}
                     # Also propagate owner_name + county if missing
                     if not rcpt_row.get("owner_name_records") and donor_owner:
@@ -135,6 +151,19 @@ class XrefAvmEnricherBot(BotBase):
                         owner_propagated += 1
                     if not rcpt_row.get("county") and donor_county:
                         update["county"] = donor_county
+                    existing_meta = rcpt_row.get("phone_metadata") or {}
+                    if not isinstance(existing_meta, dict):
+                        existing_meta = {}
+                    update["phone_metadata"] = deep_merge_dict(existing_meta, {
+                        "property_value_xref": {
+                            "source": "xref_avm_enricher",
+                            "confidence": confidence,
+                            "donor_table": donor_table,
+                            "donor_id": donor_row.get("id"),
+                            "matched_address": norm_addr[:80],
+                            "note": "Address/county cross-reference; verify parcel before seller-facing math.",
+                        }
+                    })
 
                     try:
                         client.table(rcpt_table).update(update).eq(
@@ -146,7 +175,7 @@ class XrefAvmEnricherBot(BotBase):
                             record_field(
                                 client, rcpt_row["id"], "property_value",
                                 donor_avm, "xref_avm_enricher",
-                                confidence=0.9,
+                                confidence=confidence,
                                 metadata={
                                     "donor_table": donor_table,
                                     "donor_id": donor_row.get("id"),
@@ -199,7 +228,8 @@ class XrefAvmEnricherBot(BotBase):
             try:
                 r = client.table(table).select(
                     "id, property_address, property_value, "
-                    "owner_name_records, county"
+                    "owner_name_records, county, property_value_source, "
+                    "raw_payload, phone_metadata"
                 ).order("id").range(
                     page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1
                 ).execute()

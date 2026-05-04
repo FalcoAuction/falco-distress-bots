@@ -135,6 +135,11 @@ def _rank_phones(phones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             conf = 0.65
         else:
             conf = 0.5
+        if p.get("confidence_cap") is not None:
+            try:
+                conf = min(conf, float(p["confidence_cap"]))
+            except (TypeError, ValueError):
+                pass
         out.append({
             "phone": digits,
             "dnc": dnc,
@@ -143,6 +148,8 @@ def _rank_phones(phones: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             "score": score,
             "confidence": conf,
             "phone_type": p.get("type") or p.get("phoneType"),
+            "match_mode": p.get("match_mode"),
+            "person_match": p.get("person_match"),
         })
     # Sort: not-DNC, reachable, tested, score
     out.sort(
@@ -408,14 +415,24 @@ class BatchDataSkipTraceBot(BotBase):
     ) -> List[Dict[str, Any]]:
         """Single skip-trace call. Tries with owner_name first, then
         retries without if no result (some matches need to be name-free)."""
-        phones = self._post(api_key, address, owner_name or None)
-        if not phones and owner_name:
-            phones = self._post(api_key, address, None)
-        return phones
+        phones, person = self._post(api_key, address, owner_name or None)
+        if phones:
+            person_match = self._person_name_matches(owner_name, person)
+            return self._annotate_phones(
+                phones,
+                "owner_name_verified" if person_match else "owner_name_unverified",
+                0.85 if person_match else 0.60,
+                person_match,
+            )
+        if owner_name:
+            phones, person = self._post(api_key, address, None)
+            if phones:
+                return self._annotate_phones(phones, "address_only", 0.45, False)
+        return []
 
     def _post(
         self, api_key: str, address: Dict[str, str], owner_name: Optional[str]
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
         payload = {"requests": [{"propertyAddress": address}]}
         if owner_name:
             payload["requests"][0]["ownerName"] = owner_name
@@ -434,7 +451,7 @@ class BatchDataSkipTraceBot(BotBase):
         results = data.get("results") or {}
         persons = results.get("persons") if isinstance(results, dict) else None
         if not isinstance(persons, list) or not persons:
-            return []
+            return ([], None)
         first = persons[0]
         phones = (
             first.get("phoneNumbers")
@@ -442,7 +459,39 @@ class BatchDataSkipTraceBot(BotBase):
             or first.get("ownerPhones")
             or []
         )
-        return phones if isinstance(phones, list) else []
+        return (phones if isinstance(phones, list) else [], first)
+
+    @staticmethod
+    def _annotate_phones(
+        phones: List[Dict[str, Any]], match_mode: str, confidence_cap: float, person_match: bool
+    ) -> List[Dict[str, Any]]:
+        out = []
+        for phone in phones:
+            if not isinstance(phone, dict):
+                continue
+            enriched = dict(phone)
+            enriched["match_mode"] = match_mode
+            enriched["confidence_cap"] = confidence_cap
+            enriched["person_match"] = person_match
+            out.append(enriched)
+        return out
+
+    @staticmethod
+    def _person_name_matches(owner_name: str, person: Optional[Dict[str, Any]]) -> bool:
+        if not owner_name or not isinstance(person, dict):
+            return False
+        person_name = (
+            person.get("name") or person.get("fullName") or
+            " ".join(str(person.get(k) or "") for k in ("firstName", "middleName", "lastName"))
+        )
+        owner_tokens = re.findall(r"[A-Z]+", owner_name.upper())
+        person_tokens = re.findall(r"[A-Z]+", str(person_name).upper())
+        if len(owner_tokens) < 2 or len(person_tokens) < 2:
+            return False
+        owner_first, owner_last = owner_tokens[0], owner_tokens[-1]
+        return owner_last in person_tokens and any(
+            token[0] == owner_first[0] for token in person_tokens if token
+        )
 
     # ── Writes ─────────────────────────────────────────────────────────────
     def _write_phone(
@@ -463,6 +512,8 @@ class BatchDataSkipTraceBot(BotBase):
             "primary_reachable": primary["reachable"],
             "primary_tested": primary["tested"],
             "primary_dnc": primary["dnc"],
+            "primary_match_mode": primary.get("match_mode"),
+            "primary_person_match": primary.get("person_match"),
             "secondary_phone": secondary["phone"] if secondary else None,
             "secondary_dnc": secondary["dnc"] if secondary else None,
             "all_phones": all_phones,
@@ -494,6 +545,8 @@ class BatchDataSkipTraceBot(BotBase):
                         "reachable": primary["reachable"],
                         "tested": primary["tested"],
                         "alt_count": len(alts),
+                        "match_mode": primary.get("match_mode"),
+                        "person_match": primary.get("person_match"),
                     },
                 )
         except Exception as e:

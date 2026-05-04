@@ -232,7 +232,6 @@ class NashvilleLedgerBot(BotBase):
             county=county,
             full_name=borrower,
             owner_name_records=borrower,
-            mortgage_balance=principal,
             trustee_sale_date=sale_date,
             distress_type="PRE_FORECLOSURE",
             admin_notes=" · ".join(admin_parts),
