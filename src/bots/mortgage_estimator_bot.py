@@ -320,7 +320,7 @@ class MortgageEstimatorBot(BotBase):
 
                     # Skip if we already have a higher-confidence value
                     # (foreclosure notices give actual delinquent amounts;
-                    # don't overwrite those with an estimate)
+                    # don't overwrite those with an estimate).
                     if row.get("mortgage_balance"):
                         existing_meta = row.get("phone_metadata") or {}
                         if isinstance(existing_meta, dict):
@@ -328,6 +328,15 @@ class MortgageEstimatorBot(BotBase):
                             if existing_est.get("confidence", 0) >= estimate["confidence"]:
                                 skipped += 1
                                 continue
+                        # Real mortgage_balance present (from a foreclosure
+                        # notice), no existing estimate. Don't pollute the
+                        # lead view with a low-confidence avm_only_tn_median
+                        # guess that disagrees with the real ROD figure by
+                        # 80%+. Audit found 54 leads with this pollution
+                        # (Curtis Ward: real $75K mortgage vs $674K guess).
+                        if estimate.get("source") == "avm_only_tn_median":
+                            skipped += 1
+                            continue
 
                     update: Dict[str, Any] = {}
                     # Only fill mortgage_balance if it's currently null —
@@ -392,17 +401,31 @@ class MortgageEstimatorBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, mortgage_balance, property_value, raw_payload, phone_metadata")
-                .limit(2500)
-                .execute()
-            )
-            return getattr(q, "data", None) or []
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps any .limit() at 1000 silently. Paginate so the
+        # full corpus gets covered (Hamilton-tax-delinquent alone has
+        # 2000+ rows in staging).
+        out = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        for page in range(MAX_PAGES):
+            try:
+                q = (
+                    client.table(table)
+                    .select("id, mortgage_balance, property_value, raw_payload, phone_metadata")
+                    .order("id")
+                    .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = getattr(q, "data", None) or []
+                if not rows:
+                    break
+                out.extend(rows)
+                if len(rows) < PAGE_SIZE:
+                    break
+            except Exception as e:
+                self.logger.warning(f"candidate query on {table} page {page} failed: {e}")
+                break
+        return out
 
     @staticmethod
     def _extract_signals(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[str], Optional[float], Optional[int]]:

@@ -173,18 +173,30 @@ class StackedDistressAggregatorBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, property_address, distress_type, phone_metadata")
-                .not_.is_("property_address", "null")
-                .limit(2500)
-                .execute()
-            )
-            return getattr(q, "data", None) or []
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps .limit() at 1000 — paginate.
+        out = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        for page in range(MAX_PAGES):
+            try:
+                q = (
+                    client.table(table)
+                    .select("id, property_address, distress_type, phone_metadata")
+                    .not_.is_("property_address", "null")
+                    .order("id")
+                    .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = getattr(q, "data", None) or []
+                if not rows:
+                    break
+                out.extend(rows)
+                if len(rows) < PAGE_SIZE:
+                    break
+            except Exception as e:
+                self.logger.warning(f"candidate query on {table} page {page} failed: {e}")
+                break
+        return out
 
 
 def run() -> dict:

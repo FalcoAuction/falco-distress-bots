@@ -145,7 +145,8 @@ priority_score factors (you weight them):
     CODE_VIOLATION → +6; REO → +4
   - Tax-lien severity penalty: TAX_LIEN with cumulative_owed < $1K →
     -10 (forgetful homeowner, not motivated seller); $1K-$5K → -6.
-  - Stacked-distress bonus: signal_count ≥ 3 → +15; 2 → +8
+  - Stacked-distress bonus: signal_count ≥ 4 → +35; 3 → +25; 2 → +15.
+    Multi-signal leads have correlated motivation — weight them aggressively.
   - Absentee + out-of-state: out_of_state_owner=true → +10;
     distance_owner_to_property_miles > 200 → +5
   - Phone freshness: verified ≤ 7d → +8; ≤ 30d → +5; null → 0
@@ -521,15 +522,16 @@ class DecisionEngineBot(BotBase):
             return self._mk_decision("HOLD_FOR_DATA", 0,
                                        "Missing property_address (non-court lead)", "none", 1.0)
 
-        # Rule 1b: missing AVM (property_value) AND no mortgage data →
-        # HOLD via fast rule. Without AVM we can't compute equity, the
-        # core grading factor. Owner name alone (often a business name
-        # the LLM still has to investigate) is not enough signal to
-        # warrant burning $0.002 + 10-20s on an LLM call.
-        if not row.get("property_value") and not row.get("mortgage_balance"):
+        # Rule 1b: missing property_value → HOLD. Without AVM we can't
+        # talk equity on the call, so PROMOTE is meaningless. Audit
+        # found 5 PROMOTEs with no AVM — strict gate prevents that.
+        # (Previously this rule required BOTH AVM and mortgage missing,
+        # which let foreclosure-notice leads with mortgage but no AVM
+        # promote without a value to pitch.)
+        if not row.get("property_value"):
             return self._mk_decision(
                 "HOLD_FOR_DATA", 0,
-                "Missing AVM + mortgage — wait for enricher backfill",
+                "Missing property_value — wait for AVM enricher backfill",
                 "none", 0.95,
             )
 
@@ -585,6 +587,24 @@ class DecisionEngineBot(BotBase):
                     "none", 0.85, flags=["NON_HOMEOWNER"],
                 )
 
+        # Rule 1e: malformed property_address. Audit found 254 craigslist
+        # rows where the listing TITLE was concatenated into the address
+        # field ("FRANKLIN FULL RENO OPPORTUNITY$340,000FRANKLIN ..."). A
+        # property without a clean address can't be dialed/mailed. The
+        # craigslist parser is being fixed at-source; this rule catches
+        # any residual rows + protects against future similar bugs.
+        addr = row.get("property_address") or ""
+        if addr and (
+            "$" in addr or
+            _re.search(r"[\U0001F000-\U0001FFFF]", addr) or  # emoji
+            ", " not in addr  # no city separator → unreliable
+        ):
+            return self._mk_decision(
+                "HOLD_FOR_DATA", 0,
+                f"Malformed property_address: {addr[:60]!r}",
+                "none", 0.95, flags=["BAD_ADDRESS"],
+            )
+
         # Rule 2: business owner
         owner = (row.get("owner_name_records") or row.get("full_name") or "").upper()
         if owner_class in ("business", "government", "religious_or_education", "healthcare"):
@@ -625,19 +645,23 @@ class DecisionEngineBot(BotBase):
             except (ValueError, TypeError):
                 pass
 
-        # Rule 4: foreclosed in past
+        # Rule 4: foreclosed in past. Any past trustee sale = dead lead.
+        # The auction has happened; either it sold (new owner now) or it
+        # was postponed (trustee notice will republish with new date).
+        # Either way, calling the original homeowner is wasted dialer time.
+        # Audit found 28 past-trustee-sale leads in 0-30d range that the
+        # old >30d threshold let through.
         sale_date = row.get("trustee_sale_date")
         if sale_date:
             try:
                 sale_dt = datetime.fromisoformat(str(sale_date)[:10])
                 if sale_dt.date() < datetime.now(timezone.utc).date():
                     days_past = (datetime.now(timezone.utc).date() - sale_dt.date()).days
-                    if days_past > 30:
-                        return self._mk_decision(
-                            "REJECT_FORECLOSED", 0,
-                            f"trustee_sale_date {days_past}d past",
-                            "none", 1.0, flags=["FORECLOSURE_PASSED"],
-                        )
+                    return self._mk_decision(
+                        "REJECT_FORECLOSED", 0,
+                        f"trustee_sale_date {days_past}d past",
+                        "none", 1.0, flags=["FORECLOSURE_PASSED"],
+                    )
             except (ValueError, TypeError):
                 pass
 
@@ -796,12 +820,18 @@ class DecisionEngineBot(BotBase):
                     score -= 6   # net +6
                 # >= 5000: keep full +12
 
-        # Stacked
+        # Stacked-distress — multiple distress signals on the same property
+        # are massively more valuable than any one signal alone. Two signals
+        # = the homeowner has multiple problems (correlated motivation).
+        # Three+ = the situation is acute. Bumped from +15/+8 → +25/+15
+        # to lift legitimately-stacked leads out of the COLD/DEAD bucket.
         stack = pm.get("distress_stack") or {}
-        if stack.get("signal_count", 0) >= 3:
-            score += 15
+        if stack.get("signal_count", 0) >= 4:
+            score += 35  # acute multi-signal — almost always worth a call
+        elif stack.get("signal_count", 0) >= 3:
+            score += 25
         elif stack.get("signal_count", 0) >= 2:
-            score += 8
+            score += 15
 
         # Absentee
         skip = pm.get("skip_trace") or {}

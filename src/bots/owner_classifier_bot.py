@@ -249,29 +249,37 @@ class OwnerClassifierBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, full_name, owner_name_records, phone_metadata")
-                .not_.is_("owner_name_records", "null")
-                .limit(2500)
-                .execute()
-            )
-            rows = getattr(q, "data", None) or []
-            # Also pull rows where owner_name_records is null but full_name exists
-            q2 = (
-                client.table(table)
-                .select("id, full_name, owner_name_records, phone_metadata")
-                .is_("owner_name_records", "null")
-                .not_.is_("full_name", "null")
-                .limit(2500)
-                .execute()
-            )
-            rows.extend(getattr(q2, "data", None) or [])
-            return rows
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps .limit() at 1000 silently — paginate to ensure
+        # the full corpus gets classified. Audit found owner_classifier
+        # only re-tagged 1085 of 2900+ rows in a single pass because of
+        # this cap, leaving ~1900 rows with stale classifications.
+        rows: List[Dict[str, Any]] = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        for filter_kind in ("has_owner", "has_full_name"):
+            for page in range(MAX_PAGES):
+                try:
+                    q = (client.table(table)
+                            .select("id, full_name, owner_name_records, phone_metadata")
+                            .order("id")
+                            .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1))
+                    if filter_kind == "has_owner":
+                        q = q.not_.is_("owner_name_records", "null")
+                    else:
+                        q = q.is_("owner_name_records", "null").not_.is_("full_name", "null")
+                    r = q.execute()
+                    page_rows = getattr(r, "data", None) or []
+                    if not page_rows:
+                        break
+                    rows.extend(page_rows)
+                    if len(page_rows) < PAGE_SIZE:
+                        break
+                except Exception as e:
+                    self.logger.warning(
+                        f"candidate query on {table} page {page} ({filter_kind}) failed: {e}"
+                    )
+                    break
+        return rows
 
 
 def run() -> dict:

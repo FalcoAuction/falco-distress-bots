@@ -244,11 +244,22 @@ class BankruptcyScheduleDBot(BotBase):
     def _find_schedule_d_pdfs(self, docket_id: int) -> List[Dict[str, Any]]:
         """Return list of {filepath, pdf_url, description, doc_id} for
         each available Schedule D / Secured Creditors document on the
-        docket."""
+        docket.
+
+        BUG-FIX 2026-05-04: The CourtListener search API does NOT honor
+        `docket_id` as a URL-param filter on `type=rd` — it returns
+        global matches across ALL dockets. This caused every lead to
+        get the same Michigan-bankruptcy PDF and inherit a $600,856
+        mortgage_balance. Correct usage is Lucene-style filter inside
+        the `q` parameter: `q=docket_id:NNN AND (schedule OR ...)`.
+        """
         params = {
             "type": "rd",
-            "docket_id": str(docket_id),
-            "q": "schedule D OR \"creditors who have claims secured\" OR \"secured claims\"",
+            "q": (
+                f"docket_id:{docket_id} AND ("
+                "schedule OR secured OR creditor OR \"creditors who have claims\""
+                ")"
+            ),
         }
         res = self.fetch(CL_SEARCH, params=params,
                           headers={"Accept": "application/json"})
@@ -261,19 +272,25 @@ class BankruptcyScheduleDBot(BotBase):
 
         out: List[Dict[str, Any]] = []
         for item in data.get("results") or []:
+            # Defensive: re-confirm the result is actually for our docket
+            # (in case CL ever changes filter semantics again).
+            if item.get("docket_id") and int(item["docket_id"]) != int(docket_id):
+                continue
             if not item.get("is_available"):
                 continue
             filepath = item.get("filepath_local")
             if not filepath:
                 continue
-            description = (item.get("description") or item.get("short_description") or "").lower()
-            # Filter to actual Schedule D / Secured Creditor docs (the search
-            # returns matches on any docket entry containing "schedule")
+            description = (
+                item.get("description") or item.get("short_description") or ""
+            ).lower()
+            # Prefer matches whose description actually mentions schedule/
+            # secured. Anything else from this docket is a fallback.
             if not any(kw in description for kw in (
                 "schedule d", "secured", "creditor", "schedule of"
             )):
-                # Sometimes the description is empty but the doc IS a schedule
-                # — keep first 3 candidates anyway as fallback
+                # Description may be empty but doc IS a schedule —
+                # keep up to 3 fallback candidates.
                 if len(out) >= 3:
                     continue
             out.append({

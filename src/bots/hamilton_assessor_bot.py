@@ -318,36 +318,52 @@ class HamiltonAssessorBot(BotBase):
     # ── Candidate fetch + lookup ────────────────────────────────────────────
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
+        # Paginate via .range() — PostgREST silently caps at 1000 rows per
+        # query, so .limit(2500) was leaving 100+ Hamilton leads untouched
+        # (Hamilton tax-delinquent corpus has 2000+ rows, half lack AVM).
         out = []
+        OR_FILTER = (
+            "county.eq.hamilton,property_address.ilike.%chattanooga%,"
+            "property_address.ilike.%hixson%,"
+            "property_address.ilike.%signal mountain%,"
+            "property_address.ilike.%lookout mountain%,"
+            "property_address.ilike.%collegedale%,"
+            "property_address.ilike.%east ridge%,"
+            "property_address.ilike.%red bank%,"
+            "property_address.ilike.%soddy daisy%,"
+            "property_address.ilike.%ooltewah%,"
+            "property_address.ilike.%harrison%,"
+            "property_address.ilike.%apison%,"
+            "property_address.ilike.%sale creek%"
+        )
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10  # 10K Hamilton leads cap (corpus is ~2K, ample)
         for table in ("homeowner_requests", "homeowner_requests_staging"):
-            try:
-                # All Hamilton/Chattanooga leads lacking property_value
-                q = (
-                    client.table(table)
-                    .select("id, property_address, county, owner_name_records, "
-                            "property_value, raw_payload")
-                    .or_("county.eq.hamilton,property_address.ilike.%chattanooga%,"
-                          "property_address.ilike.%hixson%,"
-                          "property_address.ilike.%signal mountain%,"
-                          "property_address.ilike.%lookout mountain%,"
-                          "property_address.ilike.%collegedale%,"
-                          "property_address.ilike.%east ridge%,"
-                          "property_address.ilike.%red bank%,"
-                          "property_address.ilike.%soddy daisy%,"
-                          "property_address.ilike.%ooltewah%,"
-                          "property_address.ilike.%harrison%,"
-                          "property_address.ilike.%apison%,"
-                          "property_address.ilike.%sale creek%")
-                    .is_("property_value", "null")
-                    .limit(2500)
-                    .execute()
-                )
-                rows = getattr(q, "data", None) or []
-                for r in rows:
-                    r["__table__"] = table
-                    out.append(r)
-            except Exception as e:
-                self.logger.warning(f"candidates query on {table} failed: {e}")
+            for page in range(MAX_PAGES):
+                try:
+                    q = (
+                        client.table(table)
+                        .select("id, property_address, county, owner_name_records, "
+                                "property_value, raw_payload")
+                        .or_(OR_FILTER)
+                        .is_("property_value", "null")
+                        .order("id")
+                        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                        .execute()
+                    )
+                    rows = getattr(q, "data", None) or []
+                    if not rows:
+                        break
+                    for r in rows:
+                        r["__table__"] = table
+                        out.append(r)
+                    if len(rows) < PAGE_SIZE:
+                        break
+                except Exception as e:
+                    self.logger.warning(
+                        f"candidates query on {table} page {page} failed: {e}"
+                    )
+                    break
         return out
 
     def _lookup(self, row: Dict[str, Any],
