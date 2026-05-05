@@ -130,13 +130,15 @@ class HmdaEnricherBot(BotBase):
         self._session.headers.update({"User-Agent": "curl/8.0"})
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-    def _sale_data(self, address: str, county: str) -> Dict[str, Any]:
+    def _sale_data(
+        self, address: str, county: str, owner: str = ""
+    ) -> Dict[str, Any]:
         """Fetch sale_date + sale_price from the county's free assessor."""
-        key = (address, county)
+        key = (address, county, owner or "")
         if key in self._sale_cache:
             return self._sale_cache[key]
         try:
-            data = _assessor_sale_data.resolve(address, county)
+            data = _assessor_sale_data.resolve(address, county, owner=owner)
         except Exception as e:
             self.logger.warning(f"sale-data fetch failed {address!r}: {e}")
             data = {}
@@ -196,12 +198,20 @@ class HmdaEnricherBot(BotBase):
                     continue
 
                 # 2) Get exact sale data (sale_date + sale_price + deed
-                # ref) from the county's free assessor portal. This
-                # tightens the HMDA match window dramatically — from
-                # a 6-year ±10% match (~1000 candidates) to a 1-year
-                # ±5% match (~3-10 candidates). Lift accuracy from ~38%
-                # to expected ~75%.
-                sale = self._sale_data(addr, county)
+                # ref) from the county's free assessor portal. Lifts
+                # match accuracy by narrowing the HMDA candidate pool.
+                #
+                # Three scenarios:
+                #   (a) sale_date AND sale_price (real arms-length sale)
+                #       → 1-year window, ±5% amount filter, very tight
+                #   (b) sale_date only (price was $0 — quitclaim, gift,
+                #       related-party transfer; or pre-2018)
+                #       → 1-year window if 2018+, ±10% amount filter
+                #         using property_value as anchor
+                #   (c) no sale data at all
+                #       → 6-year window, ±10%
+                owner = lead.get("owner_name_records") or lead.get("full_name") or ""
+                sale = self._sale_data(addr, county, owner)
                 sale_year = None
                 sale_price = None
                 if sale.get("sale_date"):
@@ -217,26 +227,28 @@ class HmdaEnricherBot(BotBase):
                     no_anchor += 1
                     continue
 
-                # 4) Determine candidate years — sale_year (exact) > trust_date > window
-                if sale_year:
+                # 4) Determine candidate years
+                if (sale_year and HMDA_EARLIEST_YEAR <= sale_year <= HMDA_LATEST_YEAR):
+                    # Recent real sale within HMDA range — 1-year window
+                    year_range = [sale_year]
                     target_year = sale_year
+                elif sale_year and sale_year > HMDA_LATEST_YEAR:
+                    # Sale POST-HMDA-range (2025+) — HMDA hasn't published
+                    # this year yet. Drop year anchor; widen window.
+                    year_range = list(range(HMDA_LATEST_YEAR, HMDA_EARLIEST_YEAR - 1, -1))
+                    sale_year = None  # downgrade to wide-match
+                    target_year = None
+                elif sale_year and sale_year < HMDA_EARLIEST_YEAR:
+                    # Pre-HMDA sale — search 2018+ for refis. Drop
+                    # sale_price anchor (refi amount may differ from
+                    # original purchase price).
+                    year_range = list(range(HMDA_LATEST_YEAR, HMDA_EARLIEST_YEAR - 1, -1))
+                    sale_price = None
+                    sale_year = None  # downgrade
+                    target_year = None
                 else:
                     target_year = self._pick_target_year(lead)
-                year_range = self._year_search_range(target_year, year_window)
-                # If we have sale_year exact AND it's in HMDA range,
-                # narrow window to that single year. If sale was
-                # pre-HMDA (<2018), fall back to wide window since the
-                # original purchase loan isn't in HMDA — but a refi
-                # since 2018 might be.
-                if sale_year and sale_year >= HMDA_EARLIEST_YEAR:
-                    year_range = [sale_year]
-                elif sale_year and sale_year < HMDA_EARLIEST_YEAR:
-                    # Pre-HMDA sale — search 2018-latest for refis
-                    year_range = list(range(HMDA_LATEST_YEAR, HMDA_EARLIEST_YEAR - 1, -1))
-                    # And drop sale_price as anchor since the original
-                    # loan isn't findable; refi amount differs from
-                    # purchase amount, so we shouldn't constrain tight
-                    sale_price = None
+                    year_range = self._year_search_range(target_year, year_window)
 
                 # 5) Pull HMDA + filter by tract + amount.
                 #
@@ -310,6 +322,13 @@ class HmdaEnricherBot(BotBase):
                     )
                     continue
 
+                # Year-anchored = we know the exact origination year (1-yr window)
+                # Sale-anchored = we know exact year AND price (1-yr + ±5%)
+                year_anchored = bool(
+                    sale_year and sale_year >= HMDA_EARLIEST_YEAR
+                )
+                fully_sale_anchored = year_anchored and bool(sale_price)
+
                 self._write(client, lead, {
                     "principal": principal,
                     "lender_name": lender_name,
@@ -321,7 +340,8 @@ class HmdaEnricherBot(BotBase):
                     "tract": tract,
                     "candidate_count": len(candidates_loans),
                     "anchor_value": anchor_value,
-                    "sale_anchored": bool(sale_price),
+                    "sale_anchored": fully_sale_anchored,
+                    "year_anchored": year_anchored,
                     "sale_date": sale.get("sale_date"),
                     "sale_price": sale_price,
                     "deed_reference": sale.get("deed_reference"),
@@ -357,7 +377,7 @@ class HmdaEnricherBot(BotBase):
                     cols = (
                         "id, county, property_address, property_value, "
                         "raw_payload, mortgage_balance, phone_metadata, "
-                        "priority_score"
+                        "priority_score, owner_name_records, full_name"
                     )
                     r = (
                         client.table(table)
@@ -378,15 +398,14 @@ class HmdaEnricherBot(BotBase):
                         # Skip already-ROD-verified — don't overwrite better data
                         if isinstance(pm, dict) and pm.get("rod_lookup"):
                             continue
-                        # Allow re-match on existing hmda_match if it was
-                        # NOT sale-anchored (low confidence) — tight match
-                        # may produce a better candidate now.
+                        # Allow re-match on existing hmda_match if it
+                        # was wide-window (low confidence). Skip if
+                        # already year-anchored or fully sale-anchored.
                         if isinstance(pm, dict):
                             sig = pm.get("mortgage_signal") or {}
-                            if (isinstance(sig, dict)
-                                    and sig.get("source") == "hmda_match"
-                                    and sig.get("sale_anchored") is True):
-                                continue
+                            if isinstance(sig, dict) and sig.get("source") == "hmda_match":
+                                if sig.get("sale_anchored") or sig.get("year_anchored"):
+                                    continue
                         row["__table__"] = table
                         out.append(row)
                     if len(rows) < 1000:
@@ -544,12 +563,16 @@ class HmdaEnricherBot(BotBase):
             pm = {}
 
         # Confidence ladder:
-        #   0.85 sale-anchored single-candidate (tight tract+year+amount match)
-        #   0.75 sale-anchored multi-candidate (closest-to-LTV pick)
+        #   0.85 fully sale-anchored single-candidate (tract+year+amount tight)
+        #   0.75 fully sale-anchored multi-candidate (closest-to-LTV pick)
+        #   0.70 year-anchored single-candidate (1-yr window, no price anchor)
+        #   0.60 year-anchored multi-candidate
         #   0.65 wide-window single-candidate
-        #   0.45 wide-window multi-candidate (low confidence)
-        if match["sale_anchored"]:
+        #   0.45 wide-window multi-candidate
+        if match.get("sale_anchored"):
             confidence = 0.85 if match["candidate_count"] == 1 else 0.75
+        elif match.get("year_anchored"):
+            confidence = 0.70 if match["candidate_count"] == 1 else 0.60
         else:
             confidence = 0.65 if match["candidate_count"] == 1 else 0.45
         pm["mortgage_signal"] = {
@@ -566,7 +589,8 @@ class HmdaEnricherBot(BotBase):
             "census_tract": match["tract"],
             "anchor_property_value": match["anchor_value"],
             "candidate_count": match["candidate_count"],
-            "sale_anchored": match["sale_anchored"],
+            "sale_anchored": match.get("sale_anchored", False),
+            "year_anchored": match.get("year_anchored", False),
             "sale_date": match.get("sale_date"),
             "sale_price": match.get("sale_price"),
             "deed_reference": match.get("deed_reference"),
