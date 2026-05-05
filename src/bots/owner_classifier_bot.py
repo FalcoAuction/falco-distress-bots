@@ -45,11 +45,43 @@ BUSINESS_SUFFIX_TOKENS = (
     " LLC", " L.L.C.", " LLP", " L.L.P.", " INC", " INC.", " CORP", " CORP.",
     " CO ", " CO.", " COMPANY", " LP ", " L.P.", " LIMITED", " LTD",
     " PLC", " PARTNERSHIP", " GENERAL PARTNERSHIP", " GP ", " GP.",
+    " PA ", " PA.", " PLLC", " P.L.L.C.",
 )
 BUSINESS_WORDS = (
     "TRUST ", "ASSOCIATION", "FUND ", "HOLDINGS", "ENTERPRISES",
     "PROPERTIES", "INVESTMENTS", "DEVELOPMENT", "REALTY",
-    "MANAGEMENT", "CAPITAL", "VENTURES",
+    "MANAGEMENT", "CAPITAL", "VENTURES", "GROUP",
+    # Trade businesses (audit found 30+ of these leaking through)
+    "PAINTING", "CONTRACTING", "CONSTRUCTION", "REMODELING",
+    "EXCAVATING", "EXCAVATION", "IRRIGATION", "LANDSCAPING",
+    "LAWN CARE", "TREE SERVICE", "PRESSURE WASHING",
+    "TOWING", "AUTO REPAIR", "AUTO BODY", "TIRE",
+    "PLUMBING", "ELECTRIC", "ROOFING", "FLOORING", "HVAC",
+    # Personal / retail services
+    "CLEANING", "JANITORIAL", "DETAILING", "CAR WASH", "CARWASH",
+    "GRAPHICS", "PRINTING", "DESIGN",
+    "SALON", "BARBER", "BARBERSHOP", "SPA",
+    "GYM", "FITNESS", "TRAINING", "ACADEMY",
+    "BOUTIQUE", "STUDIO",
+    # Healthcare-adjacent
+    "CHIROPRACTIC", "DENTAL", "DENTISTRY", "ORTHODONTICS",
+    "VETERINARY", "ANIMAL HOSPITAL", "PHARMACY",
+    # Food
+    "GRILL", "RESTAURANT", "CAFE", "DINER", "BURGER", "PIZZA",
+    "BAKERY", "BARBECUE", "BBQ", "TACOS", "TACO",
+    # Generic services
+    "SERVICES", "SVCS", "SVC ", "SOLUTIONS", "CONSULTING",
+    "LOGISTICS", "DISTRIBUTION", "DELIVERY",
+    # Industry
+    "MILLS", "HEMP", "FARMS", "AGRICULTURAL", "INDUSTRIES",
+    "MANUFACTURING", "ENGINEERING", "EQUIPMENT", "SUPPLY",
+)
+# Suffix-style trade tokens that are too short for the BUSINESS_WORDS
+# whole-word match. Treated as suffixes (require trailing/leading
+# space or end-of-string).
+BUSINESS_TRADE_SUFFIXES = (
+    " PRO ", " PRO.",  # SUBSURFACEPRO etc.
+    " AUTO ", " AUTO.",
 )
 GOV_MARKERS = (
     "CITY OF ", "COUNTY OF ", "STATE OF ", "DEPT OF ", "DEPARTMENT OF ",
@@ -100,6 +132,17 @@ def classify_owner(owner: Optional[str]) -> Tuple[str, Optional[str]]:
     for marker in BUSINESS_SUFFIX_TOKENS:
         if marker in upper:
             return ("business", marker.strip())
+
+    for marker in BUSINESS_TRADE_SUFFIXES:
+        if marker in upper:
+            return ("business", marker.strip())
+
+    # Glued-on suffixes: SUBSURFACEPRO, AUTOPRO, ELECTRICPRO etc.
+    # Match a single all-caps word of 8+ chars ending in PRO/SVCS/SVC.
+    for suffix in ("PRO", "SVCS", "SVC"):
+        # word boundary, then 5+ letters, then suffix, then word boundary
+        if re.search(rf"\b[A-Z]{{5,}}{suffix}\b", upper):
+            return ("business", suffix)
 
     # BUSINESS_WORDS are stricter — match as whole words to avoid
     # false positives (e.g., "TRUST" in "TRUSTON FAMILY")
@@ -206,29 +249,37 @@ class OwnerClassifierBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, full_name, owner_name_records, phone_metadata")
-                .not_.is_("owner_name_records", "null")
-                .limit(2500)
-                .execute()
-            )
-            rows = getattr(q, "data", None) or []
-            # Also pull rows where owner_name_records is null but full_name exists
-            q2 = (
-                client.table(table)
-                .select("id, full_name, owner_name_records, phone_metadata")
-                .is_("owner_name_records", "null")
-                .not_.is_("full_name", "null")
-                .limit(2500)
-                .execute()
-            )
-            rows.extend(getattr(q2, "data", None) or [])
-            return rows
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps .limit() at 1000 silently — paginate to ensure
+        # the full corpus gets classified. Audit found owner_classifier
+        # only re-tagged 1085 of 2900+ rows in a single pass because of
+        # this cap, leaving ~1900 rows with stale classifications.
+        rows: List[Dict[str, Any]] = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        for filter_kind in ("has_owner", "has_full_name"):
+            for page in range(MAX_PAGES):
+                try:
+                    q = (client.table(table)
+                            .select("id, full_name, owner_name_records, phone_metadata")
+                            .order("id")
+                            .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1))
+                    if filter_kind == "has_owner":
+                        q = q.not_.is_("owner_name_records", "null")
+                    else:
+                        q = q.is_("owner_name_records", "null").not_.is_("full_name", "null")
+                    r = q.execute()
+                    page_rows = getattr(r, "data", None) or []
+                    if not page_rows:
+                        break
+                    rows.extend(page_rows)
+                    if len(page_rows) < PAGE_SIZE:
+                        break
+                except Exception as e:
+                    self.logger.warning(
+                        f"candidate query on {table} page {page} ({filter_kind}) failed: {e}"
+                    )
+                    break
+        return rows
 
 
 def run() -> dict:

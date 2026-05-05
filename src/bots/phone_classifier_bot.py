@@ -48,6 +48,11 @@ except ImportError:
     print("[phone-classifier] supabase-py not installed", file=sys.stderr)
     raise
 
+try:
+    from ._field_confidence import deep_merge_dict
+except ImportError:
+    from _field_confidence import deep_merge_dict
+
 
 # Known VOIP carriers — used to flag numbers that are LIKELY VOIP even
 # when phonenumbers returns FIXED_LINE_OR_MOBILE.
@@ -180,8 +185,15 @@ def run() -> Dict[str, Any]:
             invalid += 1
             continue
         try:
+            merged = deep_merge_dict(meta if isinstance(meta, dict) else {}, {
+                "phone_classifier": result,
+                "line_type": result.get("line_type"),
+                "carrier": result.get("carrier"),
+                "valid": result.get("valid"),
+                "checked_at": result.get("checked_at"),
+            })
             client.table("homeowner_requests").update({
-                "phone_metadata": result,
+                "phone_metadata": merged,
             }).eq("id", row["id"]).execute()
             classified += 1
         except Exception as e:

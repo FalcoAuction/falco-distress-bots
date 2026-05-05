@@ -1,0 +1,120 @@
+name: Middle TN Phone Validation (one-shot)
+
+# ONE-SHOT pipeline to prove the dialer model. Two scheduled runs on
+# Wed May 6 2026 (CDT = UTC-5):
+#   - 06:00 CDT (11:00 UTC) — BatchData skip-trace + Twilio Lookup
+#       (data prep, no calls placed)
+#   - 10:00 CDT (15:00 UTC) — Twilio dial probe with AMD
+#       (places calls; falls inside TCPA-permitted 8am-9pm window)
+#
+# After Wed May 6 results review, this workflow can be deleted or its
+# cron schedule disabled.
+
+on:
+  workflow_dispatch:    # manual trigger for ad-hoc reruns
+  schedule:
+    # Stage 0: HMDA mortgage matching — Wed May 6 2026, 04:00 CDT = 09:00 UTC
+    # Runs first; downloads ~7 county-year HMDA CSVs, matches by tract+amount.
+    - cron: "0 9 6 5 *"
+    # Stage 1: Skip-trace + Twilio Lookup — Wed May 6 2026, 06:00 CDT = 11:00 UTC
+    - cron: "0 11 6 5 *"
+    # Stage 2: Dial probe — Wed May 6 2026, 10:00 CDT = 15:00 UTC
+    - cron: "0 15 6 5 *"
+
+jobs:
+  hmda:
+    # Fires at 09:00 UTC = 04:00 CDT. Free verified-mortgage matching via
+    # CFPB HMDA loan-level data + Census Geocoder + GLEIF (LEI -> bank).
+    # Runs first so skip-trace/dial-probe inherits a fuller corpus.
+    if: github.event.schedule == '0 9 6 5 *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      FALCO_HMDA_MAX_PER_RUN: "500"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run HMDA enricher (Middle TN focus leads)
+        run: python -m src.bots.hmda_enricher_bot
+
+      - name: Re-extract nashville_ledger lender + body
+        run: python -m src.bots.nashville_ledger_reextract_bot
+        continue-on-error: true
+        env:
+          FALCO_LEDGER_REEXTRACT_FOCUS_ONLY: "1"
+          FALCO_LEDGER_REEXTRACT_MAX: "200"
+
+  prep:
+    # Fires at 11:00 UTC. Skip-trace + Lookup. No calls placed.
+    if: github.event.schedule == '0 11 6 5 *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      FALCO_BATCHDATA_API_KEY: ${{ secrets.FALCO_BATCHDATA_API_KEY }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+      FALCO_MAX_BATCHDATA_SKIPTRACE_PER_RUN: "300"
+      FALCO_MAX_TWILIO_LOOKUP_PER_RUN: "500"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run BatchData skip-trace (Middle TN missing-phone leads)
+        run: python -m src.bots.middle_tn_skiptrace_bot
+        continue-on-error: true
+
+      - name: Run Twilio Lookup (Middle TN leads with phone)
+        run: python -m src.bots.middle_tn_twilio_lookup_bot
+        continue-on-error: true
+
+  probe:
+    # Fires at 15:00 UTC = 10am CDT. Dial probe with AMD.
+    if: github.event.schedule == '0 15 6 5 *' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+      TWILIO_FROM_NUMBER: ${{ secrets.TWILIO_FROM_NUMBER }}
+      FALCO_MAX_DIAL_PROBES_PER_RUN: "200"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Twilio dial probe (Middle TN, AMD)
+        run: python -m src.bots.middle_tn_dial_probe_bot

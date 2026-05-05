@@ -23,3 +23,6 @@ Thumbs.db
 # Claude Code cache
 .claude/
 
+# HMDA cache — large CSVs from CFPB, regenerated on demand
+data/hmda_cache/
+

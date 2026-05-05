@@ -36,7 +36,9 @@ from . import nashville_codes_bot
 from . import memphis_codes_bot
 from . import chattanooga_codes_bot
 from . import johnson_city_bdsr_bot
-from . import craigslist_tn_bot
+# craigslist_tn_bot removed 2026-05-04 — 100% bad-data scam pond
+# (RV lots, $1 land swaps, marketing-copy "addresses"). 0% phone yield.
+# from . import craigslist_tn_bot
 from . import usda_rhs_bot
 from . import knoxville_poh_bot
 from . import tn_tax_delinquent_bot
@@ -60,6 +62,10 @@ from . import hamilton_assessor_bot
 from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
+from . import xref_avm_enricher_bot
+from . import continuance_reaper_bot
+from . import stale_regrade_bot
+from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import stacked_distress_aggregator_bot
@@ -85,7 +91,7 @@ NEW_BOTS = [
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
-    ("craigslist_tn", craigslist_tn_bot.run),
+    # ("craigslist_tn", craigslist_tn_bot.run),  # disabled — scam pond
     ("usda_rhs", usda_rhs_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
     ("notice_enricher", notice_enricher_bot.run),
@@ -100,11 +106,17 @@ NEW_BOTS = [
     ("probate_property_enricher", probate_property_enricher_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
+    ("xref_avm_enricher", xref_avm_enricher_bot.run),
+    ("continuance_reaper", continuance_reaper_bot.run),
+    ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Autonomous brain — runs LAST so it sees fully-enriched leads
     ("decision_engine", decision_engine_bot.run),
+    # Health monitor runs after everything else — surfaces silent
+    # bot failures (Shelby ASSR_ASMT, etc.) and AVM coverage gaps.
+    ("bot_health_monitor", bot_health_monitor.run),
 ]
 
 

@@ -114,38 +114,114 @@ def estimate_current_balance(
     last_sale_price: Optional[float],
     last_sale_date_iso: Optional[str],
     avm: Optional[float] = None,
+    year_built: Optional[int] = None,
     ltv: float = DEFAULT_LTV,
     term_years: int = DEFAULT_TERM_YEARS,
     today: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Returns dict with estimate + breakdown + confidence, or None if
-    insufficient signals."""
-    if not last_sale_price or last_sale_price <= 0:
-        return None
+    """Returns dict with estimate + breakdown + confidence.
+
+    Three estimation paths in order of precision:
+      1. SALE-BASED: have last_sale_price + last_sale_date → amortize
+         from purchase. Confidence 0.7 (recent) → 0.1 (very old).
+      2. AVM+AGE FALLBACK: have AVM + year_built (or county records of
+         age) → assume sale at year_built (or 7 years ago for
+         post-2010 builds, accounting for refi cycles). Confidence
+         0.4 (fresh build) → 0.2 (old build).
+      3. AVM-ONLY FALLBACK: have only AVM → apply TN-statewide
+         homeowner-equity median (~58% per Federal Reserve Survey of
+         Consumer Finances). Confidence 0.2.
+      4. None of the above → return None.
+    """
     today = today or date.today()
 
-    # Parse sale date
-    sale_year = None
-    sale_date = None
-    if last_sale_date_iso:
+    # ── Path 1: sale-based (most precise) ──────────────────────────────
+    if last_sale_price and last_sale_price > 0 and last_sale_date_iso:
         try:
             sale_date = datetime.strptime(last_sale_date_iso[:10], "%Y-%m-%d").date()
             sale_year = sale_date.year
+            years_elapsed = (today - sale_date).days / 365.25
+            elapsed_months = (today.year - sale_date.year) * 12 + (today.month - sale_date.month)
+            return _build_estimate(
+                last_sale_price, sale_year, years_elapsed,
+                elapsed_months, avm, ltv, term_years,
+                source="sale_based",
+            )
         except (ValueError, TypeError):
             pass
 
-    # Years elapsed since purchase
-    if sale_date:
-        years_elapsed = (today - sale_date).days / 365.25
-        elapsed_months = (today.year - sale_date.year) * 12 + (today.month - sale_date.month)
-    else:
-        return None  # need a date to amortize
+    # ── Path 2: AVM + year_built fallback ──────────────────────────────
+    if avm and avm > 0 and year_built and year_built > 1900:
+        # Assume the homeowner refinanced at most ~7 years ago for newer
+        # builds, OR purchased at year_built for older builds.
+        # For pre-2018 builds, assume current loan age = min(year_built
+        # difference, 7 years) — most homeowners have refi'd at least
+        # once when rates dropped 2020-2021.
+        years_elapsed = today.year - year_built
+        if year_built <= 2018 and years_elapsed > 7:
+            # Assume last refi 7 years ago at then-prevailing rate
+            assumed_purchase_year = today.year - 7
+            years_elapsed = 7
+        else:
+            assumed_purchase_year = year_built
+        elapsed_months = years_elapsed * 12
+        # Original principal estimate: assume 80% of CURRENT AVM (conservative
+        # — actual purchase price was likely lower but this approximates
+        # post-refi cash-out scenarios)
+        return _build_estimate(
+            avm, assumed_purchase_year, years_elapsed,
+            elapsed_months, avm, ltv, term_years,
+            source="avm_plus_age",
+        )
 
+    # ── Path 3: AVM-only — TN-median equity assumption ─────────────────
+    if avm and avm > 0:
+        # Federal Reserve Survey of Consumer Finances 2022: median TN
+        # homeowner equity ~58% of home value. Assume current_balance
+        # = AVM × 0.42 (42% mortgage remaining).
+        TN_MEDIAN_EQUITY_PCT = 0.58
+        current_balance = avm * (1.0 - TN_MEDIAN_EQUITY_PCT)
+        equity = avm * TN_MEDIAN_EQUITY_PCT
+        return {
+            "estimated_current_balance": round(current_balance, 2),
+            "original_principal_estimated": None,
+            "estimated_equity": round(equity, 2),
+            "assumed_ltv": None,
+            "assumed_term_years": None,
+            "assumed_rate_pct": None,
+            "purchase_year": None,
+            "purchase_price": None,
+            "years_elapsed": None,
+            "elapsed_months": None,
+            "confidence": 0.2,
+            "source": "avm_only_tn_median",
+            "note": (
+                "Estimate uses TN-statewide median homeowner equity (58% per "
+                "Fed Reserve SCF 2022). Confidence intentionally low; reach "
+                "for sale-based or AVM+age estimates when those signals "
+                "become available."
+            ),
+        }
+
+    return None
+
+
+def _build_estimate(
+    purchase_price: float,
+    purchase_year: int,
+    years_elapsed: float,
+    elapsed_months: int,
+    avm: Optional[float],
+    ltv: float,
+    term_years: int,
+    source: str,
+) -> Dict[str, Any]:
+    """Shared amortization + equity logic for sale-based + avm+age paths."""
     # Pick rate based on purchase year
-    rate = TN_AVG_30Y_RATES.get(sale_year, DEFAULT_RATE) if sale_year else DEFAULT_RATE
+    rate = TN_AVG_30Y_RATES.get(purchase_year, DEFAULT_RATE) if purchase_year else DEFAULT_RATE
 
     # Original principal estimate
-    original_principal = last_sale_price * ltv
+    original_principal = purchase_price * ltv
 
     # Current balance via amortization
     current_balance = amortized_balance(original_principal, rate, term_years, elapsed_months)
@@ -155,15 +231,19 @@ def estimate_current_balance(
     if avm and avm > 0:
         equity = avm - current_balance
 
-    # Confidence based on age + data quality
-    if years_elapsed < 7:
-        confidence = 0.7
-    elif years_elapsed < 15:
-        confidence = 0.5
-    elif years_elapsed < 30:
-        confidence = 0.3
-    else:
-        confidence = 0.1  # very old, almost certainly refinanced
+    # Confidence based on age + data quality (sale-based) or fallback path
+    if source == "avm_plus_age":
+        # AVM+age path is less precise; cap confidence at 0.4
+        confidence = 0.4 if years_elapsed < 7 else 0.3 if years_elapsed < 15 else 0.2
+    else:  # sale_based
+        if years_elapsed < 7:
+            confidence = 0.7
+        elif years_elapsed < 15:
+            confidence = 0.5
+        elif years_elapsed < 30:
+            confidence = 0.3
+        else:
+            confidence = 0.1  # very old, almost certainly refinanced
 
     return {
         "estimated_current_balance": round(current_balance, 2),
@@ -172,11 +252,12 @@ def estimate_current_balance(
         "assumed_ltv": ltv,
         "assumed_term_years": term_years,
         "assumed_rate_pct": rate,
-        "purchase_year": sale_year,
-        "purchase_price": last_sale_price,
+        "purchase_year": purchase_year,
+        "purchase_price": purchase_price,
         "years_elapsed": round(years_elapsed, 2),
         "elapsed_months": elapsed_months,
         "confidence": confidence,
+        "source": source,
         "note": (
             "Estimate based on standard amortization assumptions (80% LTV, 30y fixed, "
             "TN avg rate at purchase year). Refinances + HELOCs not modeled."
@@ -223,19 +304,23 @@ class MortgageEstimatorBot(BotBase):
                 self.logger.info(f"{table}: {len(rows)} candidates")
 
                 for row in rows[:self.max_leads_per_run]:
-                    sale_price, sale_date, avm = self._extract_signals(row)
-                    if not sale_price or not sale_date:
+                    sale_price, sale_date, avm, year_built = self._extract_signals(row)
+                    # Allow AVM-only / AVM+age fallbacks — only bail when we
+                    # have literally nothing (no sale, no AVM).
+                    if not (sale_price and sale_date) and not avm:
                         no_signals += 1
                         continue
 
-                    estimate = estimate_current_balance(sale_price, sale_date, avm)
+                    estimate = estimate_current_balance(
+                        sale_price, sale_date, avm, year_built
+                    )
                     if estimate is None:
                         no_signals += 1
                         continue
 
                     # Skip if we already have a higher-confidence value
                     # (foreclosure notices give actual delinquent amounts;
-                    # don't overwrite those with an estimate)
+                    # don't overwrite those with an estimate).
                     if row.get("mortgage_balance"):
                         existing_meta = row.get("phone_metadata") or {}
                         if isinstance(existing_meta, dict):
@@ -243,12 +328,22 @@ class MortgageEstimatorBot(BotBase):
                             if existing_est.get("confidence", 0) >= estimate["confidence"]:
                                 skipped += 1
                                 continue
+                        # Real mortgage_balance present (from a foreclosure
+                        # notice), no existing estimate. Don't pollute the
+                        # lead view with a low-confidence avm_only_tn_median
+                        # guess that disagrees with the real ROD figure by
+                        # 80%+. Audit found 54 leads with this pollution
+                        # (Curtis Ward: real $75K mortgage vs $674K guess).
+                        if estimate.get("source") == "avm_only_tn_median":
+                            skipped += 1
+                            continue
 
                     update: Dict[str, Any] = {}
                     # Only fill mortgage_balance if it's currently null —
-                    # don't override foreclosure-notice-derived values
+                    # don't override foreclosure-notice-derived values.
+                    # Column is INTEGER, so round before write.
                     if not row.get("mortgage_balance"):
-                        update["mortgage_balance"] = estimate["estimated_current_balance"]
+                        update["mortgage_balance"] = int(round(estimate["estimated_current_balance"]))
 
                     existing_meta = row.get("phone_metadata") or {}
                     if not isinstance(existing_meta, dict):
@@ -263,7 +358,7 @@ class MortgageEstimatorBot(BotBase):
                         if table == "homeowner_requests":
                             record_field(
                                 client, row["id"], "mortgage_balance",
-                                estimate["estimated_current_balance"],
+                                int(round(estimate["estimated_current_balance"])),
                                 "mortgage_estimator",
                                 confidence=estimate["confidence"],
                                 metadata={
@@ -306,27 +401,41 @@ class MortgageEstimatorBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, mortgage_balance, property_value, raw_payload, phone_metadata")
-                .limit(2500)
-                .execute()
-            )
-            return getattr(q, "data", None) or []
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps any .limit() at 1000 silently. Paginate so the
+        # full corpus gets covered (Hamilton-tax-delinquent alone has
+        # 2000+ rows in staging).
+        out = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        for page in range(MAX_PAGES):
+            try:
+                q = (
+                    client.table(table)
+                    .select("id, mortgage_balance, property_value, raw_payload, phone_metadata")
+                    .order("id")
+                    .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = getattr(q, "data", None) or []
+                if not rows:
+                    break
+                out.extend(rows)
+                if len(rows) < PAGE_SIZE:
+                    break
+            except Exception as e:
+                self.logger.warning(f"candidate query on {table} page {page} failed: {e}")
+                break
+        return out
 
     @staticmethod
-    def _extract_signals(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[str], Optional[float]]:
-        """Pull last_sale_price + last_sale_date + AVM from any of the
-        assessor blobs we've stored in raw_payload."""
+    def _extract_signals(row: Dict[str, Any]) -> Tuple[Optional[float], Optional[str], Optional[float], Optional[int]]:
+        """Pull last_sale_price + last_sale_date + AVM + year_built from any
+        of the assessor blobs we've stored in raw_payload."""
         raw = row.get("raw_payload") or {}
         if not isinstance(raw, dict):
-            return (None, None, None)
+            return (None, None, None, None)
 
-        sale_price = sale_date = avm = None
+        sale_price = sale_date = avm = year_built = None
 
         # Williamson Inigo
         w = raw.get("williamson_inigo") or {}
@@ -337,6 +446,11 @@ class MortgageEstimatorBot(BotBase):
                 sale_date = w["last_transfer_date"]
             if not avm and w.get("appraised"):
                 avm = float(w["appraised"])
+            if not year_built and w.get("year_built"):
+                try:
+                    year_built = int(w["year_built"])
+                except (ValueError, TypeError):
+                    pass
 
         # PADCTN (Davidson)
         p = raw.get("padctn") or {}
@@ -348,12 +462,17 @@ class MortgageEstimatorBot(BotBase):
         t = raw.get("tpad") or {}
         if isinstance(t, dict):
             if not sale_price and t.get("last_sale_price"):
-                sale_price = float(t["last_sale_price"])
-            if not sale_date and t.get("last_sale_date"):
-                sale_date = t["last_sale_date"]
+                sale_price = float(str(t["last_sale_price"]).replace(",", ""))
+            if not sale_date and (t.get("last_sale_date") or t.get("last_sale")):
+                sale_date = t.get("last_sale_date") or t.get("last_sale")
             if not avm and t.get("appraised_value"):
                 try:
                     avm = float(str(t["appraised_value"]).replace(",", ""))
+                except (ValueError, TypeError):
+                    pass
+            if not year_built and t.get("year_built"):
+                try:
+                    year_built = int(t["year_built"])
                 except (ValueError, TypeError):
                     pass
 
@@ -372,6 +491,11 @@ class MortgageEstimatorBot(BotBase):
                     avm = float(h["appraised"])
                 except (ValueError, TypeError):
                     pass
+            if not year_built and h.get("year_built"):
+                try:
+                    year_built = int(h["year_built"])
+                except (ValueError, TypeError):
+                    pass
 
         # Shelby ArcGIS
         sh = raw.get("shelby_arcgis") or {}
@@ -386,6 +510,11 @@ class MortgageEstimatorBot(BotBase):
             if not avm and sh.get("appraised"):
                 try:
                     avm = float(sh["appraised"])
+                except (ValueError, TypeError):
+                    pass
+            if not year_built and sh.get("year_built"):
+                try:
+                    year_built = int(sh["year_built"])
                 except (ValueError, TypeError):
                     pass
 
@@ -404,6 +533,11 @@ class MortgageEstimatorBot(BotBase):
                     avm = float(rc["appraised"])
                 except (ValueError, TypeError):
                     pass
+            if not year_built and rc.get("year_built"):
+                try:
+                    year_built = int(rc["year_built"])
+                except (ValueError, TypeError):
+                    pass
 
         # Fallback: row-level property_value
         if not avm and row.get("property_value"):
@@ -412,7 +546,7 @@ class MortgageEstimatorBot(BotBase):
             except (ValueError, TypeError):
                 pass
 
-        return (sale_price, sale_date, avm)
+        return (sale_price, sale_date, avm, year_built)
 
 
 def run() -> dict:

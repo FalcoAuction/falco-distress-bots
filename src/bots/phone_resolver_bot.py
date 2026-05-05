@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._field_confidence import phone_trust
 from ._provenance import record_field
 
 try:
@@ -293,8 +294,13 @@ class PhoneResolverBot(BotBase):
                         continue
 
                     update: Dict[str, Any] = {}
-                    # Only set phone if currently null OR confidence beats existing
+                    # Only set phone if currently null OR confidence beats the
+                    # best known global phone confidence (BatchData, prior
+                    # resolver, etc). Notice-body attorney phones must not
+                    # overwrite a stronger homeowner skip trace.
                     current_conf = existing_resolver.get("confidence", 0)
+                    global_conf = phone_trust(row).confidence if row.get("phone") else 0
+                    current_conf = max(current_conf, global_conf)
                     if not row.get("phone") or best["confidence"] > current_conf:
                         update["phone"] = phone
 
@@ -353,17 +359,39 @@ class PhoneResolverBot(BotBase):
         }
 
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
-        try:
-            q = (
-                client.table(table)
-                .select("id, phone, raw_payload, phone_metadata, admin_notes, bot_source, distress_type")
-                .limit(2500)
-                .execute()
-            )
-            return getattr(q, "data", None) or []
-        except Exception as e:
-            self.logger.warning(f"candidate query on {table} failed: {e}")
-            return []
+        # PostgREST caps .limit() at 1000 — paginate. Also: staging uses
+        # `bot_source`, live uses `source`; pick the right column per table.
+        out = []
+        PAGE_SIZE = 1000
+        MAX_PAGES = 10
+        src_col = "bot_source" if table == "homeowner_requests_staging" else "source"
+        select = (
+            f"id, phone, raw_payload, phone_metadata, admin_notes, "
+            f"{src_col}, distress_type"
+        )
+        for page in range(MAX_PAGES):
+            try:
+                q = (
+                    client.table(table)
+                    .select(select)
+                    .order("id")
+                    .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
+                    .execute()
+                )
+                rows = getattr(q, "data", None) or []
+                if not rows:
+                    break
+                # Normalize so callers can read .bot_source uniformly
+                for r in rows:
+                    if "source" in r and "bot_source" not in r:
+                        r["bot_source"] = r["source"]
+                out.extend(rows)
+                if len(rows) < PAGE_SIZE:
+                    break
+            except Exception as e:
+                self.logger.warning(f"candidate query on {table} page {page} failed: {e}")
+                break
+        return out
 
     def _gather_candidates(self, row: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Walk every harvest source for this row, return unioned list."""

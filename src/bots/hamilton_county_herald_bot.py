@@ -114,15 +114,28 @@ class HamiltonCountyHeraldBot(BotBase):
 
     def _fetch_index_dated(self, pub_date: date) -> Dict[str, List[str]]:
         """GET PublicNotices.aspx (or Notices.aspx?date=...) and split notice
-        IDs by <h3> section header."""
+        IDs by <h3> section header.
+
+        BUG-FIX 2026-05-04: HCH's `Notices.aspx?date=...` returns HTTP
+        200 with an empty 9KB shell on most queries (probably needs
+        cookies / postback state). The bot's old logic never reached the
+        fallback because it only triggered on non-200. Now we ALSO fall
+        back when the dated response parses to zero sections — recovers
+        Hamilton Herald to ~5-10 leads/week.
+        """
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        # Try the dated URL first; fall back to the current-week landing
+        # Try the dated URL first
         res = self.fetch(HCH_INDEX_DATED, params={"date": date_param})
-        if res is None or res.status_code != 200:
-            res = self.fetch(HCH_INDEX)
-        if res is None or res.status_code != 200:
-            return {}
-        return self._parse_index_sections(res.text)
+        sections: Dict[str, List[str]] = {}
+        if res is not None and res.status_code == 200:
+            sections = self._parse_index_sections(res.text)
+        # If the dated query returned nothing (empty shell, often the case),
+        # fall back to the undated landing page which lists current notices.
+        if not sections:
+            res2 = self.fetch(HCH_INDEX)
+            if res2 is not None and res2.status_code == 200:
+                sections = self._parse_index_sections(res2.text)
+        return sections
 
     @staticmethod
     def _parse_index_sections(html: str) -> Dict[str, List[str]]:
@@ -212,7 +225,6 @@ class HamiltonCountyHeraldBot(BotBase):
             county="hamilton",
             full_name=borrower,
             owner_name_records=borrower,
-            mortgage_balance=principal or delinquent,
             distress_type="PRE_FORECLOSURE",
             admin_notes=" · ".join(admin_parts),
             source_url=url,

@@ -7,3 +7,4 @@ pdfplumber>=0.11.0
 phonenumbers>=8.13.0
 openai>=1.50.0
 python-dotenv>=1.0.0
+twilio>=9.0.0

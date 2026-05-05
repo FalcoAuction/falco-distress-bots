@@ -49,6 +49,7 @@ except ImportError:
     pdfplumber = None
 
 from ._base import BotBase, _supabase
+from ._field_confidence import deep_merge_dict
 from ._provenance import record_field
 
 
@@ -159,17 +160,37 @@ class BankruptcyScheduleDBot(BotBase):
                     no_amount_found += 1
                     continue
 
-                # Take the largest secured claim as the primary mortgage
-                # (most filings: Schedule D first entry is the home mortgage)
                 claims = extracted_data["secured_claims"]
-                primary = max(claims, key=lambda c: c.get("amount") or 0)
+                primary = self._pick_home_claim(row, claims) or max(
+                    claims, key=lambda c: c.get("amount") or 0
+                )
+                home_verified = self._claim_matches_property(row, primary)
 
                 update: Dict[str, Any] = {}
-                if primary.get("amount"):
+                if primary.get("amount") and home_verified:
                     update["mortgage_balance"] = primary["amount"]
                 if primary.get("creditor"):
                     # Don't overwrite owner_name_records (debtor != creditor)
                     pass
+
+                existing_meta = row.get("phone_metadata") or {}
+                if not isinstance(existing_meta, dict):
+                    existing_meta = {}
+                update["phone_metadata"] = deep_merge_dict(existing_meta, {
+                    "mortgage_signal": {
+                        "source": "bankruptcy_schedule_d",
+                        "kind": "current_payoff" if home_verified else "unverified_secured_claim",
+                        "amount": primary.get("amount"),
+                        "confidence": 0.80 if home_verified else 0.65,
+                        "creditor": primary.get("creditor"),
+                        "collateral_address": primary.get("collateral_address"),
+                        "note": (
+                            "Schedule D claim matched the lead property address."
+                            if home_verified
+                            else "Largest Schedule D secured claim; verify collateral before using as payoff."
+                        ),
+                    }
+                })
 
                 raw["schedule_d_extracted"] = True
                 raw["schedule_d_primary_balance"] = primary.get("amount")
@@ -182,8 +203,8 @@ class BankruptcyScheduleDBot(BotBase):
                     client.table("homeowner_requests_staging").update(update).eq("id", row["id"]).execute()
                     extracted += 1
                     self.logger.info(
-                        f"  enriched id={row['id']} balance=${primary.get('amount'):,.0f} "
-                        f"creditor={primary.get('creditor')}"
+                        f"  enriched id={row['id']} claim=${primary.get('amount'):,.0f} "
+                        f"verified_home={home_verified} creditor={primary.get('creditor')}"
                     )
                 except Exception as e:
                     self.logger.warning(f"  update failed id={row['id']}: {e}")
@@ -229,7 +250,8 @@ class BankruptcyScheduleDBot(BotBase):
         try:
             q = (
                 client.table("homeowner_requests_staging")
-                .select("id, full_name, owner_name_records, mortgage_balance, raw_payload")
+                .select("id, full_name, owner_name_records, property_address, "
+                        "mortgage_balance, phone_metadata, raw_payload")
                 .eq("distress_type", "BANKRUPTCY")
                 .limit(500)
                 .execute()
@@ -239,16 +261,58 @@ class BankruptcyScheduleDBot(BotBase):
             self.logger.warning(f"candidate query failed: {e}")
             return []
 
+    @staticmethod
+    def _norm_address(text: Optional[str]) -> str:
+        if not text:
+            return ""
+        s = re.sub(r"[^A-Za-z0-9 ]+", " ", text.upper())
+        s = re.sub(
+            r"\b(STREET|ST|ROAD|RD|AVENUE|AVE|DRIVE|DR|LANE|LN|COURT|CT|"
+            r"CIRCLE|CIR|BOULEVARD|BLVD|PLACE|PL|HIGHWAY|HWY|PARKWAY|PKWY|"
+            r"TRAIL|TRL|TERRACE|TER|PIKE)\b",
+            " ",
+            s,
+        )
+        return re.sub(r"\s+", " ", s).strip()
+
+    def _claim_matches_property(self, row: Dict[str, Any], claim: Dict[str, Any]) -> bool:
+        prop = self._norm_address(row.get("property_address"))
+        collateral = self._norm_address(claim.get("collateral_address"))
+        if not prop or not collateral:
+            return False
+        prop_num = prop.split(" ", 1)[0]
+        col_num = collateral.split(" ", 1)[0]
+        return prop_num == col_num and (prop in collateral or collateral in prop)
+
+    def _pick_home_claim(
+        self, row: Dict[str, Any], claims: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        for claim in claims:
+            if self._claim_matches_property(row, claim):
+                return claim
+        return None
+
     # ── CourtListener: find Schedule D PDFs ────────────────────────────────
 
     def _find_schedule_d_pdfs(self, docket_id: int) -> List[Dict[str, Any]]:
         """Return list of {filepath, pdf_url, description, doc_id} for
         each available Schedule D / Secured Creditors document on the
-        docket."""
+        docket.
+
+        BUG-FIX 2026-05-04: The CourtListener search API does NOT honor
+        `docket_id` as a URL-param filter on `type=rd` — it returns
+        global matches across ALL dockets. This caused every lead to
+        get the same Michigan-bankruptcy PDF and inherit a $600,856
+        mortgage_balance. Correct usage is Lucene-style filter inside
+        the `q` parameter: `q=docket_id:NNN AND (schedule OR ...)`.
+        """
         params = {
             "type": "rd",
-            "docket_id": str(docket_id),
-            "q": "schedule D OR \"creditors who have claims secured\" OR \"secured claims\"",
+            "q": (
+                f"docket_id:{docket_id} AND ("
+                "schedule OR secured OR creditor OR \"creditors who have claims\""
+                ")"
+            ),
         }
         res = self.fetch(CL_SEARCH, params=params,
                           headers={"Accept": "application/json"})
@@ -261,19 +325,25 @@ class BankruptcyScheduleDBot(BotBase):
 
         out: List[Dict[str, Any]] = []
         for item in data.get("results") or []:
+            # Defensive: re-confirm the result is actually for our docket
+            # (in case CL ever changes filter semantics again).
+            if item.get("docket_id") and int(item["docket_id"]) != int(docket_id):
+                continue
             if not item.get("is_available"):
                 continue
             filepath = item.get("filepath_local")
             if not filepath:
                 continue
-            description = (item.get("description") or item.get("short_description") or "").lower()
-            # Filter to actual Schedule D / Secured Creditor docs (the search
-            # returns matches on any docket entry containing "schedule")
+            description = (
+                item.get("description") or item.get("short_description") or ""
+            ).lower()
+            # Prefer matches whose description actually mentions schedule/
+            # secured. Anything else from this docket is a fallback.
             if not any(kw in description for kw in (
                 "schedule d", "secured", "creditor", "schedule of"
             )):
-                # Sometimes the description is empty but the doc IS a schedule
-                # — keep first 3 candidates anyway as fallback
+                # Description may be empty but doc IS a schedule —
+                # keep up to 3 fallback candidates.
                 if len(out) >= 3:
                     continue
             out.append({
