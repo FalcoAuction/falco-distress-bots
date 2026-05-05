@@ -56,6 +56,14 @@ jobs:
           FALCO_LEDGER_REEXTRACT_FOCUS_ONLY: "1"
           FALCO_LEDGER_REEXTRACT_MAX: "200"
 
+      - name: Amortize mortgage balances to current
+        run: python -m src.bots.mortgage_amortizer_bot
+        continue-on-error: true
+
+      - name: Auto-promote defensible staging leads to live
+        run: python -m src.bots.auto_promoter_bot
+        continue-on-error: true
+
   prep:
     # Fires at 11:00 UTC. Skip-trace + Lookup. No calls placed.
     if: github.event.schedule == '0 11 6 5 *' || github.event_name == 'workflow_dispatch'
