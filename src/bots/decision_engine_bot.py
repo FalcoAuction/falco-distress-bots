@@ -468,9 +468,11 @@ class DecisionEngineBot(BotBase):
         lead whose priority_score was explicitly cleared (e.g., by an
         enricher that significantly changed the data).
         """
+        # property_value_source exists on homeowner_requests (live) only;
+        # staging doesn't have it. Splitting per-table to avoid 42703.
         STAGING_FIELDS = (
             "id, property_address, county, owner_name_records, full_name, "
-            "distress_type, property_value, property_value_source, mortgage_balance, "
+            "distress_type, property_value, mortgage_balance, "
             "trustee_sale_date, phone, raw_payload, phone_metadata, "
             "admin_notes, bot_source, priority_score"
         )
