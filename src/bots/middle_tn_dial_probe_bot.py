@@ -64,6 +64,22 @@ PROBE_TTL_DAYS = 60
 ALLOWED_LINE_TYPES = {"mobile", "landline", "fixed_line_or_mobile"}
 HANGUP_TWIML = "<Response><Hangup/></Response>"
 
+# Mortgage-data source gate. We only dial leads whose mortgage_balance
+# came from a defensible source. Assumption-driven estimator outputs do
+# NOT pass — Patrick's rule: "the math is the pitch", numbers must be
+# accurate, not extrapolated.
+DEFENSIBLE_MORTGAGE_SOURCES = {
+    "ustitlesearch_rod",            # ROD recordings (real DOT instruments)
+    "hmda_match",                    # CFPB HMDA loan-level data (real
+                                     # origination, free, federal source)
+    "nashville_ledger_extracted",    # Parsed from published trustee notice
+    "attom_official",                # ATTOM (real, API expired)
+    "davidson_rod",                  # future per-county ROD scrapers
+    "williamson_rod",
+    "wilson_rod",
+    "maury_rod",
+}
+
 # AMD parameters tuned for short probe (we don't need to leave a message)
 AMD_PARAMS = {
     "machine_detection": "Enable",       # detect human vs machine
@@ -274,6 +290,37 @@ class MiddleTnDialProbeBot(BotBase):
 
     # ── candidates ────────────────────────────────────────────────────────
     def _candidates(self, client, max_per_run: int) -> List[Dict[str, Any]]:
+        # Build the set of lead_ids whose mortgage_balance is from a
+        # defensible source. We resolve this two ways:
+        #   1. lead_field_provenance.source IN DEFENSIBLE_MORTGAGE_SOURCES
+        #   2. phone_metadata.rod_lookup is set (covers our ROD writes
+        #      that didn't get a provenance entry — staging-only writes)
+        defensible_ids: set = set()
+        try:
+            page_idx = 0
+            while True:
+                pr = (
+                    client.table("lead_field_provenance")
+                    .select("lead_id, source")
+                    .eq("field_name", "mortgage_balance")
+                    .range(page_idx * 1000, (page_idx + 1) * 1000 - 1)
+                    .execute()
+                )
+                rows = pr.data or []
+                if not rows:
+                    break
+                for row in rows:
+                    if row.get("source") in DEFENSIBLE_MORTGAGE_SOURCES:
+                        defensible_ids.add(row["lead_id"])
+                if len(rows) < 1000:
+                    break
+                page_idx += 1
+        except Exception as e:
+            self.logger.warning(
+                f"could not query lead_field_provenance: {e} — "
+                "falling back to phone_metadata.rod_lookup gate only"
+            )
+
         out = []
         PAGE = 1000
         for table in ("homeowner_requests", "homeowner_requests_staging"):
@@ -284,6 +331,7 @@ class MiddleTnDialProbeBot(BotBase):
                         client.table(table)
                         .select(
                             "id, county, phone, phone_metadata, "
+                            "mortgage_balance, "
                             "priority_score, owner_name_records, full_name"
                         )
                         .not_.is_("phone", "null")
@@ -301,8 +349,15 @@ class MiddleTnDialProbeBot(BotBase):
                             continue
                         if _is_dnc(row):
                             continue
+                        if not row.get("mortgage_balance"):
+                            continue
                         pm = row.get("phone_metadata") or {}
                         if not isinstance(pm, dict):
+                            continue
+                        # Source gate — defensible mortgage data only
+                        is_rod = bool(pm.get("rod_lookup"))
+                        is_defensible_provenance = row["id"] in defensible_ids
+                        if not (is_rod or is_defensible_provenance):
                             continue
                         # Require a successful Twilio Lookup with an
                         # eligible line type
