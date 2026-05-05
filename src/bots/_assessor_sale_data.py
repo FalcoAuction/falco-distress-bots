@@ -292,6 +292,11 @@ WILLIAMSON_SEARCH = (
 def _resolve_williamson(
     session: requests.Session, address: str
 ) -> Dict[str, Any]:
+    """Williamson uses Inigo. Real field names (verified live 2026-05-05):
+        "Last Price", "Last Transfer Date", "Property Address",
+        "Parcel ID", "Owner", "lrsn".
+    Search returns {data: [...], recordsFiltered, recordsTotal}.
+    """
     out: Dict[str, Any] = {"source": "williamson_inigo", "county": "williamson"}
     if not address:
         return out
@@ -305,13 +310,15 @@ def _resolve_williamson(
         if r.status_code != 200:
             return out
         data = r.json()
-        results = data if isinstance(data, list) else data.get("results", [])
+        results = data.get("data", []) if isinstance(data, dict) else (
+            data if isinstance(data, list) else []
+        )
         if not results:
             return out
         first = results[0]
-        out["parcel"] = first.get("parcel_id") or first.get("parcel")
-        # Some Inigo schemas use last_sale_price/date, some use SalePrice
-        sp = first.get("last_sale_price") or first.get("sale_price")
+        out["parcel"] = first.get("Parcel ID") or first.get("lrsn")
+        # Sale price/date — Inigo uses "Last Price" + "Last Transfer Date"
+        sp = first.get("Last Price")
         if sp:
             try:
                 sp = float(str(sp).replace(",", "").replace("$", ""))
@@ -319,13 +326,12 @@ def _resolve_williamson(
                     out["sale_price"] = sp
             except (ValueError, TypeError):
                 pass
-        sd = first.get("last_sale_date") or first.get("sale_date")
+        sd = first.get("Last Transfer Date")
         if sd:
             out["sale_date"] = _date_to_iso(str(sd))
-        if first.get("appraised") or first.get("total_appraisal"):
-            out["appraised"] = float(
-                first.get("appraised") or first.get("total_appraisal")
-            )
+        # Inigo also has Land + Improvement + Total Market Appraisal on
+        # the parcel detail page, but we'd need a second fetch to
+        # /property_search/parcel/{lrsn}. Defer for now.
     except Exception:
         pass
     return out

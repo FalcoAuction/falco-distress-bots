@@ -75,11 +75,17 @@ CENSUS_GEOCODER = (
 HMDA_CSV = "https://ffiec.cfpb.gov/v2/data-browser-api/view/csv"
 GLEIF_LEI = "https://api.gleif.org/api/v1/lei-records/"
 
-# Years to consider when sale year is unknown. HMDA 2024 = latest available
-# as of mid-2025. Earlier years available going back to 2018.
-DEFAULT_YEAR_WINDOW = 6  # 2019-2024 inclusive
+# Years to consider when sale year is unknown.
+#   - CFPB Data Browser API: 2018-2024 (live API)
+#   - CFPB historic archives: 2007-2017 (downloaded + filtered to focus
+#     counties via _hmda_historic.py)
+# We treat both as a continuous range. _hmda() prefers the on-disk
+# cache; for years 2018+, falls through to live API on cache miss.
+DEFAULT_YEAR_WINDOW = 6
 HMDA_LATEST_YEAR = 2024
-HMDA_EARLIEST_YEAR = 2018
+HMDA_EARLIEST_YEAR = 2010  # extended down: requires running
+                            # _hmda_historic.py first to populate cache
+HMDA_LIVE_API_EARLIEST_YEAR = 2018  # below this, must be in disk cache
 
 DEFAULT_MAX_PER_RUN = 100
 REQUEST_TIMEOUT = 60
@@ -503,7 +509,7 @@ class HmdaEnricherBot(BotBase):
         cache_key = (county_fips, year)
         if cache_key in self._hmda_cache:
             return self._hmda_cache[cache_key]
-        # Disk cache
+        # Disk cache (live API + historic archive both land here)
         cache_path = CACHE_DIR / f"hmda_{county_fips}_{year}.csv"
         if cache_path.exists():
             try:
@@ -513,7 +519,16 @@ class HmdaEnricherBot(BotBase):
                 return rows
             except Exception as e:
                 self.logger.warning(f"cache read fail {cache_path}: {e}")
-        # Live fetch
+        # Pre-2018 must come from disk cache (no live API). If missing,
+        # warn and return empty.
+        if year < HMDA_LIVE_API_EARLIEST_YEAR:
+            self.logger.warning(
+                f"  no historic cache for {county_fips}/{year}; "
+                f"run `python -m src.bots._hmda_historic --year {year}` to populate"
+            )
+            self._hmda_cache[cache_key] = []
+            return []
+        # Live fetch (2018+)
         try:
             self.logger.info(f"  HMDA download: {county_fips} {year}")
             r = self._session.get(
