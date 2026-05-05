@@ -290,7 +290,213 @@ def _resolve_williamson(
     return out
 
 
-def resolve(address: str, county: str) -> Dict[str, Any]:
+# Authoritative TPAD jurisdiction codes (extracted live from the
+# assessment.cot.tn.gov/TPAD home dropdown 2026-05-05). The existing
+# tpad_enricher_bot.COUNTY_CODES has WRONG codes for many counties —
+# do NOT reuse it.
+TPAD_JUR_CODES = {
+    "sumner": "083",
+    "wilson": "095",
+    "maury":  "060",
+    "robertson": "074",
+    "cheatham": "011",
+    "dickson": "022",
+    "rutherford": "075",
+    # Davidson/Montgomery/Williamson are listed in TPAD as "external link"
+    # — searching them via TPAD returns 0. Use county-specific resolvers.
+}
+
+TPAD_BASE = "https://assessment.cot.tn.gov/TPAD"
+TPAD_SEARCH = f"{TPAD_BASE}/Search/GetSearchResults"
+TPAD_DETAIL = f"{TPAD_BASE}/Parcel/Details"
+
+
+def _tpad_search(
+    session: requests.Session, jur: str, owner: str, address: str = ""
+) -> list:
+    payload = {
+        "Jur": jur,
+        "Owner": owner,
+        "PropertyAddress": address,
+        "SubdivisionName": "",
+        "PropertyType": "",
+        "SaleDateRangeStart": "",
+        "SaleDateRangeEnd": "",
+        "ControlMap": "",
+        "MapGroup": "",
+        "ParcelNumber": "",
+        "GISLink": "",
+    }
+    try:
+        r = session.post(TPAD_SEARCH, data=payload, timeout=30)
+        if r.status_code != 200:
+            return []
+        return r.json() or []
+    except Exception:
+        return []
+
+
+def _tpad_detail(
+    session: requests.Session, parcel_id: str, jur: str, parcel_key: str
+) -> Dict[str, Any]:
+    from urllib.parse import quote
+    url = (
+        f"{TPAD_DETAIL}?parcelId={quote(parcel_id)}"
+        f"&jur={quote(jur)}&parcelKey={quote(parcel_key)}"
+    )
+    try:
+        r = session.get(url, timeout=20)
+        if r.status_code != 200:
+            return {}
+    except Exception:
+        return {}
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(" ", strip=True))
+
+    out: Dict[str, Any] = {}
+
+    # Appraised value
+    for pat in (
+        r"Total Appraisal[^\d]*\$?([\d,]+)",
+        r"Total Appraised Value[^\d]*\$?([\d,]+)",
+    ):
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            out["appraised"] = m.group(1)
+            break
+
+    # TPAD detail page renders sale history as a table:
+    #   "Sale Date Price Book Page Vacant/Improved Type Instrument Qual"
+    #   "7/19/2022 $235,000 6001 465 I-IMPROVED Warranty Deed ..."
+    # Take the FIRST sale row (most recent) — stripped of leading header.
+    sale_table_re = re.compile(
+        r"Sale Date Price Book Page[^\n]*?\s+"
+        r"(\d{1,2}/\d{1,2}/\d{2,4})\s+"
+        r"\$?([\d,]+)",
+        re.IGNORECASE,
+    )
+    m = sale_table_re.search(text)
+    if m:
+        out["last_sale_date"] = m.group(1)
+        out["last_sale_price"] = m.group(2)
+    else:
+        # Fall back to label-style "Last Sale" / "Sale Price"
+        for pat in (
+            r"(?:Last Sale Price|Sale Price)[:\s]+\$?([\d,]+)",
+        ):
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                out["last_sale_price"] = m.group(1)
+                break
+        for pat in (
+            r"(?:Last Sale Date|Sale Date)[:\s]+(\d{1,2}/\d{1,2}/\d{2,4}|\d{4}-\d{2}-\d{2})",
+        ):
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                out["last_sale_date"] = m.group(1)
+                break
+
+    return out
+
+
+def _build_tpad_session() -> requests.Session:
+    s = requests.Session()
+    s.headers["User-Agent"] = "FALCO-Lead-Research/1.0"
+    s.headers["Accept"] = "application/json, text/html"
+    s.verify = False
+    try:
+        s.get(f"{TPAD_BASE}/", timeout=15)
+    except Exception:
+        pass
+    return s
+
+
+def _normalize_owner_for_tpad(owner: str) -> list:
+    """TPAD's owner search is fuzzy. Try several common reorderings."""
+    if not owner:
+        return []
+    cleaned = re.sub(r"[,;]", " ", owner).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    parts = cleaned.split()
+    if len(parts) < 2:
+        return [cleaned]
+    # First Last → "Last First", "First Last", "Last, First"
+    return [
+        f"{parts[-1]} {parts[0]}",         # LAST FIRST
+        cleaned,                             # FIRST LAST
+        f"{parts[-1]}, {parts[0]}",         # LAST, FIRST
+    ]
+
+
+def _resolve_tpad(
+    session: requests.Session, address: str, county: str, owner: str
+) -> Dict[str, Any]:
+    """TPAD covers most TN counties (free, statewide). Search by
+    owner+jurisdiction, match by address, fetch detail for sale data."""
+    out: Dict[str, Any] = {"source": "tpad", "county": county}
+    if not owner or not address:
+        return out
+
+    jur = TPAD_JUR_CODES.get(county)
+    if not jur:
+        return out
+
+    sess = _build_tpad_session()
+
+    # Try several owner-name orderings
+    candidates = []
+    for owner_variant in _normalize_owner_for_tpad(owner):
+        candidates = _tpad_search(sess, jur, owner_variant, "")
+        if candidates:
+            break
+    if not candidates:
+        return out
+
+    # Pick the candidate whose property address best matches lead's address
+    addr_norm = address.split(",")[0].strip().upper()
+    addr_number = ""
+    m = re.match(r"^(\d+)\s", addr_norm)
+    if m:
+        addr_number = m.group(1)
+
+    best = None
+    for c in candidates:
+        cand_addr = (c.get("propertyAddress") or "").upper().strip()
+        # TPAD returns "STREET NAME  NUMBER" format with double-space
+        if addr_number and addr_number in cand_addr:
+            best = c
+            break
+    if not best:
+        best = candidates[0]
+
+    parcel_id = best.get("parcelId")
+    parcel_key = best.get("parcelKey")
+    if not parcel_id:
+        return out
+
+    detail = _tpad_detail(sess, parcel_id, jur, parcel_key or "")
+
+    if detail.get("last_sale_date"):
+        out["sale_date"] = _date_to_iso(detail["last_sale_date"])
+    if detail.get("last_sale_price"):
+        sp = _money_to_float(detail["last_sale_price"])
+        if sp and sp > 0:
+            out["sale_price"] = sp
+    if detail.get("appraised") or detail.get("appraised_alt"):
+        ap = _money_to_float(
+            detail.get("appraised") or detail.get("appraised_alt")
+        )
+        if ap:
+            out["appraised"] = ap
+    # Also use sale data from the search-result row if detail had nothing
+    if not out.get("sale_date") and best.get("dateOfSaleShort"):
+        out["sale_date"] = _date_to_iso(best["dateOfSaleShort"])
+    out["parcel"] = parcel_id
+    return out
+
+
+def resolve(address: str, county: str, owner: Optional[str] = None) -> Dict[str, Any]:
     """Top-level dispatch: returns sale_date / sale_price / deed_ref /
     appraised based on the county's free portal."""
     county = (county or "").lower().replace(" county", "").strip()
@@ -303,8 +509,10 @@ def resolve(address: str, county: str) -> Dict[str, Any]:
         return _resolve_rutherford(session, address)
     if county == "williamson":
         return _resolve_williamson(session, address)
-    # Sumner / Wilson / Maury / Montgomery would route to TPAD scraper
-    # — that's TPAD enricher's job; defer for now.
+    # Sumner, Wilson, Maury — covered by TPAD (Davidson/Williamson/
+    # Montgomery are listed as "external link" on TPAD and return 0).
+    if county in TPAD_JUR_CODES:
+        return _resolve_tpad(session, address, county, owner or "")
     return {"source": "no_resolver", "county": county}
 
 
