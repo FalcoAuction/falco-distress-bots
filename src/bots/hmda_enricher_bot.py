@@ -51,6 +51,7 @@ import requests
 from ._base import BotBase, _supabase
 from ._provenance import record_field
 from . import _assessor_sale_data
+from . import _ffiec_panel
 
 
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
@@ -325,9 +326,14 @@ class HmdaEnricherBot(BotBase):
                 else:
                     single_match += 1
 
-                # 6) Resolve lender name from LEI
+                # 6) Resolve lender name from LEI (2018+) or FFIEC panel
+                # (pre-2018). match_year guides which lookup to use.
                 lei = best.get("lei", "")
-                lender_name = self._gleif(lei)
+                try:
+                    match_year_int = int(best.get("__match_year__", 0))
+                except (ValueError, TypeError):
+                    match_year_int = 0
+                lender_name = self._gleif(lei, year=match_year_int or None)
 
                 principal = _to_float(best.get("loan_amount"))
                 match_year = best.get("__match_year__")
@@ -570,24 +576,36 @@ class HmdaEnricherBot(BotBase):
             self._hmda_cache[cache_key] = []
             return []
 
-    # ── GLEIF (LEI → lender name) ────────────────────────────────────────
-    def _gleif(self, lei: str) -> Optional[str]:
+    # ── GLEIF (LEI → lender name) + FFIEC fallback for pre-2018 ─────────
+    def _gleif(self, lei: str, year: Optional[int] = None) -> Optional[str]:
         if not lei:
             return None
         if lei in self._gleif_cache:
             return self._gleif_cache[lei]
-        try:
-            r = self._session.get(GLEIF_LEI + lei, timeout=10)
-            if r.status_code != 200:
-                self._gleif_cache[lei] = None
-                return None
-            attrs = r.json().get("data", {}).get("attributes", {})
-            name = attrs.get("entity", {}).get("legalName", {}).get("name")
-            self._gleif_cache[lei] = name
-            return name
-        except Exception:
-            self._gleif_cache[lei] = None
-            return None
+
+        # Real LEIs are 20 chars; pre-2018 HMDA stores respondent_id
+        # (e.g. "0002736291" or "75-2838184"). Route accordingly.
+        is_real_lei = len(lei) == 20 and lei.isalnum()
+
+        name = None
+        if is_real_lei:
+            try:
+                r = self._session.get(GLEIF_LEI + lei, timeout=10)
+                if r.status_code == 200:
+                    attrs = r.json().get("data", {}).get("attributes", {})
+                    name = attrs.get("entity", {}).get("legalName", {}).get("name")
+            except Exception:
+                pass
+
+        if not name and year:
+            # Try FFIEC respondent panel for pre-2018 historic data
+            try:
+                name = _ffiec_panel.lookup(year, lei)
+            except Exception:
+                pass
+
+        self._gleif_cache[lei] = name
+        return name
 
     # ── DB write ──────────────────────────────────────────────────────────
     def _write(self, client, lead: Dict[str, Any], match: Dict[str, Any]) -> None:
