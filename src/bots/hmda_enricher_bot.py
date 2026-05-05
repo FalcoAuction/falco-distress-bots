@@ -83,7 +83,7 @@ GLEIF_LEI = "https://api.gleif.org/api/v1/lei-records/"
 # cache; for years 2018+, falls through to live API on cache miss.
 DEFAULT_YEAR_WINDOW = 6
 HMDA_LATEST_YEAR = 2024
-HMDA_EARLIEST_YEAR = 2010  # extended down: requires running
+HMDA_EARLIEST_YEAR = 2007  # extended down: requires running
                             # _hmda_historic.py first to populate cache
 HMDA_LIVE_API_EARLIEST_YEAR = 2018  # below this, must be in disk cache
 
@@ -227,8 +227,16 @@ class HmdaEnricherBot(BotBase):
                 if sale.get("sale_price"):
                     sale_price = _to_float(sale["sale_price"])
 
-                # 3) Determine match anchor — sale_price > property_value
-                anchor_value = sale_price or _to_float(lead.get("property_value"))
+                # 3) Determine match anchor — sale_price > property_value.
+                # Sanity-check sale_price: if it's <40% of current AVM,
+                # it's almost certainly a related-party transfer or
+                # quitclaim — not a real arms-length purchase. Drop the
+                # price anchor; year-anchor only.
+                pv = _to_float(lead.get("property_value"))
+                if sale_price and pv and sale_price < pv * 0.4:
+                    sale_price = None  # related-party transfer detected
+
+                anchor_value = sale_price or pv
                 if not anchor_value:
                     no_anchor += 1
                     continue
