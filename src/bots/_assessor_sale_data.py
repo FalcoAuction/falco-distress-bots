@@ -110,32 +110,73 @@ def _date_to_iso(s: str) -> Optional[str]:
 
 
 def _padctn_account(session: requests.Session, address: str) -> Optional[int]:
-    """Quick search padctn by address → account_id."""
+    """Quick search padctn by address → account_id.
+
+    Tries several street-name variations to handle:
+      - directional suffixes (1723 7TH AVE N → "7TH AVE N", "7TH AVE", "7TH")
+      - period suffixes ("Riverside Dr." → "Riverside Dr", "Riverside")
+      - sub-letters ("323 B FOREST PARK RD" → "B FOREST PARK RD", "FOREST PARK RD", "FOREST PARK")
+      - missing commas ("104 Creighton Ave Nashville" → "Creighton Ave Nashville", "Creighton Ave", "Creighton")
+    """
     parsed = _parse_address_for_padctn(address)
     if not parsed:
         return None
     number, street = parsed
-    try:
-        r = session.post(
-            PADCTN_QUICKSEARCH,
-            data={
-                "RealEstate": "true",
-                "SelectedSearch": "2",
-                "StreetNumber": number,
-                "SingleSearchCriteria": street,
-                "AlterCriteria": "False",
-            },
-            headers={"X-Requested-With": "XMLHttpRequest"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return None
-        m = PADCTN_ACCOUNT_RE.search(r.text)
-        if not m:
-            return None
-        return int(m.group(1))
-    except Exception:
-        return None
+
+    # Build search variations
+    variations = []
+    s = street.upper()
+    # Strip trailing periods + extra whitespace
+    s = re.sub(r"\.", "", s).strip()
+    # Strip city-name tail if present (only first 1-2 words are likely
+    # the actual street name on padctn)
+    variations.append(s)
+    # Strip directional suffix (N/S/E/W)
+    s2 = re.sub(r"\s+(N|S|E|W|NORTH|SOUTH|EAST|WEST|NE|NW|SE|SW)$", "", s)
+    if s2 != s:
+        variations.append(s2)
+    # Strip sub-letter prefix ("B FOREST PARK RD" → "FOREST PARK RD")
+    s3 = re.sub(r"^[A-Z]\s+", "", s2 or s)
+    if s3 not in variations:
+        variations.append(s3)
+    # Strip street type suffix (RD/AVE/ST/BLVD/CT/DR/LN/PL/CIR/PKWY)
+    s4 = re.sub(
+        r"\s+(RD|AVE|AV|ST|BLVD|CT|DR|LN|PL|CIR|PKWY|WAY|TER|TRL|HWY|"
+        r"ROAD|AVENUE|STREET|BOULEVARD|COURT|DRIVE|LANE|PLACE|CIRCLE|"
+        r"PARKWAY|TERRACE|TRAIL|HIGHWAY)$",
+        "", s3 or s2 or s,
+    )
+    if s4 not in variations:
+        variations.append(s4)
+    # Just first word as last resort
+    first_word = s.split()[0] if s.split() else ""
+    if first_word and first_word not in variations:
+        variations.append(first_word)
+
+    for variant in variations:
+        if not variant:
+            continue
+        try:
+            r = session.post(
+                PADCTN_QUICKSEARCH,
+                data={
+                    "RealEstate": "true",
+                    "SelectedSearch": "2",
+                    "StreetNumber": number,
+                    "SingleSearchCriteria": variant,
+                    "AlterCriteria": "False",
+                },
+                headers={"X-Requested-With": "XMLHttpRequest"},
+                timeout=15,
+            )
+            if r.status_code != 200:
+                continue
+            m = PADCTN_ACCOUNT_RE.search(r.text)
+            if m:
+                return int(m.group(1))
+        except Exception:
+            continue
+    return None
 
 
 def _padctn_card(session: requests.Session, account_id: int) -> Dict[str, Any]:

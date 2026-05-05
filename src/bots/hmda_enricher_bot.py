@@ -250,7 +250,7 @@ class HmdaEnricherBot(BotBase):
                     target_year = self._pick_target_year(lead)
                     year_range = self._year_search_range(target_year, year_window)
 
-                # 5) Pull HMDA + filter by tract + amount.
+                # 5) Pull HMDA + filter by tract + amount + property type.
                 #
                 # Window depends on anchor quality:
                 #   sale_price (exact, year-exact)   → 60-100% (tight)
@@ -275,6 +275,17 @@ class HmdaEnricherBot(BotBase):
                         if row.get("lien_status") != "1":
                             continue
                         if row.get("loan_purpose") not in purpose_filter:
+                            continue
+                        # Filter to single-family residential (1-4 units),
+                        # primary residence — drops investor + commercial
+                        # + multifamily noise. Roughly halves candidate
+                        # count in dense tracts.
+                        ddc = row.get("derived_dwelling_category", "")
+                        if "Single Family (1-4 Units)" not in ddc:
+                            continue
+                        # occupancy_type 1 = principal residence
+                        # (1=primary, 2=second home, 3=investment)
+                        if row.get("occupancy_type") not in ("1", ""):
                             continue
                         amt = _to_float(row.get("loan_amount"))
                         if amt is None:
