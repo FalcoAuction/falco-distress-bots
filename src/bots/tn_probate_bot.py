@@ -33,6 +33,7 @@ Distress type: PROBATE
 
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
@@ -117,17 +118,30 @@ class TnProbateBot(BotBase):
     throttle_seconds = 1.0
     expected_min_yield = 10  # typical Friday: 76 Ledger CL + 98 MDN CD ≈ 130-170 probate
 
-    weeks_to_scan = 4
-    mdn_days_to_scan = 14
+    # Date-range knobs. CI runs twice/day so we don't need a wide
+    # historical window each pass — we just want the latest publications.
+    # Override via FALCO_TN_PROBATE_WEEKS / _DAYS for backfills.
+    weeks_to_scan = int(os.environ.get("FALCO_TN_PROBATE_WEEKS", "1"))
+    mdn_days_to_scan = int(os.environ.get("FALCO_TN_PROBATE_MDN_DAYS", "3"))
 
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
         seen_keys: set[str] = set()  # source|id key to dedup across pubs
 
         # Nashville Ledger (CL prefix, weekly Friday publication, Middle TN)
-        for pub_date in self._recent_friday_dates(self.weeks_to_scan):
+        # Fast-fail: if the FIRST date returns 0 IDs (likely source-side
+        # outage or layout change), skip the remaining Ledger dates rather
+        # than chewing through 30s × ~50 doomed fetches per date.
+        ledger_dates = self._recent_friday_dates(self.weeks_to_scan)
+        for i, pub_date in enumerate(ledger_dates):
             ids = self._fetch_ledger_index(pub_date)
             self.logger.info(f"Ledger {pub_date.isoformat()}: {len(ids)} CL court-notice IDs")
+            if i == 0 and not ids:
+                self.logger.warning(
+                    "Ledger first-date returned 0 IDs — source likely unavailable; "
+                    "skipping remaining Ledger dates"
+                )
+                break
             for cl_id in ids:
                 key = f"ledger|{cl_id}"
                 if key in seen_keys:
@@ -143,10 +157,18 @@ class TnProbateBot(BotBase):
                     leads.append(lead)
 
         # Memphis Daily News (CD prefix, daily-ish publication, Shelby + West TN)
-        for pub_date in self._recent_mdn_dates(self.mdn_days_to_scan):
+        # Same fast-fail: if first date returns 0 IDs, abort MDN entirely.
+        mdn_dates = self._recent_mdn_dates(self.mdn_days_to_scan)
+        for i, pub_date in enumerate(mdn_dates):
             ids = self._fetch_mdn_index(pub_date)
             if ids:
                 self.logger.info(f"MDN {pub_date.isoformat()}: {len(ids)} CD court-notice IDs")
+            elif i == 0:
+                self.logger.warning(
+                    "MDN first-date returned 0 IDs — source likely unavailable; "
+                    "skipping remaining MDN dates"
+                )
+                break
             for cd_id in ids:
                 key = f"mdn|{cd_id}"
                 if key in seen_keys:
