@@ -3,11 +3,23 @@ name: Falco Daily Pipeline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 12 * * *"  # daily at 12:00 UTC (7am CST)
+    # Twice daily — early-morning and mid-afternoon. Two passes/day keeps
+    # the dialer queue fresh AND gives us a recovery window if the first
+    # run hits a transient source-site hiccup.
+    - cron: "0 12 * * *"  # 12:00 UTC = 7am CST — primary daily pass
+    - cron: "0 21 * * *"  # 21:00 UTC = 4pm CST — afternoon refresh
+
+# Don't cancel an in-progress run when a new one is queued; let the
+# earlier one complete and just queue the next. Previously concurrent
+# crons (May 3, May 4) auto-cancelled each other.
+concurrency:
+  group: falco-daily-pipeline
+  cancel-in-progress: false
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     env:
       # ===== Bot scrapers (write directly to Supabase) =====
@@ -61,3 +73,20 @@ jobs:
             out/reports/conversion_lane.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Post-run summary (queries bot_run_health for last 24h)
+        if: always()
+        run: |
+          python -c "
+          import os, urllib.request, json
+          url = os.environ['NEXT_PUBLIC_SUPABASE_URL'].rstrip('/') + '/rest/v1/bot_run_health?select=bot_source,status,fetched_count,staged_count,started_at,error_message&order=started_at.desc&limit=30'
+          req = urllib.request.Request(url, headers={
+              'apikey': os.environ['SUPABASE_SERVICE_ROLE_KEY'],
+              'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_ROLE_KEY'],
+          })
+          rows = json.loads(urllib.request.urlopen(req, timeout=15).read())
+          print('=== Last 30 bot runs ===')
+          for r in rows:
+              when = (r.get('started_at') or '')[:16].replace('T',' ')
+              print(f\"  {when}  {r.get('bot_source','?'):>30}  {r.get('status','?'):>14}  fetched={r.get('fetched_count') or 0:>5}  staged={r.get('staged_count') or 0:>5}  {(r.get('error_message') or '')[:60]}\")
+          " || true
