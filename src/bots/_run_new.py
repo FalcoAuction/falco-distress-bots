@@ -99,7 +99,13 @@ NEW_BOTS = [
     ("nashville_ledger", nashville_ledger_bot.run),
     ("memphis_daily_news", memphis_daily_news_bot.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
-    ("tn_probate", tn_probate_bot.run),
+    # tn_probate temporarily disabled 2026-05-06 — even with 1-week scan
+    # window + first-page fast-fail, detail fetches against tnledger.com
+    # were hanging the GH Actions runner for 30+ min when the source was
+    # slow. Re-enable after adding a per-bot wall-clock cap. Volume from
+    # tn_public_notice + foreclosure_tennessee_bot covers probate notices
+    # via the TN Press Association aggregator in the meantime.
+    # ("tn_probate", tn_probate_bot.run),
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
