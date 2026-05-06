@@ -283,6 +283,115 @@ def _resolve_rutherford(
     return out
 
 
+# Montgomery County (Clarksville) — ArcGIS Parcels FeatureServer
+MONTGOMERY_ARCGIS = (
+    "https://gis.mcgtn.org/arcgis/rest/services/Parcels/MapServer/0/query"
+)
+
+
+def _resolve_montgomery(
+    session: requests.Session, address: str
+) -> Dict[str, Any]:
+    """Montgomery County Parcels MapServer (Clarksville assessor data).
+    PropertyAddress is uppercased + abbreviated ('2724 ANN DR'). Match by
+    house number + street name token to handle suffix mismatches."""
+    out: Dict[str, Any] = {"source": "mcgtn_parcels", "county": "montgomery"}
+    if not address:
+        return out
+    head = address.split(",")[0].strip().upper()
+    # Extract house number + first 1-2 street words
+    parts = head.split()
+    if len(parts) < 2:
+        return out
+    number = parts[0]
+    if not re.match(r"^\d+$", number):
+        # unit prefix (e.g., "B 100 MAIN ST") — skip prefix
+        for i, p in enumerate(parts):
+            if re.match(r"^\d+$", p):
+                number = p
+                parts = parts[i:]
+                break
+        else:
+            return out
+    street_word = parts[1].rstrip(".,") if len(parts) > 1 else ""
+    if not street_word:
+        return out
+    try:
+        r = session.get(
+            MONTGOMERY_ARCGIS,
+            params={
+                "where": (
+                    f"PropertyAddress LIKE '{number} %' "
+                    f"AND PropertyAddress LIKE '%{street_word}%'"
+                ),
+                "outFields": (
+                    "ParcelID,Owner1,Owner2,PropertyAddress,PropertyCity,"
+                    "MailingAddress,MailCity,MailState,MailZip,"
+                    "BldgFinalValue,BldgMktValue,SalesDate,SalesPrice,"
+                    "Grantor,Grantee,YearBuilt,LivingArea,NoBeds,NoBaths,"
+                    "InstrumentNumber"
+                ),
+                "f": "json",
+                "resultRecordCount": "3",
+            },
+            timeout=15,
+        )
+        if r.status_code != 200:
+            return out
+        data = r.json()
+        feats = data.get("features") or []
+        if not feats:
+            return out
+        # Take first (most relevant) match
+        attrs = feats[0].get("attributes", {}) or {}
+        out["parcel"] = str(attrs.get("ParcelID")) if attrs.get("ParcelID") else None
+        out["owner"] = attrs.get("Owner1")
+        out["owner2"] = attrs.get("Owner2")
+        out["mailing_address"] = " ".join(
+            [str(x) for x in [
+                attrs.get("MailingAddress"),
+                attrs.get("MailCity"),
+                attrs.get("MailState"),
+                attrs.get("MailZip"),
+            ] if x]
+        ) or None
+        sd = attrs.get("SalesDate")
+        if sd:
+            try:
+                from datetime import datetime, timezone
+                dt = datetime.fromtimestamp(int(sd) / 1000, tz=timezone.utc)
+                out["sale_date"] = dt.date().isoformat()
+            except Exception:
+                pass
+        sp = attrs.get("SalesPrice")
+        if isinstance(sp, str):
+            sp = sp.replace("$", "").replace(",", "").strip()
+            try:
+                sp_f = float(sp)
+                if sp_f > 0:
+                    out["sale_price"] = sp_f
+            except (ValueError, TypeError):
+                pass
+        elif isinstance(sp, (int, float)) and sp > 0:
+            out["sale_price"] = float(sp)
+        # BldgFinalValue is the appraised value
+        if attrs.get("BldgFinalValue"):
+            try:
+                v = float(attrs["BldgFinalValue"])
+                if v > 0:
+                    out["appraised"] = v
+            except (ValueError, TypeError):
+                pass
+        out["deed_reference"] = attrs.get("InstrumentNumber")
+        out["year_built"] = attrs.get("YearBuilt")
+        out["beds"] = attrs.get("NoBeds")
+        out["baths"] = attrs.get("NoBaths")
+        out["sqft"] = attrs.get("LivingArea")
+    except Exception:
+        pass
+    return out
+
+
 # Williamson Inigo — JSON search, exposes sale history
 WILLIAMSON_SEARCH = (
     "https://inigo.williamson-tn.org/property_search/json/search"
@@ -556,6 +665,8 @@ def resolve(address: str, county: str, owner: Optional[str] = None) -> Dict[str,
         return _resolve_rutherford(session, address)
     if county == "williamson":
         return _resolve_williamson(session, address)
+    if county == "montgomery":
+        return _resolve_montgomery(session, address)
     # Sumner, Wilson, Maury — covered by TPAD (Davidson/Williamson/
     # Montgomery are listed as "external link" on TPAD and return 0).
     if county in TPAD_JUR_CODES:
