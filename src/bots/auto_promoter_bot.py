@@ -69,8 +69,17 @@ def _is_defensible(pm: Dict[str, Any]) -> tuple:
         return True, "ustitlesearch_rod"
     if src == "nashville_ledger_extracted":
         return True, "nashville_ledger_extracted"
-    if src == "hmda_match" and (sig.get("sale_anchored") or sig.get("year_anchored")):
-        return True, "hmda_match"
+    if src == "hmda_match":
+        # Sale-anchored or year-anchored = unambiguously defensible
+        if sig.get("sale_anchored") or sig.get("year_anchored"):
+            return True, "hmda_match"
+        # Wide single match (no anchor but only one HMDA record matched the
+        # property) hits 0.65 — accept; wide multi (0.45) stays in staging.
+        try:
+            if float(sig.get("confidence") or 0) >= 0.65:
+                return True, "hmda_match_wide_single"
+        except (TypeError, ValueError):
+            pass
     return False, ""
 
 
