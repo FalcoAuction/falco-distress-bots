@@ -70,6 +70,18 @@ from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import stacked_distress_aggregator_bot
 from . import decision_engine_bot
+# MTN-focused enrichment chain (added 2026-05-06). These are what
+# graduate staged leads into dialer-ready leads:
+#   - HMDA enricher: defensible mortgage match via CFPB data
+#   - Mortgage amortizer: writes current balance from HMDA signal
+#   - Middle-TN skip-trace: BatchData phones for MTN focus counties
+#   - Middle-TN Twilio lookup: validates every phone (mobile/landline/voip)
+#   - Auto-promoter: final gate — graduates eligible staging → live
+from . import hmda_enricher_bot
+from . import mortgage_amortizer_bot
+from . import middle_tn_skiptrace_bot
+from . import middle_tn_twilio_lookup_bot
+from . import auto_promoter_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -112,6 +124,15 @@ NEW_BOTS = [
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
+    # MTN-focused enrichment chain — graduates staged leads into the dialer.
+    # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
+    # HMDA's mortgage_signal); skip-trace before Twilio lookup (validates
+    # the new phones); auto-promoter LAST (sees fully-enriched leads).
+    ("hmda_enricher", hmda_enricher_bot.run),
+    ("mortgage_amortizer", mortgage_amortizer_bot.run),
+    ("middle_tn_skiptrace", middle_tn_skiptrace_bot.run),
+    ("middle_tn_twilio_lookup", middle_tn_twilio_lookup_bot.run),
+    ("auto_promoter", auto_promoter_bot.run),
     # Autonomous brain — runs LAST so it sees fully-enriched leads
     ("decision_engine", decision_engine_bot.run),
     # Health monitor runs after everything else — surfaces silent
