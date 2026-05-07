@@ -36,6 +36,20 @@ jobs:
       FALCO_BATCHDATA_API_KEY: ${{ secrets.FALCO_BATCHDATA_API_KEY }}
       FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
 
+      # ===== Decision engine (LLM-based lead classifier) =====
+      # decision_engine_bot needs OPENAI_API_KEY or it fails with
+      # "openai_unavailable". Add this secret in GitHub repo settings if
+      # the bot is meant to run in CI; otherwise the bot exits cleanly
+      # without affecting other scrapers.
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      # ===== Twilio Lookup (phone validation + line-type) =====
+      # middle_tn_twilio_lookup_bot validates skip-traced phones to
+      # confirm mobile/landline + carrier. Without these the bot fails
+      # at startup ("TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set").
+      TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+      TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
