@@ -82,6 +82,7 @@ from . import mortgage_amortizer_bot
 from . import middle_tn_skiptrace_bot
 from . import middle_tn_twilio_lookup_bot
 from . import auto_promoter_bot
+from . import tn_lis_pendens_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -99,6 +100,10 @@ NEW_BOTS = [
     ("nashville_ledger", nashville_ledger_bot.run),
     ("memphis_daily_news", memphis_daily_news_bot.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
+    # Lis pendens — keyword-driven full-text search of the TN Public
+    # Notice index. Captures lawsuit-stage distress 60-120 days
+    # earlier than the trustee-notice-based scrapers. New 2026-05-07.
+    ("tn_lis_pendens", tn_lis_pendens_bot.run),
     # tn_probate temporarily disabled 2026-05-06 — even with 1-week scan
     # window + first-page fast-fail, detail fetches against tnledger.com
     # were hanging the GH Actions runner for 30+ min when the source was
