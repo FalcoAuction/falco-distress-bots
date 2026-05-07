@@ -127,17 +127,19 @@ class NashvilleCodesBot(BotBase):
             except Exception:
                 pass
 
-        # Filter to high-signal violations only — properties unlikely to be
-        # casually fixed = real motivated-seller signal. Skip "high weeds",
-        # "junk vehicles", etc. Patrick can broaden the filter via env var
-        # if he wants to dig into the long tail later.
-        is_high_signal = (
-            any(sig in violation.upper() for sig in HIGH_SIGNAL_VIOLATIONS)
-            or any(sig in problem.upper() for sig in HIGH_SIGNAL_VIOLATIONS)
-        )
-        if not is_high_signal:
+        # Auctionability gate. Reject leads where every cited violation
+        # is in the lawn-only bucket (HIGH WEEDS, TALL GRASS) — those
+        # owners just mow and pay the $200 fine, not auction deals. Keep
+        # anything with structural / vacant / chronic / dangerous-building
+        # codes. The previous filter was passing leads where the COMPLAINT
+        # NARRATIVE happened to mention "standing water" but the only
+        # cited violation was HIGH WEEDS; we now decide off the actual
+        # citation codes (Violations_Noted field).
+        from ._cv_filter import is_auctionable_cv
+        keep, reason = is_auctionable_cv(violation)
+        if not keep:
             return None
-        priority_tag = " [HIGH-SIGNAL]"
+        priority_tag = f" [{reason.upper()[:40]}]"
 
         notes_parts = [f"case {case_num}"]
         if violation:
