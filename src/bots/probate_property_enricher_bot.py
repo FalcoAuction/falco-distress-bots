@@ -135,7 +135,7 @@ class ProbatePropertyEnricherBot(BotBase):
                     update["property_address"] = hit["property_address"]
                 # Authoritative — override any prior HMDA-anchored phantom.
                 if hit.get("appraised"):
-                    update["property_value"] = hit["appraised"]
+                    update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "probate_assessor"
 
                 # Merge into raw_payload for audit

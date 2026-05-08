@@ -150,7 +150,7 @@ class BankruptcyPropertyEnricherBot(BotBase):
                     update["property_address"] = hit["property_address"]
                 # Authoritative — override any prior HMDA-anchored phantom.
                 if hit.get("appraised"):
-                    update["property_value"] = hit["appraised"]
+                    update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = f"{county}_assessor"
                 update["county"] = county
 

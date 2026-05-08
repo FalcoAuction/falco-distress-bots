@@ -125,7 +125,7 @@ class ShelbyAssessorBot(BotBase):
                 update: Dict[str, Any] = {}
                 # Authoritative — override any prior HMDA-anchored phantom.
                 if hit.get("appraised"):
-                    update["property_value"] = hit["appraised"]
+                    update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "shelby_assessor"
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
