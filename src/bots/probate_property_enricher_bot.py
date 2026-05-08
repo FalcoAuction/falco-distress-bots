@@ -133,8 +133,10 @@ class ProbatePropertyEnricherBot(BotBase):
                 update: Dict[str, Any] = {}
                 if hit.get("property_address") and not row.get("property_address"):
                     update["property_address"] = hit["property_address"]
-                if hit.get("appraised") and not row.get("property_value"):
+                # Authoritative — override any prior HMDA-anchored phantom.
+                if hit.get("appraised"):
                     update["property_value"] = hit["appraised"]
+                    update["property_value_source"] = "probate_assessor"
 
                 # Merge into raw_payload for audit
                 existing_raw = row.get("raw_payload") or {}
