@@ -131,7 +131,7 @@ class DavidsonAssessorBot(BotBase):
                 # distinguish defensible county-record values from the
                 # loose mortgage-anchor estimates that used to leak in.
                 if hit.get("appraised"):
-                    update["property_value"] = hit["appraised"]
+                    update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "davidson_assessor"
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
