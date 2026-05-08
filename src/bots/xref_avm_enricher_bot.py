@@ -144,7 +144,10 @@ class XrefAvmEnricherBot(BotBase):
                         skipped += 1
                         continue
                     confidence = 0.65 if donor_county and rcpt_county else 0.55
-                    update: Dict[str, Any] = {"property_value": donor_avm}
+                    update: Dict[str, Any] = {
+                        "property_value": donor_avm,
+                        "property_value_source": "xref_avm_enricher",
+                    }
                     # Also propagate owner_name + county if missing
                     if not rcpt_row.get("owner_name_records") and donor_owner:
                         update["owner_name_records"] = donor_owner

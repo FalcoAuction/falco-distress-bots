@@ -125,8 +125,14 @@ class DavidsonAssessorBot(BotBase):
                     skipped += 1
                     continue
                 update: Dict[str, Any] = {}
-                if hit.get("appraised") and not row.get("property_value"):
+                # Assessor data is AUTHORITATIVE for property_value —
+                # overrides any prior HMDA-anchored phantom value. The
+                # property_value_source column is set so audits can
+                # distinguish defensible county-record values from the
+                # loose mortgage-anchor estimates that used to leak in.
+                if hit.get("appraised"):
                     update["property_value"] = hit["appraised"]
+                    update["property_value_source"] = "davidson_assessor"
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
                 # Always merge the assessor record into raw_payload for audit
