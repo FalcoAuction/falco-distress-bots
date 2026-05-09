@@ -52,6 +52,7 @@ from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
+from . import davidson_demolition_bot
 from . import mortgage_estimator_bot
 from . import notice_enricher_bot
 from . import phone_classifier_bot
@@ -125,6 +126,11 @@ NEW_BOTS = [
     # without paid subscription creds: FALCO_DAVIDSON_ROD_USER/_PASSWORD,
     # FALCO_WILLIAMSON_ROD_USER/_PASSWORD, FALCO_HAMILTON_ROD_USER/_PASSWORD.
     ("mtn_lis_pendens_rod", mtn_lis_pendens_rod_bot.run),
+    # Davidson demolition + fire-damage building permits — owners
+    # actively committing to teardown / unable to repair, sourced from
+    # data.nashville.gov (ArcGIS Feature Service, free, no auth).
+    # ~2 new permits/day, 380 in last 180 days. 2026-05-09.
+    ("davidson_demolition", davidson_demolition_bot.run),
     # ("craigslist_tn", craigslist_tn_bot.run),  # disabled — scam pond
     ("usda_rhs", usda_rhs_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
