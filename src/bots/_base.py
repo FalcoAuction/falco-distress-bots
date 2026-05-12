@@ -293,7 +293,15 @@ class BotBase:
     # ── Internal: staging writes ────────────────────────────────────────────
 
     def _write_staging(self, leads: List[LeadPayload]) -> tuple[int, int]:
-        """Write leads to homeowner_requests_staging. Returns (staged, dupes)."""
+        """Write leads to homeowner_requests_staging. Returns (staged, dupes).
+
+        Also TOUCHES phone_metadata.notice_tracking.last_seen_at on both
+        the staging row (if it exists as a dupe) AND the live
+        homeowner_requests row (if it exists). This gives the trustee-
+        status reaper a reliable "is this notice still being
+        republished?" signal — when a sale gets withdrawn, the notice
+        stops re-appearing in our scrapes and last_seen_at goes stale.
+        """
         client = _supabase()
         if client is None:
             self.logger.warning(f"no supabase client — would have staged {len(leads)} leads")
@@ -303,6 +311,20 @@ class BotBase:
 
         staged = 0
         dupes = 0
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        def _touch_last_seen(table: str, row_id: str, existing_pm: Any) -> None:
+            """Update phone_metadata.notice_tracking on a single row."""
+            try:
+                pm = existing_pm if isinstance(existing_pm, dict) else {}
+                tracking = pm.get("notice_tracking") if isinstance(pm.get("notice_tracking"), dict) else {}
+                tracking["last_seen_at"] = now_iso
+                tracking["last_seen_by"] = self.name
+                pm["notice_tracking"] = tracking
+                client.table(table).update({"phone_metadata": pm}).eq("id", row_id).execute()
+            except Exception as e:
+                self.logger.warning(f"notice_tracking touch failed for {table}/{row_id}: {e}")
+
         for lead in leads:
             row = lead.as_db_row(scraper_run_id=self.run_id)
             try:
@@ -310,7 +332,7 @@ class BotBase:
                 # (avoid re-staging same lead from same bot in same week)
                 existing = (
                     client.table("homeowner_requests_staging")
-                    .select("id")
+                    .select("id, phone_metadata")
                     .eq("bot_source", lead.bot_source)
                     .eq("pipeline_lead_key", lead.pipeline_lead_key)
                     .eq("staging_status", "pending")
@@ -318,14 +340,42 @@ class BotBase:
                     .execute()
                 )
                 if getattr(existing, "data", None):
+                    # Touch last_seen_at on the staging row so the reaper
+                    # knows we're still seeing this notice in scrapes.
+                    _touch_last_seen(
+                        "homeowner_requests_staging",
+                        existing.data[0]["id"],
+                        existing.data[0].get("phone_metadata"),
+                    )
                     dupes += 1
-                    continue
-                client.table("homeowner_requests_staging").insert(row).execute()
-                staged += 1
+                    # Fall through to touch live too
+                else:
+                    client.table("homeowner_requests_staging").insert(row).execute()
+                    staged += 1
+
+                # Touch live homeowner_requests row if the lead has been
+                # promoted. Match on pipeline_lead_key + source='bot'.
+                try:
+                    live = (
+                        client.table("homeowner_requests")
+                        .select("id, phone_metadata")
+                        .eq("source", "bot")
+                        .eq("pipeline_lead_key", lead.pipeline_lead_key)
+                        .limit(1)
+                        .execute()
+                    )
+                    if getattr(live, "data", None):
+                        _touch_last_seen(
+                            "homeowner_requests",
+                            live.data[0]["id"],
+                            live.data[0].get("phone_metadata"),
+                        )
+                except Exception as e:
+                    self.logger.warning(f"live touch lookup failed for {lead.pipeline_lead_key}: {e}")
             except Exception as e:
                 self.logger.warning(f"staging insert failed for {lead.pipeline_lead_key}: {e}")
 
-        self.logger.info(f"staged {staged} new leads, {dupes} dupes skipped")
+        self.logger.info(f"staged {staged} new leads, {dupes} dupes skipped (last_seen_at touched on all)")
         return (staged, dupes)
 
     # ── Internal: health reporting ──────────────────────────────────────────

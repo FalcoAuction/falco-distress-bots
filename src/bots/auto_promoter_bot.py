@@ -45,8 +45,22 @@ from ._provenance import record_field
 
 
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery"}
+STRETCH_COUNTIES = {"maury", "montgomery", "cheatham", "robertson", "dickson"}
 FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
+
+# Distress types where mortgage data IS the pitch (we walk through equity
+# math, payoff scenarios, etc.). These keep the strict defensible-mortgage
+# gate.
+MORTGAGE_REQUIRED_DISTRESS = {
+    "PRE_FORECLOSURE", "PREFORECLOSURE", "TRUSTEE_NOTICE", "LIS_PENDENS",
+    "FORECLOSURE", "NOD", "SOT", "SUBSTITUTION_OF_TRUSTEE",
+    "NOTICE_OF_DEFAULT", "BANKRUPTCY",
+}
+
+# For non-foreclosure distress (DEMOLITION, CODE_VIOLATION, TAX_LIEN,
+# PROBATE, FSBO), the conversation is about the cost commitment / liability
+# / liquidity, not the mortgage. Free-and-clear owners are MORE attractive,
+# not less. Promote on: phone + address + distress + owner name.
 
 
 def _normalize_county(c: Optional[str]) -> str:
@@ -182,7 +196,11 @@ class AutoPromoterBot(BotBase):
             for row in rows:
                 if attempted >= max_per_run:
                     break
-                # Eligibility checks
+                # Eligibility checks — gate shape depends on distress type.
+                # Foreclosure family needs defensible mortgage data
+                # (the pitch is equity-protect, math sheet, etc.).
+                # Non-foreclosure (demo / CV / tax lien / probate / FSBO)
+                # promotes on phone + address + distress signal alone.
                 if _normalize_county(row.get("county")) not in FOCUS_COUNTIES:
                     continue
                 if not (row.get("owner_name_records") or row.get("full_name")):
@@ -191,20 +209,38 @@ class AutoPromoterBot(BotBase):
                 if not row.get("property_address"):
                     skipped_missing_field += 1
                     continue
-                if not row.get("property_value"):
-                    skipped_missing_field += 1
-                    continue
-                if not row.get("mortgage_balance"):
-                    skipped_missing_field += 1
-                    continue
                 if not row.get("distress_type"):
                     skipped_missing_field += 1
                     continue
+                dt = (row.get("distress_type") or "").upper()
+                is_foreclosure_family = dt in MORTGAGE_REQUIRED_DISTRESS
                 pm = row.get("phone_metadata") or {}
-                defensible, source_label = _is_defensible(pm)
-                if not defensible:
-                    skipped_not_defensible += 1
-                    continue
+                source_label: str
+
+                if is_foreclosure_family:
+                    # Strict gate: needs property_value + mortgage_balance
+                    # + defensible mortgage signal. The pitch math doesn't
+                    # work without these.
+                    if not row.get("property_value"):
+                        skipped_missing_field += 1
+                        continue
+                    if not row.get("mortgage_balance"):
+                        skipped_missing_field += 1
+                        continue
+                    defensible, source_label = _is_defensible(pm)
+                    if not defensible:
+                        skipped_not_defensible += 1
+                        continue
+                else:
+                    # Loose gate for non-foreclosure: must have a phone
+                    # (otherwise the dialer can't call them) and a
+                    # distress signal. Mortgage data is irrelevant to the
+                    # conversation; free-and-clear owners are best-case.
+                    if not row.get("phone"):
+                        skipped_missing_field += 1
+                        continue
+                    source_label = f"non_foreclosure_{dt.lower()}"
+
                 attempted += 1
 
                 # Duplicate check
@@ -246,11 +282,13 @@ class AutoPromoterBot(BotBase):
                         ) + bot_tag
 
                 if sample:
+                    mb = row.get("mortgage_balance")
+                    mb_str = f"${mb:,.0f}" if mb else "—"
                     self.logger.info(
                         f"  SAMPLE would promote id={row['id'][:8]} "
                         f"county={row.get('county')} "
                         f"name={(row.get('owner_name_records') or row.get('full_name'))[:30]} "
-                        f"src={source_label} mort=${row.get('mortgage_balance'):,.0f}"
+                        f"src={source_label} mort={mb_str}"
                     )
                     promoted += 1
                     continue
@@ -283,17 +321,20 @@ class AutoPromoterBot(BotBase):
                 if addr and name:
                     live_addr_owner.add((addr, name))
 
-                # Provenance for mortgage_balance on live row
-                try:
-                    record_field(
-                        client, row["id"], "mortgage_balance",
-                        int(row["mortgage_balance"]),
-                        source_label,
-                        confidence=0.85 if "rod" in source_label else 0.65,
-                        metadata={"promoted_via": "auto_promoter"},
-                    )
-                except Exception:
-                    pass
+                # Provenance for mortgage_balance on live row — only when
+                # we actually have a balance (foreclosure path). Non-
+                # foreclosure leads may have NULL balance and that's fine.
+                if row.get("mortgage_balance"):
+                    try:
+                        record_field(
+                            client, row["id"], "mortgage_balance",
+                            int(row["mortgage_balance"]),
+                            source_label,
+                            confidence=0.85 if "rod" in source_label else 0.65,
+                            metadata={"promoted_via": "auto_promoter"},
+                        )
+                    except Exception:
+                        pass
 
                 promoted += 1
 

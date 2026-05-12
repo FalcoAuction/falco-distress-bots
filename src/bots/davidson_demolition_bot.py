@@ -18,10 +18,16 @@ Endpoint:
   https://services2.arcgis.com/HdTo6HJqh92wn4D8/arcgis/rest/services/
     Building_Permits_Issued_2/FeatureServer/0/query
 
-Distress type: PRE_FORECLOSURE (existing pipeline category — these are
-not foreclosures yet but the auction conversation is identical: walk
-away with the equity instead of demolition cost + new construction +
-years of carry).
+Distress type: DEMOLITION (own pipeline category since 2026-05-09).
+Maps to the demolition math-sheet scenario which models the owner's
+"stay the course" commitment (demo cost + new construction + months
+of carry) vs auction-now cash. Different conversation than foreclosure.
+
+Subtype is encoded in admin_notes ("category: teardown" / fire_damage
+/ storm_damage / major_rebuild) and drives:
+  - SMS opener language (3 variants: teardown, fire, storm)
+  - Math sheet defaults (auction clearance + cost legs)
+  - Dialer queue prioritization (rep can call HOT subset first)
 """
 
 from __future__ import annotations
@@ -142,12 +148,32 @@ class DavidsonDemolitionBot(BotBase):
             except Exception:
                 pass
 
-        # Surface short-form purpose / cost in admin_notes so the dialer
-        # caller knows whether this is a teardown ($5-15K demo permit
-        # cost) vs. a major rebuild ($100K+).
-        notes_parts = [f"permit {permit_no}", f"type: {permit_type}"]
-        if isinstance(cost, (int, float)) and cost > 0:
-            notes_parts.append(f"cost: ${int(cost):,}")
+        # Subtype categorization. Mirrors classifyDemolitionSubtype()
+        # in falco-site/src/app/admin/math-sheet/[id]/demolition-data.ts —
+        # keep these in sync.
+        cost_num = float(cost) if isinstance(cost, (int, float)) else 0.0
+        pt_lower = permit_type.lower()
+        if "fire damage" in pt_lower:
+            subtype = "fire_damage"
+        elif "storm damage" in pt_lower:
+            subtype = "storm_damage"
+        elif "demolition" in pt_lower:
+            subtype = "major_rebuild" if cost_num >= 300_000 else "teardown"
+        else:
+            subtype = "unknown"
+
+        # Surface short-form purpose / cost / SUBTYPE in admin_notes so
+        # the dialer caller knows whether this is a teardown ($5-15K
+        # demo permit cost) vs. a major rebuild ($100K+) vs. fire/storm
+        # rehab. Subtype drives SMS opener selection + math sheet
+        # defaults downstream.
+        notes_parts = [
+            f"permit {permit_no}",
+            f"type: {permit_type}",
+            f"category: {subtype}",
+        ]
+        if cost_num > 0:
+            notes_parts.append(f"cost: ${int(cost_num):,}")
         if purpose:
             notes_parts.append(f"purpose: {purpose[:120]}")
         if date_iso:
@@ -168,7 +194,7 @@ class DavidsonDemolitionBot(BotBase):
             property_address=full_address,
             county="Davidson County",
             owner_name_records=owner,
-            distress_type="PRE_FORECLOSURE",
+            distress_type="DEMOLITION",
             admin_notes=admin_notes,
             source_url="https://data.nashville.gov/datasets/nashville::building-permits-issued",
             raw_payload={"davidson_demolition_permit": attrs},
