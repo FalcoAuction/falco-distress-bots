@@ -27,31 +27,45 @@ import re
 from typing import List, Tuple
 
 
-# Codes that signal a maintenance / structural / vacancy / dangerous-
-# building issue. Property is unlikely to be casually fixed by an
-# owner-occupier; signals motivated absentee owner or genuine distress.
-DEALABLE_PATTERNS = (
-    # Building / structural
-    "STRUCTURAL", "ROOF", "FOUNDATION", "EXTERIOR OF BLDGS",
-    "EXTERIOR REPAIR", "EXTERIOR PAINT", "WINDOWS BROKEN", "WALL",
-    "SIDING", "CEILING", "FLOOR", "STAIRS",
-    # Vacancy / dangerous
+# Codes that on their own signal a real auctionable deal — vacant
+# building, dangerous structure, demolition order, condemned, unfit
+# for habitation. Owner is either gone or the building is unsalvageable
+# without major capital. These are the gold standard for CV leads.
+SEVERE_PATTERNS = (
     "UNFIT FOR HABITATION", "DEMOLITION", "OPEN VACANT BUILDING",
     "VACANT/SUBSTANDARD", "VACANT BUILDING", "BOARDED", "ABANDON",
-    "DANGEROUS BUILDING", "CONDEMN", "UNSAFE",
-    # Substandard living conditions
-    "BLDG MAINTENANCE", "PROPERTY MAINTENANCE", "MAJOR SECTIONS",
-    "STANDING WATER", "MOLD", "INFEST", "RAT", "RODENT",
-    # Chronic / accumulation
+    "DANGEROUS BUILDING", "CONDEMN", "UNSAFE STRUCTURE",
+    "ENVIRONMENTAL COURT",  # case escalated to court = serious
+)
+
+# Codes signaling structural / building-envelope work that a casual
+# owner-occupier doesn't fix on a $200 ticket. Single citation = real
+# deal candidate.
+STRUCTURAL_PATTERNS = (
+    "STRUCTURAL", "ROOF", "FOUNDATION", "EXTERIOR REPAIR",
+    "WINDOWS BROKEN", "WALL", "SIDING", "CEILING", "FLOOR", "STAIRS",
+    "MAJOR SECTIONS", "STANDING WATER", "MOLD", "INFEST", "RAT", "RODENT",
+    "PLUMBING", "ELECTRICAL", "MECHANICAL", "SEWER", "GAS LEAK",
+    # Substandard living
+    "BLDG MAINTENANCE", "PROPERTY MAINTENANCE",
+)
+
+# Codes that are real but not dispositive on their own. Open storage +
+# junk/trash + abandoned vehicles signal SOMETHING but a single
+# citation alone is borderline — the owner might just clean it up and
+# pay the $200 fine. We KEEP these only when stacked with another code
+# (3+ violations cited) since chronic accumulation is a real distress
+# signal but a one-off isn't.
+CHRONIC_PATTERNS = (
     "ACCUMULATION OF DEBRIS", "OPEN STORAGE", "JUNK", "TRASH",
     "DEBRIS", "RUBBISH",
-    # Vehicles (chronic absentee owner signal)
     "INOP", "UNLIC", "ABANDONED VEHICLE", "JUNK VEHICLE",
-    # Plumbing / electrical / mechanical (substandard)
-    "PLUMBING", "ELECTRICAL", "MECHANICAL", "SEWER", "GAS LEAK",
-    # Hearing / case escalations
-    "HEARING", "ENVIRONMENTAL COURT",
+    "EXTERIOR PAINT", "EXTERIOR OF BLDGS",
+    "HEARING",
 )
+
+# Combined dealable set (used by legacy is_auctionable_cv only).
+DEALABLE_PATTERNS = SEVERE_PATTERNS + STRUCTURAL_PATTERNS + CHRONIC_PATTERNS
 
 # Codes that on their own signal a lawn-only / casual citation.
 # Owner mows the lawn, pays $200, done. Not your deal UNLESS another
@@ -76,26 +90,55 @@ def _matches_any(code: str, patterns: Tuple[str, ...]) -> bool:
 
 
 def is_auctionable_cv(violation_field: str) -> Tuple[bool, str]:
-    """True if the lead has at least one dealable citation OR no codes
-    can be parsed (review-required default).
+    """STRICT filter — only ingests CV leads that are genuinely auction-
+    grade. Reject everything else, including unclassified codes (the old
+    default-keep was filling the dialer with sign-permit and paving
+    citations).
 
-    Returns (is_auctionable, reason) so callers can log the decision.
+    Tier-1 keep rules:
+      - SEVERE pattern (vacant/dangerous/unfit/condemn/etc.) — single
+        citation is enough; the building is the deal.
+      - STRUCTURAL pattern (roof/foundation/exterior repair/etc.) —
+        single citation is enough; not a $200-fine fix.
+      - CHRONIC pattern (open storage/junk/debris/inop vehicles) ONLY
+        when 3+ violations cited — chronic accumulation across multiple
+        codes signals real distress, single citations don't.
+
+    Reject:
+      - Lawn-only (high weeds, grass)
+      - Single chronic code (one open-storage citation)
+      - Unclassified codes (paving, sign permits, building permit
+        required, certificate of compliance — these are paperwork, not
+        property condition)
+      - Empty / unparseable violation field
+
+    Returns (is_auctionable, reason).
     """
     codes = _split_codes(violation_field or "")
     if not codes:
-        return True, "no_codes_parsed"
+        # No parseable codes = reject (old behavior was keep; the
+        # backlog showed unparseable strings are almost always paving /
+        # sign / paperwork citations, not real building issues).
+        return False, "no_codes_parsed"
 
-    dealable_codes = [c for c in codes if _matches_any(c, DEALABLE_PATTERNS)]
-    if dealable_codes:
-        return True, f"dealable: {dealable_codes[0]}"
+    severe = [c for c in codes if _matches_any(c, SEVERE_PATTERNS)]
+    if severe:
+        return True, f"severe: {severe[0]}"
 
-    # All codes are non-dealable. Check if they're all lawn-only — if so,
-    # explicit reject. If they're something else (rare), keep with a flag.
-    lawn_codes = [c for c in codes if _matches_any(c, LAWN_ONLY_PATTERNS)]
-    if lawn_codes and len(lawn_codes) == len(codes):
-        return False, f"lawn_only: {','.join(lawn_codes[:3])}"
+    structural = [c for c in codes if _matches_any(c, STRUCTURAL_PATTERNS)]
+    if structural:
+        return True, f"structural: {structural[0]}"
 
-    # Codes present but none match either bucket — keep with review flag.
-    # Better to ingest false positives than drop a real one we can't
-    # classify; admin can audit.
-    return True, f"unclassified_codes: {','.join(codes[:3])}"
+    chronic = [c for c in codes if _matches_any(c, CHRONIC_PATTERNS)]
+    # Chronic accumulation only counts when stacked: 3+ codes total
+    # OR 2+ chronic codes cited at once.
+    if (len(codes) >= 3 and chronic) or len(chronic) >= 2:
+        return True, f"chronic_stack: {len(chronic)}/{len(codes)}"
+
+    lawn = [c for c in codes if _matches_any(c, LAWN_ONLY_PATTERNS)]
+    if lawn and len(lawn) == len(codes):
+        return False, f"lawn_only: {','.join(lawn[:3])}"
+
+    # Anything else — paperwork (paving, sign permit, building permit
+    # required), single chronic, single unclassified code — reject.
+    return False, f"low_grade: {','.join(codes[:3])}"

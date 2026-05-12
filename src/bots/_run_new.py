@@ -67,6 +67,7 @@ from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
 from . import xref_avm_enricher_bot
 from . import continuance_reaper_bot
+from . import trustee_status_reaper_bot
 from . import stale_regrade_bot
 from . import bot_health_monitor
 from . import skip_trace_enricher_bot
@@ -148,6 +149,11 @@ NEW_BOTS = [
     ("owner_classifier", owner_classifier_bot.run),
     ("xref_avm_enricher", xref_avm_enricher_bot.run),
     ("continuance_reaper", continuance_reaper_bot.run),
+    # Docket-diff reaper: auto-flag foreclosure leads as cancelled when
+    # their notice stops appearing in the daily scrape (typically means
+    # the homeowner reinstated / paid off / the sale was withdrawn).
+    # Runs after the scrapers so it sees today's last_seen_at touches.
+    ("trustee_status_reaper", trustee_status_reaper_bot.run),
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),

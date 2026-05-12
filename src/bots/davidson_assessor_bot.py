@@ -72,7 +72,10 @@ class DavidsonAssessorBot(BotBase):
     expected_min_yield = 1
 
     # Cap per run — site is public but we should be polite.
-    max_leads_per_run = 200
+    # 800 default to drain the demolition-permit backlog (1,148 Davidson
+    # demo leads landed 2026-05-09 needing property_value enrichment).
+    # PADCTN tolerates ~1 req/sec; 800 leads = ~14 min of fetches per run.
+    max_leads_per_run = 800
 
     def scrape(self) -> List[LeadPayload]:
         """Enricher: returns no NEW leads, only updates existing rows.
@@ -118,6 +121,14 @@ class DavidsonAssessorBot(BotBase):
             for row in candidates[:self.max_leads_per_run]:
                 addr = row.get("property_address") or ""
                 hit = self._lookup(addr)
+                # Parcel fallback — Davidson demolition leads carry the
+                # parcel directly in raw_payload. When address lookup
+                # whiffs (street formatting / unit suffix mismatch), use
+                # the parcel for a deterministic match.
+                if hit is None:
+                    permit_parcel = self._extract_known_parcel(row.get("raw_payload"))
+                    if permit_parcel:
+                        hit = self._lookup_by_parcel(permit_parcel)
                 if hit is None:
                     not_found += 1
                     continue
@@ -220,9 +231,22 @@ class DavidsonAssessorBot(BotBase):
                 q = (
                     client.table(table)
                     .select("id, property_address, county, owner_name_records, property_value, raw_payload")
-                    .or_("county.eq.davidson,property_address.ilike.%nashville%,property_address.ilike.%antioch%,property_address.ilike.%hermitage%,property_address.ilike.%madison%,property_address.ilike.%goodlettsville%")
+                    .or_(
+                        "county.eq.davidson,"
+                        "county.eq.Davidson,"
+                        "county.eq.Davidson County,"
+                        "property_address.ilike.%nashville%,"
+                        "property_address.ilike.%antioch%,"
+                        "property_address.ilike.%hermitage%,"
+                        "property_address.ilike.%madison%,"
+                        "property_address.ilike.%goodlettsville%,"
+                        "property_address.ilike.%old hickory%,"
+                        "property_address.ilike.%bellevue%,"
+                        "property_address.ilike.%whites creek%,"
+                        "property_address.ilike.%joelton%"
+                    )
                     .is_("property_value", "null")
-                    .limit(500)
+                    .limit(2000)
                     .execute()
                 )
                 rows = getattr(q, "data", None) or []
@@ -234,6 +258,41 @@ class DavidsonAssessorBot(BotBase):
         return out
 
     # ── Lookup ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _extract_known_parcel(raw_payload: Any) -> Optional[str]:
+        """Pull a Davidson parcel from a lead's raw_payload when present.
+        Currently davidson_demolition permits ship Parcel directly."""
+        if not isinstance(raw_payload, dict):
+            return None
+        permit = raw_payload.get("davidson_demolition_permit")
+        if isinstance(permit, dict):
+            p = permit.get("Parcel")
+            if isinstance(p, str) and p.strip():
+                return p.strip()
+        # Future: nashville_codes records sometimes carry parcel too — wire
+        # that here when needed.
+        return None
+
+    def _lookup_by_parcel(self, parcel: str) -> Optional[Dict[str, Any]]:
+        """PADCTN parcel-keyed search. SelectedSearch=4 = Map/Group/Parcel.
+        The PADCTN parcel format is "MMM GG GP CCC.CC" (map / group /
+        group-parcel / control). The QuickSearch endpoint accepts the
+        full string in SingleSearchCriteria with SelectedSearch=4."""
+        res = self.fetch(
+            PADCTN_SEARCH,
+            method="POST",
+            data={
+                "RealEstate": "true",
+                "SelectedSearch": "4",
+                "SingleSearchCriteria": parcel,
+                "AlterCriteria": "False",
+            },
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if res is None or res.status_code != 200:
+            return None
+        return self._parse_first_result(res.text)
 
     def _lookup(self, address: str) -> Optional[Dict[str, Any]]:
         parts = _split_address(address)

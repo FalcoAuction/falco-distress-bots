@@ -25,7 +25,7 @@ from .batchdata_skip_trace_bot import BatchDataSkipTraceBot
 
 
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery"}
+STRETCH_COUNTIES = {"maury", "montgomery", "cheatham", "robertson", "dickson"}
 FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
 
 
@@ -123,10 +123,13 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
 
 
 def run() -> dict:
-    # Default to a higher per-run cap than the parent (300 vs 50) since
-    # we have 281 missing-phone focus leads.
+    # Default cap raised to 700 (from 300) on 2026-05-09. After the
+    # one-shot MTN promotion flush we have ~631 MTN leads in
+    # live+staging missing phones; a single run after BatchData credit
+    # top-up should sweep the full backlog. Daily cron caps re-tighten
+    # naturally as backlog drains.
     if not os.environ.get("FALCO_MAX_BATCHDATA_SKIPTRACE_PER_RUN"):
-        os.environ["FALCO_MAX_BATCHDATA_SKIPTRACE_PER_RUN"] = "300"
+        os.environ["FALCO_MAX_BATCHDATA_SKIPTRACE_PER_RUN"] = "700"
     bot = MiddleTnSkipTraceBot()
     return bot.run()
 
