@@ -46,6 +46,13 @@ from . import hamilton_tax_delinquent_bot
 from . import nashville_ledger_bot
 from . import memphis_daily_news_bot
 from . import hamilton_county_herald_bot
+# Direct substitute-trustee firm scrapers — bypass the newspaper-publication
+# requirement of TCA § 35-5-101 by going to the firms' own public sale
+# lists. ~10-25 days earlier than newspaper notice. Also surfaces the
+# auction-platform tag (AUCTION/HUBZU/HUDMARSH/MWZM) so we know which
+# leads end up on Auction.com vs courthouse. Added 2026-05-12.
+from . import brock_scott_trustee_bot
+from . import mackie_wolf_trustee_bot
 from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
 from . import bankruptcy_schedule_d_bot
@@ -104,6 +111,11 @@ NEW_BOTS = [
     ("nashville_ledger", nashville_ledger_bot.run),
     ("memphis_daily_news", memphis_daily_news_bot.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
+    # Substitute trustee firms — direct scrape, earlier than newspaper.
+    # Brock & Scott: ~27 TN listings, static HTML. Mackie Wolf: ~58 TN
+    # listings via weekly PDF, includes Auction.com/Hubzu platform tags.
+    ("brock_scott_trustee", brock_scott_trustee_bot.run),
+    ("mackie_wolf_trustee", mackie_wolf_trustee_bot.run),
     # Lis pendens — keyword-driven full-text search of the TN Public
     # Notice index. Captures lawsuit-stage distress 60-120 days
     # earlier than the trustee-notice-based scrapers. New 2026-05-07.
