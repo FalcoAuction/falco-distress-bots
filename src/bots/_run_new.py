@@ -143,7 +143,11 @@ NEW_BOTS = [
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
-    ("mortgage_estimator", mortgage_estimator_bot.run),
+    # mortgage_estimator moved AFTER hmda_enricher + mortgage_amortizer
+    # (see below) so it acts as a true final fallback. Previously it ran
+    # here and pre-filled nulls with 80% LTV before HMDA had a chance to
+    # write defensible values; the order was inverted vs the intended
+    # chain HMDA -> Ledger -> amortizer -> estimator.
     ("probate_property_enricher", probate_property_enricher_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
@@ -164,6 +168,12 @@ NEW_BOTS = [
     # the new phones); auto-promoter LAST (sees fully-enriched leads).
     ("hmda_enricher", hmda_enricher_bot.run),
     ("mortgage_amortizer", mortgage_amortizer_bot.run),
+    # mortgage_estimator runs LAST in the mortgage chain so HMDA +
+    # amortizer + nashville_ledger_extracted get first crack at
+    # writing a defensible value. Only then does the 80% LTV fallback
+    # fill remaining nulls — it self-gates on already-set
+    # mortgage_balance and won't overwrite higher-confidence sources.
+    ("mortgage_estimator", mortgage_estimator_bot.run),
     ("middle_tn_skiptrace", middle_tn_skiptrace_bot.run),
     ("middle_tn_twilio_lookup", middle_tn_twilio_lookup_bot.run),
     ("auto_promoter", auto_promoter_bot.run),

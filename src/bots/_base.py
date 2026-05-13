@@ -81,6 +81,39 @@ class LeadPayload:
         d = asdict(self)
         d["scraper_run_id"] = scraper_run_id
         d["staging_status"] = "pending"
+
+        # Normalize property_address before persisting — strips
+        # CRLF/tab noise, "Property Address:" prefix junk, duplicate
+        # "City, ST, City, ST" runs, and tags parcel-only addresses
+        # (street #0 / 00) for human review downstream. Failure here
+        # never blocks the staging write — fall back to raw value.
+        if d.get("property_address"):
+            try:
+                from . import _address  # local import to avoid cycles
+                result = _address.normalize_address(d["property_address"])
+                if result.normalized:
+                    d["property_address"] = result.normalized
+                # Surface parcel-only flag inside admin_notes so the
+                # /admin/staging review surfaces what won't AVM. Also
+                # record changes for audit (only when something changed).
+                tags: List[str] = []
+                if result.needs_resolution:
+                    tags.append("[NORMALIZER: parcel_only_address]")
+                if result.changes and result.changes != ["parcel_only_address"]:
+                    cleaned = [c for c in result.changes if c != "parcel_only_address"]
+                    if cleaned:
+                        tags.append(f"[NORMALIZER: {','.join(cleaned)}]")
+                if tags:
+                    existing = d.get("admin_notes") or ""
+                    suffix = " ".join(tags)
+                    if suffix not in existing:
+                        d["admin_notes"] = (
+                            existing + " " if existing else ""
+                        ) + suffix
+            except Exception:
+                # Normalizer is best-effort; never block a scrape on it.
+                pass
+
         # Strip Nones so default values in DB take effect
         return {k: v for k, v in d.items() if v is not None}
 

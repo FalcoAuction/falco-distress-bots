@@ -42,6 +42,13 @@ from typing import Any, Dict, List, Optional, Set
 
 from ._base import BotBase, _supabase
 from ._provenance import record_field
+from ._address import is_natural_person
+from ._twilio_lookup import (
+    get_twilio_client,
+    normalize_phone_e164,
+    is_lookup_stale,
+    lookup_phone_safe,
+)
 
 
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
@@ -168,12 +175,26 @@ class AutoPromoterBot(BotBase):
             f"{len(live_addr_owner)} addr+owner pairs"
         )
 
+        # Lazy-init Twilio client for real-time phone validation on
+        # promote. None when env not set or twilio pkg missing — in
+        # that case we still promote (graceful degradation), but log
+        # a warning so we know phones are going to the dialer
+        # unvalidated.
+        twilio_client = get_twilio_client()
+        if twilio_client is None:
+            self.logger.info(
+                "Twilio client unavailable (env or pkg) — promoting "
+                "without real-time phone validation"
+            )
+
         # Pull eligible staging candidates
         promoted = 0
         skipped_not_defensible = 0
         skipped_missing_field = 0
         skipped_dup = 0
         skipped_already_promoted = 0
+        skipped_business_owner = 0
+        twilio_validated_at_promote = 0
         errors = 0
         attempted = 0
 
@@ -211,6 +232,20 @@ class AutoPromoterBot(BotBase):
                     continue
                 if not row.get("distress_type"):
                     skipped_missing_field += 1
+                    continue
+                # LLC / business-owner filter — these can't be helped by
+                # the FALCO playbook (we negotiate equity for natural
+                # persons facing foreclosure; corporate owners have
+                # different legal posture, often investors, often
+                # represented). Audit showed Jebra Home Contractors LLC,
+                # Quality Clean Construction LLC, and similar polluting
+                # the active dialer list. Reject here so they never
+                # make it to live. The corresponding regex in
+                # route_high_probability.sql kept catching them on the
+                # query side; this kills them at promotion.
+                owner = (row.get("owner_name_records") or row.get("full_name") or "")
+                if not is_natural_person(owner):
+                    skipped_business_owner += 1
                     continue
                 dt = (row.get("distress_type") or "").upper()
                 is_foreclosure_family = dt in MORTGAGE_REQUIRED_DISTRESS
@@ -293,9 +328,54 @@ class AutoPromoterBot(BotBase):
                     promoted += 1
                     continue
 
-                # Insert into live
+                # Real-time Twilio Lookup on promote — every lead going
+                # into the dialer gets line_type_intelligence so Chris
+                # knows mobile vs landline vs disconnected before he
+                # picks up the phone. The nightly middle_tn_twilio_lookup
+                # bot also runs, but it does a sweep; this guarantees
+                # every newly-promoted lead is validated at the moment
+                # it becomes callable.
+                #
+                # We update pm in-place so the validation rides into the
+                # live insert via the phone_metadata column we'll set
+                # below. Skip if Twilio unavailable, missing/unparseable
+                # phone, or recent (<30d) validation already exists.
+                if twilio_client is not None:
+                    e164 = normalize_phone_e164(row.get("phone"))
+                    if e164:
+                        existing_lookup = pm.get("twilio_lookup") or {}
+                        if is_lookup_stale(existing_lookup):
+                            try:
+                                lookup_payload = lookup_phone_safe(twilio_client, e164)
+                                pm["twilio_lookup"] = lookup_payload
+                                twilio_validated_at_promote += 1
+                            except Exception as e:
+                                self.logger.warning(
+                                    f"  twilio lookup raised on promote "
+                                    f"id={row['id'][:8]}: {e}"
+                                )
+
+                # Make sure the (possibly updated) phone_metadata
+                # rides into the live insert. We may have just added
+                # twilio_lookup, and want notice_tracking + sale_status +
+                # mortgage_signal preserved from staging.
+                if pm:
+                    live_row["phone_metadata"] = pm
+
+                # Insert into live. Capture the live row id so provenance
+                # writes reference the correct FK (lead_field_provenance.
+                # lead_id REFERENCES homeowner_requests(id)). Previously
+                # we passed the staging id here, which silently failed
+                # every provenance insert.
+                live_id: Optional[str] = None
                 try:
-                    client.table("homeowner_requests").insert(live_row).execute()
+                    insert_result = (
+                        client.table("homeowner_requests")
+                        .insert(live_row)
+                        .execute()
+                    )
+                    if getattr(insert_result, "data", None):
+                        live_id = insert_result.data[0].get("id")
                 except Exception as e:
                     self.logger.warning(
                         f"  insert failed id={row['id']}: {e}"
@@ -303,13 +383,20 @@ class AutoPromoterBot(BotBase):
                     errors += 1
                     continue
 
-                # Mark staging row promoted
+                # Mark staging row promoted — also persist any
+                # phone_metadata updates (twilio_lookup) we made
+                # in-flight so the staging row stays consistent.
+                staging_update: Dict[str, Any] = {
+                    "staging_status": "promoted",
+                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                    "reviewed_by": "auto_promoter",
+                }
+                if pm:
+                    staging_update["phone_metadata"] = pm
                 try:
-                    client.table("homeowner_requests_staging").update({
-                        "staging_status": "promoted",
-                        "reviewed_at": datetime.now(timezone.utc).isoformat(),
-                        "reviewed_by": "auto_promoter",
-                    }).eq("id", row["id"]).execute()
+                    client.table("homeowner_requests_staging").update(
+                        staging_update
+                    ).eq("id", row["id"]).execute()
                 except Exception as e:
                     self.logger.warning(
                         f"  staging status update failed id={row['id']}: {e}"
@@ -321,20 +408,68 @@ class AutoPromoterBot(BotBase):
                 if addr and name:
                     live_addr_owner.add((addr, name))
 
-                # Provenance for mortgage_balance on live row — only when
-                # we actually have a balance (foreclosure path). Non-
-                # foreclosure leads may have NULL balance and that's fine.
-                if row.get("mortgage_balance"):
-                    try:
-                        record_field(
-                            client, row["id"], "mortgage_balance",
-                            int(row["mortgage_balance"]),
-                            source_label,
-                            confidence=0.85 if "rod" in source_label else 0.65,
-                            metadata={"promoted_via": "auto_promoter"},
-                        )
-                    except Exception:
-                        pass
+                # Provenance writes — these reference the LIVE row id,
+                # not staging. Skip if insert didn't return a row id
+                # (rare; means provenance audit-trail is missing for
+                # this lead but the lead itself is in the dialer).
+                if live_id:
+                    # mortgage_balance provenance (foreclosure path only)
+                    if row.get("mortgage_balance"):
+                        try:
+                            record_field(
+                                client, live_id, "mortgage_balance",
+                                int(row["mortgage_balance"]),
+                                source_label,
+                                confidence=0.85 if "rod" in source_label else 0.65,
+                                metadata={"promoted_via": "auto_promoter"},
+                            )
+                        except Exception:
+                            pass
+
+                    # property_value provenance — read the source from
+                    # phone_metadata if any enricher recorded it
+                    # (davidson_assessor, williamson_assessor, etc.),
+                    # otherwise tag as 'unknown_pre_promote' so the gap
+                    # is visible in the audit.
+                    if row.get("property_value"):
+                        val_source = "unknown_pre_promote"
+                        val_meta = pm.get("valuation") if isinstance(pm.get("valuation"), dict) else None
+                        if val_meta and val_meta.get("source"):
+                            val_source = str(val_meta["source"])
+                        else:
+                            avm_meta = pm.get("avm") if isinstance(pm.get("avm"), dict) else None
+                            if avm_meta and avm_meta.get("source"):
+                                val_source = str(avm_meta["source"])
+                        try:
+                            record_field(
+                                client, live_id, "property_value",
+                                int(row["property_value"]),
+                                val_source,
+                                confidence=0.9 if val_source != "unknown_pre_promote" else 0.5,
+                                metadata={"promoted_via": "auto_promoter"},
+                            )
+                        except Exception:
+                            pass
+
+                    # twilio_lookup provenance — record the line_type so
+                    # we can audit phone-source quality per scraper. Only
+                    # write when we actually did the lookup this run.
+                    tw = pm.get("twilio_lookup") if isinstance(pm.get("twilio_lookup"), dict) else None
+                    if tw and tw.get("line_type"):
+                        try:
+                            record_field(
+                                client, live_id, "phone_line_type",
+                                str(tw.get("line_type")),
+                                "twilio_lookup_v2",
+                                confidence=0.95 if tw.get("valid") else 0.3,
+                                metadata={
+                                    "carrier": tw.get("carrier_name"),
+                                    "validated_at": tw.get("checked_at"),
+                                    "promoted_via": "auto_promoter",
+                                },
+                            )
+                        except Exception:
+                            pass
 
                 promoted += 1
 
@@ -347,7 +482,10 @@ class AutoPromoterBot(BotBase):
             f"not_defensible={skipped_not_defensible} "
             f"missing_field={skipped_missing_field} "
             f"already_in_live={skipped_already_promoted} "
-            f"dup_addr={skipped_dup} errors={errors}"
+            f"dup_addr={skipped_dup} "
+            f"business_owner={skipped_business_owner} "
+            f"twilio_validated_at_promote={twilio_validated_at_promote} "
+            f"errors={errors}"
         )
         finished = datetime.now(timezone.utc)
         self._report_health(
@@ -361,7 +499,10 @@ class AutoPromoterBot(BotBase):
             "not_defensible": skipped_not_defensible,
             "missing_field": skipped_missing_field,
             "already_in_live": skipped_already_promoted,
-            "dup_addr_owner": skipped_dup, "errors": errors,
+            "dup_addr_owner": skipped_dup,
+            "business_owner": skipped_business_owner,
+            "twilio_validated_at_promote": twilio_validated_at_promote,
+            "errors": errors,
             "fetched": attempted, "staged": promoted,
             "duplicates": skipped_dup,
         }
