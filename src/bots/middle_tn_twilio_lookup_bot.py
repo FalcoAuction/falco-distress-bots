@@ -46,7 +46,11 @@ except ImportError:
 
 
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery"}
+# Align with auto_promoter_bot.STRETCH_COUNTIES so every promoted lead
+# gets Twilio-validated. Previously cheatham/robertson/dickson were
+# being promoted to live but skipped by Twilio validation — leaving
+# the dialer with unvalidated phones in those counties.
+STRETCH_COUNTIES = {"maury", "montgomery", "cheatham", "robertson", "dickson"}
 FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
 
 DEFAULT_MAX_PER_RUN = 500
