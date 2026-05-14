@@ -2,9 +2,17 @@
 
 Wraps BatchDataSkipTraceBot but constrains candidate selection to the
 Middle TN core counties — Davidson, Williamson, Sumner, Rutherford,
-Wilson — plus stretch counties Maury, Montgomery.
+Wilson — plus stretch counties Maury, Montgomery, Cheatham, Robertson,
+Dickson.
 
-Goal (model-proof phase): get a phone on every focus lead so the
+Distress-type gate (2026-05-14): restricted to FORECLOSURE-FAMILY only
+by default. Patrick's call after a 60-day-window cost audit — CV /
+demolition / probate / FSBO / tax-lien convert at much lower rates and
+were burning BatchData credit disproportionately to their value. Set
+FALCO_SKIPTRACE_ALL_DISTRESS=1 to disable the filter and skip-trace
+the entire MTN pool (e.g. after a cost-budget reset).
+
+Goal: get a phone on every active-foreclosure-family focus lead so the
 downstream Twilio Lookup + dial-probe can run on a clean superset.
 
 Run via:
@@ -15,6 +23,8 @@ Env knobs:
                                           all 281 missing-phone focus
                                           leads, with margin)
   FALCO_BATCHDATA_SKIPTRACE_SAMPLE       (=1 to dry-run without writes)
+  FALCO_SKIPTRACE_ALL_DISTRESS           (=1 to remove foreclosure-only
+                                          gate; default off)
 """
 from __future__ import annotations
 
@@ -27,6 +37,14 @@ from .batchdata_skip_trace_bot import BatchDataSkipTraceBot
 CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
 STRETCH_COUNTIES = {"maury", "montgomery", "cheatham", "robertson", "dickson"}
 FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
+
+# Foreclosure-family distress types — only these consume BatchData
+# credit unless FALCO_SKIPTRACE_ALL_DISTRESS=1.
+FORECLOSURE_DISTRESS = {
+    "PRE_FORECLOSURE", "PREFORECLOSURE", "TRUSTEE_NOTICE",
+    "LIS_PENDENS", "SOT", "SUBSTITUTION_OF_TRUSTEE",
+    "NOD", "NOTICE_OF_DEFAULT", "FORECLOSURE",
+}
 
 
 def _normalize_county(c: str) -> str:
@@ -44,20 +62,22 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
     )
 
     def _candidates(self, client, max_per_run: int) -> List[Dict[str, Any]]:
-        """Custom candidate query — filter to focus counties at the DB level.
+        """Custom candidate query — filter to focus counties + foreclosure
+        family at the DB level (county still needs Python normalization
+        because of inconsistent 'Davidson' vs 'Davidson County' casing).
 
-        The county column has inconsistent casing/suffixes ('Davidson',
-        'Davidson County', 'davidson') so we have to over-pull and
-        normalize in Python — but constraining to no-phone + has-name +
-        has-address up front cuts the wire data ~95%.
+        Foreclosure-only gate is on by default (Patrick 2026-05-14).
+        Set FALCO_SKIPTRACE_ALL_DISTRESS=1 to disable.
         """
+        foreclosure_only = os.environ.get("FALCO_SKIPTRACE_ALL_DISTRESS") != "1"
+
         out: List[Dict[str, Any]] = []
         PAGE = 1000
         for table in ("homeowner_requests", "homeowner_requests_staging"):
             page = 0
             while True:
                 try:
-                    q = (
+                    builder = (
                         client.table(table)
                         .select(
                             "id, property_address, owner_name_records, "
@@ -67,6 +87,13 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                         .is_("phone", "null")
                         .not_.is_("owner_name_records", "null")
                         .not_.is_("property_address", "null")
+                    )
+                    if foreclosure_only:
+                        builder = builder.in_(
+                            "distress_type", list(FORECLOSURE_DISTRESS)
+                        )
+                    q = (
+                        builder
                         .order("priority_score", desc=True)
                         .range(page * PAGE, (page + 1) * PAGE - 1)
                         .execute()
