@@ -1,33 +1,35 @@
 """Mackie Wolf Zientz & Mann PC — TX-HQ substitute trustee firm with
-heavy TN volume (~58 active TN sales as of 2026-05-12).
+heavy TN volume.
 
 The firm publishes a "TN Sale Report" PDF at:
   https://mwzmlaw.com/wp-content/uploads/YYYY/MM/TN-Sale-Report-as-of-MM.DD.YYYY.pdf
 
-The PDF refreshes weekly-to-biweekly (not daily despite the page copy).
-We walk back from today and pick the most recent one available.
+The PDF refreshes weekly-ish. We walk back from today and pick the
+most recent one available.
 
-PDF structure (verified 2026-05-12, two-line listings):
-  Line 1:  M/D/YYYY  FILE#  STREET   COUNTY   PLATFORM
-  Line 2:  CITY TN ZIP
+PDF structure (verified 2026-05-14, new format):
+  Header line:   M/D/YYYY  FILE#  BORROWER(s)  STREET  COUNTY
+  Continuation:  ADDITIONAL_BORROWER (if borrowers wrap)
+  Tail line:     CITY  TN  ZIP
 
-Where PLATFORM is one of:
-  AUCTION   -> sale hosted on Auction.com
-  HUBZU     -> sale hosted on Altisource's Hubzu
-  HUDMARSH  -> sale routed through Hudson Marshall
-  MWZM      -> Mackie Wolf in-house / courthouse sale
+Each borrower is tagged "(Borrower)" — multiple borrowers separated by
+comma, wrapping to a second line for long lists. The trailing single
+word on the header line is the county.
 
-The platform tag is GOLD — it tells us at scrape-time which leads will
-end up on Auction.com vs the courthouse, so we know which need the
-auction-overlay framing and which are courthouse-only.
+  5/19/2026 26-000068-505 Harless, Sarah (Borrower) 257 Shipp Springs Road Sullivan
+  Kingsport TN 37660
 
-Cost in dialer terms: ~21 of the 58 listings (May 2026 snapshot) are
-AUCTION-platform leads — that's roughly the auction.com TN visibility
-gap Patrick flagged.
+  5/21/2026 26-000028-505 Hitchcock, Martha J. (Borrower), 1306 Coleman Circle Hamilton
+  Hitchcock, William E. (Borrower)
+  East Ridge TN 37412
 
-Borrower names / opening bid amounts are NOT exposed in this PDF —
-owner enrichment is handled downstream by the assessor bots
-(davidson_assessor, williamson_assessor, shelby_assessor, etc.).
+OLD FORMAT (pre-2026-05-14) carried a trailing PLATFORM column
+(AUCTION/HUBZU/HUDMARSH/MWZM) telling us where each sale was hosted.
+That column was removed when MWZ added the borrower column. We lose
+the Auction.com / Hubzu visibility from this source — Patrick can
+cross-reference Auction.com directly if needed — but we GAIN owner
+names on every lead, which were previously filled downstream by the
+assessor bots.
 
 Distress type: TRUSTEE_NOTICE.
 """
@@ -54,13 +56,21 @@ MWZM_PDF_BASE = "https://mwzmlaw.com/wp-content/uploads"
 # Used so our last-token parsing doesn't split them.
 MULTI_WORD_COUNTIES = {"Van Buren"}
 
-# Known platform tags from the PDF's "Sale Trustee" column.
-KNOWN_PLATFORMS = {"AUCTION", "HUBZU", "HUDMARSH", "MWZM"}
-
-# First line of a listing: M/D/YYYY  FILE#  STREET   COUNTY   PLATFORM
-LISTING_HEAD_RE = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4})\s+(\S+)\s+(.+)$")
-# Second line: CITY TN ZIP   (e.g. "Memphis TN 38116" or "East Ridge TN 37412")
+# Header line of a listing: M/D/YYYY  FILE#  BORROWERS+STREET+COUNTY
+# MWZ file numbers have the form "26-000068-505" — strict-ish to avoid
+# matching dates/IDs that happen to be space-separated.
+LISTING_HEAD_RE = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{2}-\d{6}-\d{3})\s+(.+)$")
+# Tail line: CITY TN ZIP   (e.g. "Memphis TN 38116" or "East Ridge TN 37412")
 ADDR_TAIL_RE = re.compile(r"^(.+?)\s+TN\s+(\d{5})$")
+# Borrower marker — appears after each name. Split on this and discard
+# the trailing empty segment.
+BORROWER_MARKER = "(Borrower)"
+# Street-start pattern — typical street: 1-5 digits + space + capital +
+# lowercase letter (e.g. "257 Shipp", "1306 Coleman"). Used to split
+# borrowers from address when the (Borrower) marker is unreliable
+# (multi-borrower records can have the address INSIDE the borrower
+# list visually because pdfplumber unwraps PDF columns line-by-line).
+STREET_START_RE = re.compile(r"\b\d{1,5}\s+[A-Z][a-zA-Z]")
 
 
 class MackieWolfTrusteeBot(BotBase):
@@ -127,9 +137,13 @@ class MackieWolfTrusteeBot(BotBase):
     def _parse_pdf(
         self, pdf_bytes: bytes, source_url: str, report_date: date,
     ) -> List[LeadPayload]:
-        """Extract listings from the report PDF. Each listing spans two
-        lines: a header (date + file# + street + county + platform) and
-        an address tail (city TN zip)."""
+        """Extract listings from the report PDF.
+
+        Each listing is a "record" anchored by a header line matching
+        DATE FILE# ... and bounded at the end by a CITY TN ZIP tail
+        line. Borrowers can wrap to continuation lines between header
+        and tail (long borrower lists trigger this).
+        """
         leads: List[LeadPayload] = []
         seen_keys: set[str] = set()
 
@@ -143,80 +157,132 @@ class MackieWolfTrusteeBot(BotBase):
             return []
 
         lines = full_text.splitlines()
-        n = len(lines)
-        i = 0
-        while i < n:
-            line = lines[i].strip()
-            m = LISTING_HEAD_RE.match(line)
-            if not m:
-                i += 1
-                continue
-            sale_date_raw, file_no, rest = m.group(1), m.group(2), m.group(3).strip()
+        # Find record-start indices (lines matching the header pattern)
+        record_starts = [
+            i for i, l in enumerate(lines)
+            if LISTING_HEAD_RE.match(l.strip())
+        ]
+        if not record_starts:
+            self.logger.info("no listing-header lines matched in PDF")
+            return []
 
-            # Skip header rows accidentally matching the date pattern
-            if file_no.lower() in ("file", "no") or "File" in rest[:8]:
-                i += 1
+        for j, start in enumerate(record_starts):
+            end = record_starts[j + 1] if j + 1 < len(record_starts) else len(lines)
+            record = [lines[k].strip() for k in range(start, end)]
+
+            head_m = LISTING_HEAD_RE.match(record[0])
+            if not head_m:
+                continue
+            sale_date_raw = head_m.group(1)
+            file_no = head_m.group(2)
+            header_rest = head_m.group(3).strip()
+
+            # Find the CITY/STATE/ZIP tail line (terminates the record).
+            tail_idx = None
+            tail_match = None
+            for k in range(1, len(record)):
+                tm = ADDR_TAIL_RE.match(record[k])
+                if tm:
+                    tail_idx = k
+                    tail_match = tm
+                    break
+            if tail_idx is None or tail_match is None:
+                # Malformed record — skip rather than write bad data.
+                self.logger.debug(f"no CITY TN ZIP tail for record starting at line {start}")
                 continue
 
-            # The "rest" segment is "STREET   COUNTY   PLATFORM" with
-            # multi-space separators that whitespace-normalize to single
-            # spaces in PDF extract. Strategy:
-            #   - Last token = platform (validated against known set, else
-            #     accept any alphanumeric all-caps 4+ token)
-            #   - Second-to-last token(s) = county (1 word, or 2 for
-            #     "Van Buren")
-            #   - Everything before that = street
-            parts = rest.rsplit(None, 1)
-            if len(parts) < 2:
-                i += 1
-                continue
-            addr_county, platform = parts[0], parts[1].strip()
+            city = tail_match.group(1).strip()
+            zip_code = tail_match.group(2)
 
-            # Validate platform — if it's lowercase or short, this is
-            # probably a wrap-around / malformed line; skip.
-            if platform not in KNOWN_PLATFORMS:
-                # Still accept all-caps alphabetic 4+ chars — Mackie Wolf
-                # could add a new platform tag we don't know about yet.
-                if not (platform.isupper() and platform.isalpha() and len(platform) >= 4):
-                    i += 1
+            # Continuation lines (between header and tail line) — these
+            # carry overflow borrowers OR (rarely) the address itself
+            # when MWZ wraps a long borrower-name across the column.
+            continuation = " ".join(record[1:tail_idx]).strip()
+
+            # Address-split strategy: find the FIRST street-number
+            # pattern (digit + capital letter) in header_rest. That's
+            # the start of the address. Everything before is
+            # borrower-list (line 1 portion). Everything from there
+            # through end of header_rest is "STREET COUNTY".
+            #
+            # Why this works better than rfind("(Borrower)"):
+            # multi-borrower records frequently have visual layout like
+            #   "Borrower1 (Borrower), 1306 Address County  Borrower2 (Borrower)"
+            # where the address sits INSIDE the borrower list (PDF
+            # column unwrap artifact). Splitting on "(Borrower)"
+            # mis-classifies the address as borrower text.
+            street_match = STREET_START_RE.search(header_rest)
+            if street_match:
+                addr_split = street_match.start()
+                borrowers_on_header = header_rest[:addr_split].strip()
+                after_text = header_rest[addr_split:].strip()
+            else:
+                # No street in header — address must be on a
+                # continuation line. Look for it there.
+                borrowers_on_header = header_rest.strip()
+                after_text = ""
+                for cont_line in record[1:tail_idx]:
+                    cm = STREET_START_RE.search(cont_line)
+                    if cm:
+                        after_text = cont_line[cm.start():].strip()
+                        break
+                if not after_text:
+                    self.logger.debug(
+                        f"no street pattern found for record at line {start}"
+                    )
                     continue
 
-            # Pull county — handle multi-word county edge case
+            # Trim trailing comma/space from borrower segment (when the
+            # last borrower entry ended with ", " before the address)
+            borrowers_on_header = borrowers_on_header.rstrip(", ").strip()
+
+            # Combine borrower text from header + continuation lines
+            # (continuation might be additional borrowers OR — when the
+            # address was on continuation — leftover borrower fragments
+            # that we'll silently ignore if they don't have markers).
+            all_borrower_text = borrowers_on_header
+            if continuation:
+                all_borrower_text = (
+                    all_borrower_text + " " + continuation
+                ).strip() if all_borrower_text else continuation
+
+            # Extract borrower names. Split on the marker, drop the
+            # trailing empty segment, strip ", " padding from each.
+            owners: List[str] = []
+            if BORROWER_MARKER in all_borrower_text:
+                raw_segments = all_borrower_text.split(BORROWER_MARKER)
+                for seg in raw_segments[:-1]:  # last is post-marker fragment
+                    name = seg.strip().strip(",").strip()
+                    if name:
+                        owners.append(name)
+            else:
+                # Edge case: header had a borrower NAME but no marker
+                # (marker wrapped to the continuation line). Use the
+                # cleaned-up borrower-prefix from line 1 as the name.
+                if borrowers_on_header:
+                    owners.append(borrowers_on_header)
+            primary_owner = ", ".join(owners) if owners else None
+
+            # Split "STREET COUNTY" — county is the trailing word(s).
+            # Multi-word county edge case ("Van Buren") gets explicit
+            # handling.
             county: Optional[str] = None
             street: Optional[str] = None
-            stripped_lower = addr_county.lower()
-            matched_multi = False
+            after_lower = after_text.lower()
             for mw in MULTI_WORD_COUNTIES:
                 tail = " " + mw.lower()
-                if stripped_lower.endswith(tail):
+                if after_lower.endswith(tail):
                     county = mw
-                    street = addr_county[: -len(tail)].strip()
-                    matched_multi = True
+                    street = after_text[: -len(tail)].strip()
                     break
-            if not matched_multi:
-                ac_parts = addr_county.rsplit(None, 1)
+            if county is None:
+                ac_parts = after_text.rsplit(None, 1)
                 if len(ac_parts) < 2:
-                    i += 1
                     continue
                 street = ac_parts[0].strip()
                 county = ac_parts[1].strip()
 
-            # The next line is the city/state/zip tail
-            next_line = lines[i + 1].strip() if i + 1 < n else ""
-            cm = ADDR_TAIL_RE.match(next_line)
-            if cm:
-                city = cm.group(1).strip()
-                zip_code = cm.group(2)
-                full_addr = f"{street}, {city}, TN {zip_code}"
-                i += 2  # consumed two lines
-            else:
-                # Sometimes the tail line is missing — keep the street
-                # so the lead still has SOMETHING for the assessor lookup
-                full_addr = street
-                i += 1
-
-            # Parse sale date
-            sale_date_iso = self._parse_sale_date(sale_date_raw)
+            full_addr = f"{street}, {city}, TN {zip_code}"
 
             # Stable lead key: file_no is unique per case
             lead_key = self.make_lead_key("mackie_wolf", file_no)
@@ -227,7 +293,7 @@ class MackieWolfTrusteeBot(BotBase):
             notes = (
                 f"bot_source=mackie_wolf_trustee · "
                 f"file#={file_no} · "
-                f"platform={platform} · "
+                f"borrowers={len(owners)} · "
                 f"report={report_date.isoformat()}"
             )
 
@@ -236,12 +302,13 @@ class MackieWolfTrusteeBot(BotBase):
                 pipeline_lead_key=lead_key,
                 property_address=full_addr,
                 county=county,
+                owner_name_records=primary_owner,
                 distress_type="TRUSTEE_NOTICE",
-                trustee_sale_date=sale_date_iso,
+                trustee_sale_date=self._parse_sale_date(sale_date_raw),
                 admin_notes=notes,
                 raw_payload={
                     "file_no": file_no,
-                    "platform": platform,
+                    "borrowers": owners,
                     "county": county,
                     "report_date": report_date.isoformat(),
                     "scraped_at": datetime.utcnow().isoformat() + "Z",
