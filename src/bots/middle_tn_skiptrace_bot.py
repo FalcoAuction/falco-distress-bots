@@ -82,7 +82,7 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                         .select(
                             "id, property_address, owner_name_records, "
                             "full_name, county, priority_score, "
-                            "phone_metadata, distress_type"
+                            "phone_metadata, distress_type, trustee_sale_date"
                         )
                         .is_("phone", "null")
                         .not_.is_("owner_name_records", "null")
@@ -142,9 +142,21 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                         f"candidate query on {table} page {page}: {e}"
                     )
                     break
+        # Urgency-first: leads with the soonest upcoming trustee sale get
+        # skip-traced before anything else, so a limited BatchData balance
+        # always buys the most time-sensitive phones. Past/absent sale
+        # dates sort last (still eligible, just not urgent).
+        from datetime import date as _date
+        today_iso = _date.today().isoformat()
+
+        def _urgency(r: Dict[str, Any]) -> str:
+            d = r.get("trustee_sale_date") or ""
+            return d if d >= today_iso else "9999-12-31"
+
+        out.sort(key=_urgency)
         self.logger.info(
             f"middle_tn_skiptrace: {len(out)} focus-county candidates "
-            f"(cap {max_per_run})"
+            f"(cap {max_per_run}, urgency-sorted)"
         )
         return out[:max_per_run]
 

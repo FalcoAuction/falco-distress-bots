@@ -227,6 +227,16 @@ class BatchDataSkipTraceBot(BotBase):
         api_errors = 0
         cost_estimate = 0.0  # rough $0.10 per attempted lookup
         error_message: Optional[str] = None
+        last_api_error: Optional[str] = None
+        # Fail-fast: N consecutive API errors with zero successes means
+        # the problem is account-level (expired key, insufficient
+        # balance), not per-lead. Abort and report FAILED so the outage
+        # is visible in bot_run_health. Without this, a dead BatchData
+        # account burned 50 days (2026-05-15 -> 2026-07-04) silently
+        # reporting "all_dupes" while 403 "Insufficient balance" errored
+        # every single call.
+        CONSECUTIVE_ERROR_ABORT = 3
+        consecutive_errors = 0
 
         try:
             candidates = self._candidates(client, max_per_run)
@@ -251,9 +261,19 @@ class BatchDataSkipTraceBot(BotBase):
                 # API call
                 try:
                     phones = self._skip_trace_one(api_key, addr_payload, owner)
+                    consecutive_errors = 0
                 except Exception as e:
                     api_errors += 1
+                    consecutive_errors += 1
+                    last_api_error = str(e)[:200]
                     self.logger.warning(f"  API error for id={row['id']}: {e}")
+                    if consecutive_errors >= CONSECUTIVE_ERROR_ABORT and matched == 0:
+                        error_message = (
+                            f"aborted: {consecutive_errors} consecutive API errors, "
+                            f"0 matches — account-level failure. Last: {last_api_error}"
+                        )
+                        self.logger.error(error_message)
+                        break
                     continue
 
                 if not phones:
@@ -297,6 +317,9 @@ class BatchDataSkipTraceBot(BotBase):
             self.logger.error(f"FAILED: {e}")
 
         finished = datetime.now(timezone.utc)
+        # Every attempt erroring = account/API problem, not lead problem.
+        if error_message is None and api_errors > 0 and api_errors == attempted:
+            error_message = f"all {attempted} attempts API-errored. Last: {last_api_error}"
         if error_message:
             status = "failed"
         elif attempted == 0:
