@@ -91,6 +91,7 @@ from . import decision_engine_bot
 from . import hmda_enricher_bot
 from . import mortgage_amortizer_bot
 from . import middle_tn_skiptrace_bot
+from . import enformion_skip_trace_bot
 from . import middle_tn_twilio_lookup_bot
 from . import auto_promoter_bot
 from . import tn_lis_pendens_bot
@@ -187,6 +188,10 @@ NEW_BOTS = [
     # mortgage_balance and won't overwrite higher-confidence sources.
     ("mortgage_estimator", mortgage_estimator_bot.run),
     ("middle_tn_skiptrace", middle_tn_skiptrace_bot.run),
+    # Enformion waterfall AFTER BatchData (targets its no-phone misses +
+    # cross-verifies unverified primaries). No-ops without
+    # FALCO_ENFORMION_AP_NAME/_PASSWORD in env. Charged on match only.
+    ("enformion_skip_trace", enformion_skip_trace_bot.run),
     ("middle_tn_twilio_lookup", middle_tn_twilio_lookup_bot.run),
     ("auto_promoter", auto_promoter_bot.run),
     # Autonomous brain — runs LAST so it sees fully-enriched leads
