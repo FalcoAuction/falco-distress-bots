@@ -35,6 +35,10 @@ jobs:
       # opt back in to running them here.
       FALCO_BATCHDATA_API_KEY: ${{ secrets.FALCO_BATCHDATA_API_KEY }}
       FALCO_ATTOM_API_KEY: ${{ secrets.FALCO_ATTOM_API_KEY }}
+      # EnformionGO waterfall skip-trace (enformion_skip_trace_bot).
+      # No-ops harmlessly until these secrets are set.
+      FALCO_ENFORMION_AP_NAME: ${{ secrets.FALCO_ENFORMION_AP_NAME }}
+      FALCO_ENFORMION_AP_PASSWORD: ${{ secrets.FALCO_ENFORMION_AP_PASSWORD }}
 
       # ===== Decision engine (LLM-based lead classifier) =====
       # decision_engine_bot needs OPENAI_API_KEY or it fails with
