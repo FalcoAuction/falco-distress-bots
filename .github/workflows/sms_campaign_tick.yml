@@ -1,0 +1,41 @@
+# Ticks the FALCO SMS campaign engine on falco.llc.
+#
+# Lives here (not in falco-site's vercel.json) because Vercel's Hobby
+# plan only allows once-daily crons — the campaign engine needs a
+# ~20-minute pulse through the send window to drip messages at human
+# pace. The endpoint itself enforces every rail (mode flag, A2P gate,
+# CT send window, daily cap), so liberal ticking is safe: outside the
+# window or with the campaign off it's a no-op that returns in <1s.
+#
+# GitHub Actions schedules drift by a few minutes under load. Fine —
+# jitter is a feature for this workload.
+#
+# Requires secret: FALCO_CRON_SECRET (the site's CRON_SECRET).
+
+name: SMS Campaign Tick
+
+on:
+  schedule:
+    # Every 20 min, 14:00-23:59 UTC = 9am-6:59pm CT (CDT). The
+    # endpoint re-checks the precise window + weekends itself.
+    - cron: "*/20 14-23 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Tick campaign engine
+        run: |
+          resp=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.FALCO_CRON_SECRET }}" \
+            "https://falco.llc/api/cron/sms-campaign")
+          code=$(echo "$resp" | tail -1)
+          body=$(echo "$resp" | sed '$d')
+          echo "HTTP $code"
+          echo "$body"
+          if [ "$code" != "200" ]; then
+            echo "::error::campaign tick failed with HTTP $code"
+            exit 1
+          fi
