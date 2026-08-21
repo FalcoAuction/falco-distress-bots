@@ -204,7 +204,11 @@ class AutoPromoterBot(BotBase):
                 r = (
                     client.table("homeowner_requests_staging")
                     .select("*")
-                    .eq("staging_status", "pending")
+                    # 'verified' = a human approved the row in /admin/staging.
+                    # Those were previously invisible here, so hand-reviewed
+                    # leads sat in staging forever instead of reaching the
+                    # dialer. Include them alongside untouched 'pending' rows.
+                    .in_("staging_status", ["pending", "verified"])
                     .range(page * 1000, (page + 1) * 1000 - 1)
                     .execute()
                 )

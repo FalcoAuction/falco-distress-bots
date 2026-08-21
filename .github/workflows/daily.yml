@@ -67,6 +67,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # mtn_lis_pendens_rod drives a headless browser. Without the
+          # browser binaries it fails every run with "playwright not
+          # installed" and we silently lose a lis pendens lead source.
+          python -m playwright install --with-deps chromium
 
       - name: Run Falco pipeline (bot scrapers \u2192 Supabase)
         run: python -m src.run_all

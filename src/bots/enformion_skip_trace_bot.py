@@ -258,6 +258,9 @@ class EnformionSkipTraceBot(BotBase):
 
     # ── Candidates: BatchData's misses + unverified primaries ────────────
     def _candidates(self, client, max_per_run: int) -> List[Dict[str, Any]]:
+        # Default ON: if the primary skip-trace is down, this bot must not
+        # sit idle behind a gate that the primary is responsible for opening.
+        allow_primary = os.environ.get("FALCO_ENFORMION_PRIMARY", "1").strip() != "0"
         today_iso = date.today().isoformat()
         out: List[Dict[str, Any]] = []
         PAGE = 1000
@@ -302,8 +305,18 @@ class EnformionSkipTraceBot(BotBase):
                         # Waterfall targets:
                         #   a) BatchData tried, found nothing
                         #   b) has a phone but match is unverified + not yet cross-checked
+                        #   c) BatchData never ran on this row at all. Without
+                        #      this, a dead BatchData account (403/no credit)
+                        #      deadlocks the whole pipeline: BatchData never
+                        #      marks rows as tried, so this waterfall sees no
+                        #      candidates and enrichment stops entirely. When
+                        #      the primary is down, Enformion steps up instead
+                        #      of idling. Set FALCO_ENFORMION_PRIMARY=0 to
+                        #      restrict this bot to strict waterfall mode.
                         if (batchdata_tried and not has_phone) or (
                             has_phone and batchdata_tried and not name_verified and not cross
+                        ) or (
+                            allow_primary and not batchdata_tried and not has_phone
                         ):
                             r["__table__"] = table
                             out.append(r)
