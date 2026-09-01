@@ -50,7 +50,16 @@ except ImportError:
     pdfplumber = None  # type: ignore[assignment]
 
 
+# Venues MWZM runs sales through. Seen in the trailing column of the
+# TN sale report; extend as new ones appear.
+SALE_PLATFORMS = {
+    "AUCTION", "AUCTIONCOM", "HUBZU", "MWZM", "HUDMARSH", "CHRONOS",
+    "XOME", "SERVICELINK", "REALTYBID",
+}
+
 MWZM_PDF_BASE = "https://mwzmlaw.com/wp-content/uploads"
+# The page that actually links the current report.
+MWZM_INVESTORS_URL = "https://mwzmlaw.com/tn-investors/"
 
 # TN counties that are multi-word (rare — only Van Buren currently)
 # Used so our last-token parsing doesn't split them.
@@ -109,18 +118,55 @@ class MackieWolfTrusteeBot(BotBase):
     # ── PDF discovery ───────────────────────────────────────────────────────
 
     def _find_latest_pdf(self) -> Tuple[Optional[str], Optional[date]]:
-        """HEAD-probe the predictable URL pattern back N days, return the
-        most recent one that returns 200."""
+        """Find the current TN sale report.
+
+        Primary: scrape the investors page and take the newest linked
+        sale report. Guessing the filename used to work but MWZM renamed
+        it from "TN-Sale-Report-as-of-MM.DD.YYYY.pdf" to
+        "TN-Sale-Report-as-MM.DD.YYYY.pdf", which silently zeroed this
+        scraper: every probe 404'd, the bot reported zero_yield, and a
+        primary Tennessee foreclosure source went quiet without erroring.
+        The upload folder is also the month the file was posted, not the
+        month in its name, so date-derived paths are unreliable too.
+
+        The old probe is kept as a fallback, now covering both spellings.
+        """
+        res = self.fetch(MWZM_INVESTORS_URL, method="GET")
+        if res is not None and res.status_code == 200:
+            links = re.findall(
+                r"https?://\S+?TN-Sale-Report\S*?\.pdf",
+                res.text,
+                re.I,
+            )
+            best: Tuple[Optional[str], Optional[date]] = (None, None)
+            for url in links:
+                m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", url)
+                if not m:
+                    continue
+                try:
+                    d = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
+                except ValueError:
+                    continue
+                if best[1] is None or d > best[1]:
+                    best = (url, d)
+            if best[0]:
+                self.logger.info(f"sale report discovered: {best[0]}")
+                return best
+
+        self.logger.warning(
+            "investors page gave no sale report link; falling back to probing"
+        )
         today = date.today()
         for offset in range(self.max_days_lookback):
             d = today - timedelta(days=offset)
-            url = (
-                f"{MWZM_PDF_BASE}/{d.strftime('%Y/%m')}/"
-                f"TN-Sale-Report-as-of-{d.strftime('%m.%d.%Y')}.pdf"
-            )
-            res = self.fetch(url, method="HEAD")
-            if res is not None and res.status_code == 200:
-                return url, d
+            for stem in ("TN-Sale-Report-as-", "TN-Sale-Report-as-of-"):
+                url = (
+                    f"{MWZM_PDF_BASE}/{d.strftime('%Y/%m')}/"
+                    f"{stem}{d.strftime('%m.%d.%Y')}.pdf"
+                )
+                res = self.fetch(url, method="HEAD")
+                if res is not None and res.status_code == 200:
+                    return url, d
         return None, None
 
     def _download_pdf(self, url: str) -> Optional[bytes]:
@@ -268,6 +314,19 @@ class MackieWolfTrusteeBot(BotBase):
             # handling.
             county: Optional[str] = None
             street: Optional[str] = None
+
+            # The report now carries the sale venue as a trailing token
+            # ("... Bradley HUBZU"), so the old "county is the last word"
+            # rule was assigning AUCTION / HUBZU / MWZM as the county.
+            # That silently broke promotion, which gates on FOCUS_COUNTIES
+            # and can't match a platform name. Strip it, keep it: which
+            # venue a sale runs on is worth knowing.
+            sale_platform: Optional[str] = None
+            at_parts = after_text.rsplit(None, 1)
+            if len(at_parts) == 2 and at_parts[1].upper() in SALE_PLATFORMS:
+                sale_platform = at_parts[1].upper()
+                after_text = at_parts[0].strip()
+
             after_lower = after_text.lower()
             for mw in MULTI_WORD_COUNTIES:
                 tail = " " + mw.lower()
@@ -310,6 +369,7 @@ class MackieWolfTrusteeBot(BotBase):
                     "file_no": file_no,
                     "borrowers": owners,
                     "county": county,
+                    "sale_platform": sale_platform,
                     "report_date": report_date.isoformat(),
                     "scraped_at": datetime.utcnow().isoformat() + "Z",
                 },
