@@ -198,9 +198,16 @@ class BotBase:
     expected_min_yield: int = 1             # zero-yield warning threshold
     description: str = ""                   # human-readable
 
+    # Some sources sit behind a WAF that rejects non-browser agents from
+    # datacenter IPs (which is what CI runs on). A bot that needs to look
+    # like a browser sets this; everything else keeps the honest default.
+    user_agent: Optional[str] = None
+
     def __init__(self):
         self.run_id = str(uuid.uuid4())
-        self.session = make_session()
+        self.session = (
+            make_session(self.user_agent) if self.user_agent else make_session()
+        )
         self.logger = logging.getLogger(f"bot.{self.name}")
         if not self.logger.handlers:
             handler = logging.StreamHandler()

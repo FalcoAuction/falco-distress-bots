@@ -74,6 +74,10 @@ class BrockScottTrusteeBot(BotBase):
         "10-25 days earlier than newspaper notice."
     )
     throttle_seconds = 2.0  # polite — small firm site
+    # WAF drops the honest bot UA from CI datacenter IPs.
+    user_agent = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
     expected_min_yield = 5  # they normally have 25+ TN listings live
 
     # Walk at most this many paginated pages before stopping.
