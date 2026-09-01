@@ -39,6 +39,14 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, _supabase
+from .tpad_enricher_bot import (
+    COUNTY_CODES as TPAD_COUNTY_CODES,
+    EXTERNAL_COUNTIES as TPAD_EXTERNAL_COUNTIES,
+    _norm_county as _tpad_norm_county,
+    _build_session as _tpad_session,
+    search_by_owner as _tpad_search_by_owner,
+    fetch_detail as _tpad_fetch_detail,
+)
 from .davidson_assessor_bot import (
     PADCTN_HOME, PADCTN_QUICKSEARCH, PADCTN_SEARCH,
     ACCOUNT_RE, APPRAISED_RE, LAND_SIZE_RE, LAND_USE_RE, PARCEL_RE,
@@ -68,13 +76,28 @@ def _decedent_to_owner_query(decedent: str) -> Optional[str]:
     return f"{last}, {first}"
 
 
+def _decedent_to_tpad_query(decedent: str) -> Optional[str]:
+    """TPAD wants "LASTNAME FIRSTNAME" and prefix-matches it.
+
+    Unlike PADCTN it does not accept a comma: "Crowder, Patricia"
+    returns nothing while "Crowder" returns nine. Owner values come back
+    like "CROWDER PHILLIP ETUX RITA CROWDER", so last-then-first with a
+    space is the shape that matches.
+    """
+    q = _decedent_to_owner_query(decedent)
+    return q.replace(",", "") if q else None
+
+
 class ProbatePropertyEnricherBot(BotBase):
     name = "probate_property_enricher"
-    description = "Cross-reference probate decedents to Davidson County properties via PADCTN owner search"
+    description = "Cross-reference probate decedents to TN properties via PADCTN (Davidson) + statewide TPAD owner search"
     throttle_seconds = 1.5
     expected_min_yield = 1
 
     max_leads_per_run = 100
+
+    # Lazily built so a Davidson-only run never opens a TPAD session.
+    _tpad_sess = None
 
     def scrape(self) -> List[Any]:
         return []
@@ -104,12 +127,13 @@ class ProbatePropertyEnricherBot(BotBase):
         ambiguous = 0    # multi-match — skipped to avoid wrong-house pinning
         not_found = 0
         skipped = 0
+        unsupported = 0   # county has no owner-name lookup wired (Knox, Shelby, ...)
         error_message: Optional[str] = None
 
         try:
             candidates = self._candidates(client)
             self.logger.info(
-                f"{len(candidates)} probate leads in Davidson lacking property_address"
+                f"{len(candidates)} probate leads lacking property_address"
             )
 
             for row in candidates[:self.max_leads_per_run]:
@@ -118,18 +142,31 @@ class ProbatePropertyEnricherBot(BotBase):
                 if not query:
                     skipped += 1
                     continue
-                results = self._lookup_owner(query)
-                if results is None:
-                    not_found += 1
-                    continue
-                if len(results) == 0:
-                    not_found += 1
-                    continue
-                if len(results) > 1:
-                    ambiguous += 1
-                    continue
+                # Route by county: Davidson has its own assessor portal,
+                # the other 85 TPAD counties go through the statewide
+                # system, and the remaining externals have no owner-name
+                # lookup wired yet (Knox and Shelby are the big two).
+                county_key = _tpad_norm_county(row.get("county") or "")
+                hit: Optional[Dict[str, Any]] = None
 
-                hit = results[0]
+                if county_key == "davidson":
+                    results = self._lookup_owner(query)
+                    if not results:
+                        not_found += 1
+                        continue
+                    if len(results) > 1:
+                        ambiguous += 1
+                        continue
+                    hit = results[0]
+                elif county_key and county_key not in TPAD_EXTERNAL_COUNTIES:
+                    tq = _decedent_to_tpad_query(decedent)
+                    hit = self._tpad_lookup(county_key, tq) if tq else None
+                    if hit is None:
+                        not_found += 1
+                        continue
+                else:
+                    unsupported += 1
+                    continue
                 update: Dict[str, Any] = {}
                 if hit.get("property_address") and not row.get("property_address"):
                     update["property_address"] = hit["property_address"]
@@ -179,25 +216,71 @@ class ProbatePropertyEnricherBot(BotBase):
 
         self._report_health(
             status=status, started_at=started, finished_at=finished,
-            fetched_count=enriched + not_found + ambiguous + skipped,
+            fetched_count=enriched + not_found + ambiguous + skipped + unsupported,
             parsed_count=enriched + not_found + ambiguous,
             staged_count=enriched, duplicate_count=skipped,
             error_message=error_message,
         )
         self.logger.info(
             f"enriched={enriched} ambiguous={ambiguous} "
-            f"not_found={not_found} skipped={skipped}"
+            f"not_found={not_found} skipped={skipped} unsupported={unsupported}"
         )
         return {
             "name": self.name, "status": status,
             "enriched": enriched, "ambiguous": ambiguous,
             "not_found": not_found, "skipped": skipped,
+            "unsupported": unsupported,
             "error": error_message,
             "staged": enriched, "duplicates": skipped,
-            "fetched": enriched + not_found + ambiguous + skipped,
+            "fetched": enriched + not_found + ambiguous + skipped + unsupported,
         }
 
     # ── Internal ────────────────────────────────────────────────────────────
+
+    def _tpad_lookup(self, county_key: str, query: str) -> Optional[Dict[str, Any]]:
+        """Owner-name lookup against the TN Comptroller's statewide TPAD.
+
+        Same strict rule as the Davidson path: commit only on an exact
+        single match, because a common decedent name would otherwise pin
+        the wrong house onto the lead. Returns a dict shaped like the
+        PADCTN parser output so the commit block stays shared.
+        """
+        jur = TPAD_COUNTY_CODES.get(county_key)
+        if not jur:
+            return None
+        if self._tpad_sess is None:
+            self._tpad_sess = _tpad_session()
+        try:
+            results = _tpad_search_by_owner(self._tpad_sess, jur, query)
+        except Exception as e:
+            self.logger.warning(f"  tpad search failed {county_key}: {e}")
+            return None
+        if not results or len(results) != 1:
+            return None
+        hit = results[0]
+        addr = (hit.get("propertyAddress") or "").strip()
+        if not addr:
+            return None
+        out: Dict[str, Any] = {
+            "property_address": addr,
+            "owner": hit.get("owner"),
+            "parcel": hit.get("parcelId"),
+            "account_id": hit.get("parcelKey"),
+        }
+        # Appraised value lives on the detail page, not the search result.
+        try:
+            detail = _tpad_fetch_detail(
+                self._tpad_sess,
+                hit.get("parcelId") or "",
+                jur,
+                hit.get("parcelKey") or "",
+            )
+            val = detail.get("appraised_value") or detail.get("appraised_value_alt")
+            if val:
+                out["appraised"] = val
+        except Exception:
+            pass
+        return out
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
         try:
@@ -205,9 +288,13 @@ class ProbatePropertyEnricherBot(BotBase):
                 client.table("homeowner_requests_staging")
                 .select("id, full_name, owner_name_records, county, property_address, property_value, raw_payload")
                 .eq("distress_type", "PROBATE")
-                .eq("county", "davidson")
+                # Davidson-only was a v1 guard while the PADCTN pattern was
+                # being validated. It is why Knox (822 leads) and Shelby (599)
+                # have zero addresses: a probate notice names a decedent, not
+                # a property, so without a lookup the lead is just a name.
+                # TPAD covers 86 of 95 counties off the same owner-name key.
                 .is_("property_address", "null")
-                .limit(500)
+                .limit(2000)
                 .execute()
             )
             return getattr(q, "data", None) or []

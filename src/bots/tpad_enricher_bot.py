@@ -139,8 +139,21 @@ def _iso_date(value: Any) -> Optional[str]:
 
 def _build_session() -> "requests.Session":
     s = requests.Session()
-    s.headers["User-Agent"] = "FALCO-Lead-Research/1.0 (+ops@falco.llc)"
-    s.headers["Accept"] = "application/json, text/html"
+    # TPAD sits behind an Azure Application Gateway that 403s non-browser
+    # user agents. The old descriptive UA was blocked on every request,
+    # which is why this enricher never returned anything. These headers
+    # are what the site's own search form sends.
+    s.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/javascript, */*; q=0.01",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{TPAD_BASE}/Search",
+        "Origin": "https://assessment.cot.tn.gov",
+        "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    })
     s.verify = False
     # Prime cookies via initial GET
     try:
