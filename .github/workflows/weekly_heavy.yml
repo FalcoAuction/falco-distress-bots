@@ -1,0 +1,51 @@
+name: Falco Weekly Heavy Bots
+
+# Bots too slow for the daily budget whose sources only refresh weekly.
+# hamilton_tax_delinquent downloads a ~60k-row CSV that Hamilton County
+# regenerates once a week; running it twice a day cost 8 minutes a run
+# for a list that had not changed. HEAVY_BOTS in src/bots/_run_new.py is
+# the source of truth; --only bypasses the daily exclusion.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 10 * * 0"  # Sunday 10:00 UTC, two hours before the daily
+
+concurrency:
+  group: falco-daily-pipeline
+  cancel-in-progress: false
+
+jobs:
+  run-heavy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run heavy bots
+        run: python -m src.bots._run_new --only hamilton_tax_delinquent --budget-min 40
+
+      - name: Upload run summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: falco-weekly-heavy-${{ github.run_id }}
+          path: out/reports/new_bots_summary.json
+          if-no-files-found: ignore
+          retention-days: 30

@@ -49,6 +49,14 @@ except ImportError:
     raise
 
 
+class BotTimeout(Exception):
+    """Raised (from a SIGALRM handler in _run_new) when a bot blows its
+    per-bot wall-clock cap. Deliberately an Exception, not BaseException:
+    bots that wrap their own run() in a bare `except Exception` then
+    record a terminal health row instead of leaving a `running` ghost
+    that nobody ever closes."""
+
+
 # ─────────────────────────── Standardized output ────────────────────────────
 
 
@@ -140,6 +148,11 @@ def _supabase() -> Optional[Client]:
     return _SUPABASE_CLIENT
 
 
+# Keys per Supabase round trip in _write_staging. PostgREST `in` filters
+# go in the URL; 200 sha40 keys is ~9KB, well under the 16KB header cap.
+CHUNK = 200
+
+
 # ─────────────────────────── HTTP session helper ────────────────────────────
 
 
@@ -202,6 +215,12 @@ class BotBase:
     # datacenter IPs (which is what CI runs on). A bot that needs to look
     # like a browser sets this; everything else keeps the honest default.
     user_agent: Optional[str] = None
+
+    # A source whose lead-key set is identical for this many consecutive
+    # finished runs reports `frozen_source` instead of `all_dupes`. Two
+    # runs a day, so 6 = three days of byte-identical output. Sources
+    # that genuinely move slowly (monthly lists) should raise this.
+    frozen_after_runs: int = 6
 
     def __init__(self):
         self.run_id = str(uuid.uuid4())
@@ -280,10 +299,15 @@ class BotBase:
 
         leads: List[LeadPayload] = []
         error_message: Optional[str] = None
+        timed_out = False
         try:
             self.logger.info(f"START run_id={self.run_id}")
             leads = self.scrape() or []
             self.logger.info(f"scrape() returned {len(leads)} leads")
+        except BotTimeout as e:
+            timed_out = True
+            error_message = f"BotTimeout: {e}"
+            self.logger.error(f"TIMED OUT: {e}")
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             self.logger.error(f"FAILED: {e}")
@@ -298,12 +322,20 @@ class BotBase:
         #   "all_dupes"  — scraper found leads but all already-staged (healthy
         #                  but no new supply this run; not an alert)
         #   "ok"         — scraper produced new leads above expected_min_yield
-        if error_message:
+        #   "frozen_source" — all_dupes AND the lead-key set has been
+        #                  byte-identical for frozen_after_runs runs. A stale
+        #                  page and a quiet week look the same as all_dupes;
+        #                  this is the one that needs a human.
+        #   "timed_out"  — killed by the runner's per-bot wall-clock cap
+        fp = self.fingerprint(leads)
+        if timed_out:
+            status = "timed_out"
+        elif error_message:
             status = "failed"
         elif len(leads) == 0:
             status = "zero_yield"
         elif staged_count == 0 and duplicate_count > 0:
-            status = "all_dupes"
+            status = "frozen_source" if self._source_frozen(fp) else "all_dupes"
         elif staged_count < self.expected_min_yield:
             status = "below_threshold"
         else:
@@ -318,6 +350,7 @@ class BotBase:
             staged_count=staged_count,
             duplicate_count=duplicate_count,
             error_message=error_message,
+            notes={"fingerprint": fp, "key_count": len(leads)} if fp else None,
         )
 
         return {
@@ -341,6 +374,12 @@ class BotBase:
         status reaper a reliable "is this notice still being
         republished?" signal — when a sale gets withdrawn, the notice
         stops re-appearing in our scrapes and last_seen_at goes stale.
+
+        Lookups and inserts are chunked (one round trip per CHUNK keys)
+        rather than one select per lead. The per-lead version cost a
+        2,000-lead source ~8 minutes of the pipeline's 90 on nothing but
+        Supabase latency. Touches stay per-row: each one merges a
+        different jsonb blob.
         """
         client = _supabase()
         if client is None:
@@ -365,58 +404,125 @@ class BotBase:
             except Exception as e:
                 self.logger.warning(f"notice_tracking touch failed for {table}/{row_id}: {e}")
 
+        # A source can list the same notice twice in one run (republished
+        # in two sections). Keep the first; the old per-lead path would
+        # have inserted the first and counted the second as a dupe.
+        unique: List[LeadPayload] = []
+        seen: set = set()
         for lead in leads:
-            row = lead.as_db_row(scraper_run_id=self.run_id)
-            try:
-                # Check for existing staged row with same lead_key+bot_source still pending
-                # (avoid re-staging same lead from same bot in same week)
-                existing = (
-                    client.table("homeowner_requests_staging")
-                    .select("id, phone_metadata")
-                    .eq("bot_source", lead.bot_source)
-                    .eq("pipeline_lead_key", lead.pipeline_lead_key)
-                    .eq("staging_status", "pending")
-                    .limit(1)
-                    .execute()
-                )
-                if getattr(existing, "data", None):
-                    # Touch last_seen_at on the staging row so the reaper
-                    # knows we're still seeing this notice in scrapes.
-                    _touch_last_seen(
-                        "homeowner_requests_staging",
-                        existing.data[0]["id"],
-                        existing.data[0].get("phone_metadata"),
-                    )
-                    dupes += 1
-                    # Fall through to touch live too
-                else:
-                    client.table("homeowner_requests_staging").insert(row).execute()
-                    staged += 1
+            k = (lead.bot_source, lead.pipeline_lead_key)
+            if k in seen:
+                dupes += 1
+                continue
+            seen.add(k)
+            unique.append(lead)
 
-                # Touch live homeowner_requests row if the lead has been
-                # promoted. Match on pipeline_lead_key + source='bot'.
+        by_source: Dict[str, List[LeadPayload]] = {}
+        for lead in unique:
+            by_source.setdefault(lead.bot_source, []).append(lead)
+
+        for source, group in by_source.items():
+            for i in range(0, len(group), CHUNK):
+                chunk = group[i:i + CHUNK]
+                keys = [l.pipeline_lead_key for l in chunk]
+
+                # Which of these are already pending in staging?
+                try:
+                    res = (
+                        client.table("homeowner_requests_staging")
+                        .select("id, pipeline_lead_key, phone_metadata")
+                        .eq("bot_source", source)
+                        .in_("pipeline_lead_key", keys)
+                        .eq("staging_status", "pending")
+                        .execute()
+                    )
+                    pending = {r["pipeline_lead_key"]: r for r in (getattr(res, "data", None) or [])}
+                except Exception as e:
+                    # Can't tell what's new. Skip the chunk rather than
+                    # blindly inserting 200 possible duplicates; the next
+                    # run re-scrapes the same notices anyway.
+                    self.logger.warning(f"staging dedupe lookup failed, skipping {len(chunk)} leads: {e}")
+                    continue
+
+                new_rows = []
+                for lead in chunk:
+                    hit = pending.get(lead.pipeline_lead_key)
+                    if hit:
+                        _touch_last_seen("homeowner_requests_staging", hit["id"], hit.get("phone_metadata"))
+                        dupes += 1
+                    else:
+                        new_rows.append(lead.as_db_row(scraper_run_id=self.run_id))
+
+                if new_rows:
+                    try:
+                        client.table("homeowner_requests_staging").insert(new_rows).execute()
+                        staged += len(new_rows)
+                    except Exception as e:
+                        # One bad row fails the whole batch insert. Fall
+                        # back to per-row so the other 199 still land.
+                        self.logger.warning(f"batch insert of {len(new_rows)} failed ({e}); retrying per-row")
+                        for row in new_rows:
+                            try:
+                                client.table("homeowner_requests_staging").insert(row).execute()
+                                staged += 1
+                            except Exception as e2:
+                                self.logger.warning(f"staging insert failed for {row.get('pipeline_lead_key')}: {e2}")
+
+                # Touch live homeowner_requests rows for any lead already
+                # promoted, so the reaper sees today's sighting.
                 try:
                     live = (
                         client.table("homeowner_requests")
-                        .select("id, phone_metadata")
+                        .select("id, pipeline_lead_key, phone_metadata")
                         .eq("source", "bot")
-                        .eq("pipeline_lead_key", lead.pipeline_lead_key)
-                        .limit(1)
+                        .in_("pipeline_lead_key", keys)
                         .execute()
                     )
-                    if getattr(live, "data", None):
-                        _touch_last_seen(
-                            "homeowner_requests",
-                            live.data[0]["id"],
-                            live.data[0].get("phone_metadata"),
-                        )
+                    for r in (getattr(live, "data", None) or []):
+                        _touch_last_seen("homeowner_requests", r["id"], r.get("phone_metadata"))
                 except Exception as e:
-                    self.logger.warning(f"live touch lookup failed for {lead.pipeline_lead_key}: {e}")
-            except Exception as e:
-                self.logger.warning(f"staging insert failed for {lead.pipeline_lead_key}: {e}")
+                    self.logger.warning(f"live touch lookup failed for chunk: {e}")
 
         self.logger.info(f"staged {staged} new leads, {dupes} dupes skipped (last_seen_at touched on all)")
         return (staged, dupes)
+
+    @staticmethod
+    def fingerprint(leads: List[LeadPayload]) -> Optional[str]:
+        """sha1 of the sorted lead-key set. Two runs with the same
+        fingerprint saw byte-identical supply. Used to tell a frozen
+        source (stale cache, dead page, WAF interstitial parsed as
+        empty) from a quiet week."""
+        if not leads:
+            return None
+        keys = sorted({f"{l.bot_source}|{l.pipeline_lead_key}" for l in leads})
+        return hashlib.sha1("\n".join(keys).encode("utf-8")).hexdigest()
+
+    def _source_frozen(self, fp: Optional[str]) -> bool:
+        """True when the last `frozen_after_runs` finished runs of this
+        bot all carry the same fingerprint as this one."""
+        if not fp or self.frozen_after_runs <= 0:
+            return False
+        client = _supabase()
+        if client is None:
+            return False
+        try:
+            res = (
+                client.table("bot_run_health")
+                .select("notes")
+                .eq("bot_source", self.name)
+                .neq("run_id", self.run_id)
+                .not_.is_("finished_at", "null")
+                .order("started_at", desc=True)
+                .limit(self.frozen_after_runs)
+                .execute()
+            )
+        except Exception as e:
+            self.logger.warning(f"frozen-source lookup failed: {e}")
+            return False
+        rows = getattr(res, "data", None) or []
+        if len(rows) < self.frozen_after_runs:
+            return False
+        return all(((r.get("notes") or {}).get("fingerprint") == fp) for r in rows)
 
     # ── Internal: health reporting ──────────────────────────────────────────
 
@@ -467,3 +573,34 @@ class BotBase:
         except Exception as e:
             # Don't let health-report failure crash the bot
             self.logger.warning(f"health report failed: {e}")
+
+
+def close_open_runs(bot_source: str, status: str, error_message: str,
+                    since: datetime) -> int:
+    """Close any `running` bot_run_health rows for `bot_source` started at
+    or after `since`. The runner calls this after it kills a bot: the bot
+    never got to write its own terminal row, and a `running` row that is
+    never closed is exactly the ghost the stuck-run alert looks for."""
+    client = _supabase()
+    if client is None:
+        return 0
+    try:
+        res = (
+            client.table("bot_run_health")
+            .select("id")
+            .eq("bot_source", bot_source)
+            .eq("status", "running")
+            .gte("started_at", since.isoformat())
+            .execute()
+        )
+        ids = [r["id"] for r in (getattr(res, "data", None) or [])]
+        for rid in ids:
+            client.table("bot_run_health").update({
+                "status": status,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "error_message": error_message[:5000],
+            }).eq("id", rid).execute()
+        return len(ids)
+    except Exception as e:
+        print(f"[bot-base] close_open_runs({bot_source}) failed: {e}", file=sys.stderr)
+        return 0

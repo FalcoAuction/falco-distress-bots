@@ -1,11 +1,22 @@
-name: Notion Write Test
+name: Unit Tests
+
+# Runs the runner/base/alert tests on every push and PR. The per-bot
+# SIGALRM timeout test only executes on POSIX, which is why this runs
+# here and not just on the Windows dev box.
 
 on:
+  push:
+    paths:
+      - "src/bots/_*.py"
+      - "tests/**"
+      - ".github/workflows/test.yml"
+  pull_request:
   workflow_dispatch:
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -18,8 +29,6 @@ jobs:
       - name: Install deps
         run: pip install -r requirements.txt
 
-      - name: Run test
-        env:
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python notion_test.py
+      - name: Run tests
+        # No Supabase creds on purpose: the tests fake the client.
+        run: python -m unittest discover -s tests -v

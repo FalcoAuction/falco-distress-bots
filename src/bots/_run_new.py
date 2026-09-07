@@ -10,11 +10,16 @@ Add new scrapers to NEW_BOTS as you build them.
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
+import signal
 import sys
+import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Load env vars from .env file at repo root (one place for all credentials).
 # Searches up from this file's location to find a .env.
@@ -30,6 +35,8 @@ try:
 except ImportError:
     # python-dotenv not installed; rely on env vars set externally
     pass
+
+from ._base import BotTimeout, close_open_runs
 
 from . import hud_reo_bot
 from . import nashville_codes_bot
@@ -100,6 +107,11 @@ from . import tn_lis_pendens_bot
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
 # operate on the latest staged + live inventory.
 NEW_BOTS = [
+    # Watchdog FIRST. It summarizes the staging table (yesterday's
+    # supply), not this run, so nothing is lost by running it early and
+    # everything is lost by running it last: on a run that hits the job
+    # timeout, last is exactly the slot that never executes.
+    ("bot_health_monitor", bot_health_monitor.run),
     # Lead sources
     ("hud_reo", hud_reo_bot.run),
     ("nashville_codes", nashville_codes_bot.run),
@@ -196,42 +208,267 @@ NEW_BOTS = [
     ("auto_promoter", auto_promoter_bot.run),
     # Autonomous brain — runs LAST so it sees fully-enriched leads
     ("decision_engine", decision_engine_bot.run),
-    # Health monitor runs after everything else — surfaces silent
-    # bot failures (Shelby ASSR_ASMT, etc.) and AVM coverage gaps.
-    ("bot_health_monitor", bot_health_monitor.run),
 ]
 
 
-def main() -> int:
-    print(f"Running {len(NEW_BOTS)} new (staging) scrapers")
+# ── Scheduling policy ──────────────────────────────────────────────────────
+
+# Bots the run MUST reach. When the budget runs short, everything not on
+# this list is skipped so these still fire. auto_promoter is the only gate
+# between staging and the dialer; the two skip-trace bots feed it; the
+# reaper keeps withdrawn sales out of the queue; decision_engine grades.
+# Before the budget gate existed, ~40% of runs were killed by the job
+# timeout before reaching any of them.
+CRITICAL_BOTS = {
+    "enformion_skip_trace",
+    "middle_tn_twilio_lookup",
+    "auto_promoter",
+    "trustee_status_reaper",
+    "decision_engine",
+}
+
+# Slow, low-yield, and the source only refreshes weekly. Excluded from the
+# daily run; weekly_heavy.yml runs them with --only.
+HEAVY_BOTS = {"hamilton_tax_delinquent"}
+
+# Per-bot wall-clock caps (seconds). Default covers every observed median
+# with room; overrides are for bots whose healthy median sits near it.
+# A bot past its cap is interrupted (BotTimeout via SIGALRM), records
+# `timed_out`, and the runner moves on. Losing one bot's partial run is
+# cheaper than losing the tail of the pipeline.
+DEFAULT_BOT_TIMEOUT = 600
+BOT_TIMEOUTS = {
+    "hmda_enricher": 900,          # median 5.4m, max 12.6m; 954 leads/14d
+    "hamilton_tax_delinquent": 1200,  # weekly only; 2,000-lead CSV
+    "davidson_assessor": 480,      # 150 x 1.5s throttle + fetches
+}
+
+# Wall clock held back for the critical tail. decision_engine's worst
+# observed run is 7.3 min; the other four finish in under a minute.
+CRITICAL_RESERVE_SECONDS = 600
+
+SUMMARY_PATH = Path("out/reports/new_bots_summary.json")
+
+# Terminal statuses that mean "the bot ran and reported". Anything else
+# from a critical bot fails the job.
+COMPLETE_STATUSES = {
+    "ok", "all_dupes", "zero_yield", "below_threshold", "frozen_source",
+    "skipped_no_creds", "no_supabase",
+}
+
+
+class _Alarm:
+    """Per-bot wall clock via SIGALRM. POSIX only, which is what CI is.
+    On Windows it degrades to no cap and says so once; the global budget
+    gate still works there."""
+
+    supported = hasattr(signal, "SIGALRM")
+    _warned = False
+
+    def __init__(self, seconds: int, name: str):
+        self.seconds = max(1, int(seconds))
+        self.name = name
+        self._prev = None
+
+    def __enter__(self):
+        if not self.supported:
+            if not _Alarm._warned:
+                print("[runner] per-bot timeouts unavailable on this platform (no SIGALRM)")
+                _Alarm._warned = True
+            return self
+
+        def _fire(signum, frame):
+            raise BotTimeout(f"{self.name} exceeded {self.seconds}s wall-clock cap")
+
+        self._prev = signal.signal(signal.SIGALRM, _fire)
+        signal.alarm(self.seconds)
+        return self
+
+    def __exit__(self, *exc):
+        if self.supported:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, self._prev)
+        return False
+
+
+def select_bots(
+    only: Optional[List[str]] = None,
+    skip: Optional[List[str]] = None,
+    include_heavy: bool = False,
+    bots: Optional[List[Tuple[str, Callable]]] = None,
+) -> List[Tuple[str, Callable]]:
+    """Apply --only / --skip / heavy exclusion. --only is explicit, so it
+    bypasses the heavy exclusion (that's how the weekly job runs them)."""
+    pool = bots if bots is not None else NEW_BOTS
+    skip_set = set(skip or [])
+    if only:
+        wanted = set(only)
+        unknown = wanted - {n for n, _ in pool}
+        if unknown:
+            raise SystemExit(f"--only names unknown bots: {sorted(unknown)}")
+        return [(n, r) for n, r in pool if n in wanted and n not in skip_set]
+    out = []
+    for n, r in pool:
+        if n in skip_set:
+            continue
+        if n in HEAVY_BOTS and not include_heavy:
+            continue
+        out.append((n, r))
+    return out
+
+
+def run_pipeline(
+    bots: List[Tuple[str, Callable]],
+    budget_seconds: float,
+    *,
+    reserve_seconds: float = CRITICAL_RESERVE_SECONDS,
+    timeouts: Optional[Dict[str, int]] = None,
+    default_timeout: int = DEFAULT_BOT_TIMEOUT,
+    critical: Optional[set] = None,
+    clock: Callable[[], float] = time.monotonic,
+    summary_path: Optional[Path] = SUMMARY_PATH,
+) -> Dict[str, Any]:
+    """Run `bots` in order under a global budget with per-bot caps.
+
+    Budget gate: once the remaining budget drops below `reserve_seconds`,
+    non-critical bots are skipped (status `skipped_budget`) so the
+    critical tail still runs. Critical bots always run, capped to
+    whatever budget is left (floor 60s).
+
+    The summary is rewritten after every bot so a hard kill (job
+    timeout) still leaves a partial file for the alert step to read.
+    """
+    timeouts = timeouts if timeouts is not None else BOT_TIMEOUTS
+    critical = critical if critical is not None else CRITICAL_BOTS
+    t0 = clock()
+    summary: Dict[str, Any] = {
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "finished_at": None,
+        "budget_seconds": budget_seconds,
+        "reserve_seconds": reserve_seconds,
+        "planned": [n for n, _ in bots],
+        "bots": [],
+        "critical_incomplete": [],
+    }
+
+    def _flush():
+        if summary_path is None:
+            return
+        try:
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(summary, indent=2, default=str), encoding="utf-8")
+        except Exception as e:
+            print(f"[runner] could not write summary: {e}")
+
+    print(f"Running {len(bots)} staging scrapers, budget {budget_seconds / 60:.0f} min, "
+          f"reserve {reserve_seconds / 60:.0f} min for critical tail")
     print("=" * 70)
 
-    summary = []
-    for name, runner in NEW_BOTS:
-        print(f"\n[{name}] starting")
+    for i, (name, runner) in enumerate(bots):
+        elapsed = clock() - t0
+        remaining = budget_seconds - elapsed
+        is_critical = name in critical
+        # The reserve exists to protect critical bots still ahead in the
+        # list. Once the last one has run (or none were selected, e.g.
+        # `--only hamilton_tax_delinquent`), the rest can use everything.
+        critical_ahead = any(n in critical for n, _ in bots[i + 1:])
+
+        if not is_critical and critical_ahead and remaining < reserve_seconds:
+            print(f"\n[{name}] SKIPPED (budget: {remaining / 60:.1f} min left, reserve {reserve_seconds / 60:.0f})")
+            summary["bots"].append({"bot": name, "status": "skipped_budget", "elapsed": 0.0})
+            _flush()
+            continue
+
+        cap = timeouts.get(name, default_timeout)
+        if remaining < cap:
+            cap = max(60, int(remaining))
+        bot_started = datetime.now(timezone.utc)
+        t1 = clock()
+        print(f"\n[{name}] starting (cap {cap}s, {remaining / 60:.1f} min budget left)")
+        result: Dict[str, Any]
         try:
-            result = runner() or {}
-            print(f"[{name}] -> {result.get('status')}: {result.get('staged', 0)} staged, "
+            with _Alarm(cap, name):
+                result = runner() or {}
+            status = result.get("status") or "?"
+            print(f"[{name}] -> {status}: {result.get('staged', 0)} staged, "
                   f"{result.get('duplicates', 0)} dupes, {result.get('fetched', 0)} fetched")
-            summary.append((name, result))
+        except BotTimeout as e:
+            # The bot's own run() either caught this (and recorded
+            # timed_out/failed itself) or it escaped. Either way close
+            # any `running` row it left behind.
+            status = "timed_out"
+            result = {"status": status, "error": str(e)}
+            print(f"[{name}] TIMED OUT: {e}")
+            close_open_runs(name, "timed_out", str(e), since=bot_started)
         except Exception as e:
+            status = "crashed"
+            result = {"status": status, "error": str(e)}
             print(f"[{name}] CRASHED: {e}")
             traceback.print_exc()
-            summary.append((name, {"status": "crashed", "error": str(e)}))
+            close_open_runs(name, "failed", f"{type(e).__name__}: {e}", since=bot_started)
 
+        summary["bots"].append({
+            "bot": name,
+            "status": status,
+            "elapsed": round(clock() - t1, 1),
+            "staged": result.get("staged", 0),
+            "fetched": result.get("fetched", 0),
+            "duplicates": result.get("duplicates", 0),
+            "error": (result.get("error") or None) and str(result.get("error"))[:500],
+        })
+        _flush()
+
+    ran = {b["bot"]: b["status"] for b in summary["bots"]}
+    summary["critical_incomplete"] = sorted(
+        n for n, _ in bots
+        if n in critical and ran.get(n) not in COMPLETE_STATUSES
+    )
+    summary["elapsed_seconds"] = round(clock() - t0, 1)
+    summary["finished_at"] = datetime.now(timezone.utc).isoformat()
+    _flush()
+    return summary
+
+
+def print_summary(summary: Dict[str, Any]) -> None:
     print("\n" + "=" * 70)
     print("Summary:")
     total_staged = 0
-    total_failed = 0
-    for name, r in summary:
-        status = r.get("status", "?")
-        staged = r.get("staged", 0)
-        total_staged += staged
-        if status in ("failed", "crashed"):
-            total_failed += 1
-        print(f"  {name:25s} {status:12s} staged={staged}")
-    print(f"\nTotal staged: {total_staged} · failed: {total_failed}")
-    return 0 if total_failed == 0 else 1
+    for b in summary["bots"]:
+        total_staged += b.get("staged") or 0
+        print(f"  {b['bot']:30s} {b['status']:16s} {b.get('elapsed', 0):7.1f}s  staged={b.get('staged', 0)}")
+    print(f"\nTotal staged: {total_staged} | elapsed {summary.get('elapsed_seconds', 0) / 60:.1f} min "
+          f"of {summary['budget_seconds'] / 60:.0f}")
+    if summary["critical_incomplete"]:
+        print(f"CRITICAL BOTS DID NOT COMPLETE: {summary['critical_incomplete']}")
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Run the staging scrapers under a wall-clock budget.")
+    ap.add_argument("--only", help="comma-separated bot names to run (bypasses heavy exclusion)")
+    ap.add_argument("--skip", help="comma-separated bot names to skip")
+    ap.add_argument("--include-heavy", action="store_true", help=f"also run {sorted(HEAVY_BOTS)}")
+    ap.add_argument("--budget-min", type=float,
+                    default=float(os.environ.get("FALCO_RUN_BUDGET_MIN", "75")),
+                    help="global wall-clock budget in minutes (env FALCO_RUN_BUDGET_MIN, default 75)")
+    ap.add_argument("--list", action="store_true", help="print the selected bot order and exit")
+    args = ap.parse_args(argv)
+
+    only = [x.strip() for x in args.only.split(",") if x.strip()] if args.only else None
+    skip = [x.strip() for x in args.skip.split(",") if x.strip()] if args.skip else None
+    bots = select_bots(only=only, skip=skip, include_heavy=args.include_heavy)
+
+    if args.list:
+        for n, _ in bots:
+            tag = " [critical]" if n in CRITICAL_BOTS else (" [heavy]" if n in HEAVY_BOTS else "")
+            print(f"{n}{tag}")
+        return 0
+
+    summary = run_pipeline(bots, args.budget_min * 60)
+    print_summary(summary)
+    # The job goes red only when a critical bot didn't complete. A source
+    # scraper failing is an alert (see _alert.py), not a red build; the
+    # BatchData bot fails every run by design while it's paused.
+    return 1 if summary["critical_incomplete"] else 0
 
 
 if __name__ == "__main__":

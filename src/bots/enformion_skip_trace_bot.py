@@ -351,7 +351,15 @@ class EnformionSkipTraceBot(BotBase):
             },
             timeout=REQUEST_TIMEOUT,
         )
-        resp.raise_for_status()
+        if not resp.ok:
+            # raise_for_status() drops the body, and the body is the only
+            # place Enformion says WHY (bad address vs. no credits). Six
+            # straight runs failed as "400 Bad Request" with no way to
+            # tell which from the health table.
+            raise requests.HTTPError(
+                f"{resp.status_code} {resp.reason} for {url}: {resp.text[:300]}",
+                response=resp,
+            )
         data = resp.json()
         # Response shape: person object with phones list. Tolerate both
         # {"person": {...}} and top-level shapes across API versions.

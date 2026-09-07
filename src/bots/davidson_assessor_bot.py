@@ -71,11 +71,14 @@ class DavidsonAssessorBot(BotBase):
     throttle_seconds = 1.5
     expected_min_yield = 1
 
-    # Cap per run — site is public but we should be polite.
-    # 800 default to drain the demolition-permit backlog (1,148 Davidson
-    # demo leads landed 2026-05-09 needing property_value enrichment).
-    # PADCTN tolerates ~1 req/sec; 800 leads = ~14 min of fetches per run.
-    max_leads_per_run = 800
+    # Cap per run. 800 x 1.5s throttle was 12 minutes a run, and the
+    # candidate query had no ordering and no memory of misses, so the
+    # same unmatchable demolition parcels were re-walked twice a day
+    # while leads with a sale date next month waited behind them. It was
+    # also the bot the job timeout kept killing (7 of 12 stuck rows).
+    # Now: 150 a run, soonest sale first, misses parked for 30 days.
+    max_leads_per_run = 150
+    not_found_retry_days = 30
 
     def scrape(self) -> List[LeadPayload]:
         """Enricher: returns no NEW leads, only updates existing rows.
@@ -131,6 +134,7 @@ class DavidsonAssessorBot(BotBase):
                         hit = self._lookup_by_parcel(permit_parcel)
                 if hit is None:
                     not_found += 1
+                    self._park_miss(client, row)
                     continue
                 if not hit.get("appraised") and not hit.get("parcel"):
                     skipped += 1
@@ -225,6 +229,8 @@ class DavidsonAssessorBot(BotBase):
         """Return dicts of leads from BOTH live + staging that look like
         Davidson County and lack property_value. Each row tagged with its
         source table so we update the right one."""
+        from datetime import datetime, timedelta, timezone
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.not_found_retry_days)).isoformat()
         out: List[Dict[str, Any]] = []
         for table in ("homeowner_requests", "homeowner_requests_staging"):
             try:
@@ -246,6 +252,15 @@ class DavidsonAssessorBot(BotBase):
                         "property_address.ilike.%joelton%"
                     )
                     .is_("property_value", "null")
+                    # Skip rows PADCTN already couldn't match, until the
+                    # retry window passes. Second .or_ is AND-ed with the
+                    # county one by PostgREST.
+                    .or_(
+                        "raw_payload->padctn.is.null,"
+                        f"raw_payload->padctn->>not_found_at.lt.{cutoff}"
+                    )
+                    # Soonest trustee sale first; no-date rows last.
+                    .order("trustee_sale_date", desc=False, nullsfirst=False)
                     .limit(2000)
                     .execute()
                 )
@@ -256,6 +271,23 @@ class DavidsonAssessorBot(BotBase):
             except Exception as e:
                 self.logger.warning(f"candidates query on {table} failed: {e}")
         return out
+
+    def _park_miss(self, client, row: Dict[str, Any]) -> None:
+        """Stamp raw_payload.padctn.not_found_at so _candidate_leads skips
+        this row for not_found_retry_days. Without this every miss was
+        retried every run, forever, at 1.5s each."""
+        from datetime import datetime, timezone
+        raw = row.get("raw_payload") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw["padctn"] = {
+            "status": "not_found",
+            "not_found_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            client.table(row["__table__"]).update({"raw_payload": raw}).eq("id", row["id"]).execute()
+        except Exception as e:
+            self.logger.warning(f"  park miss failed id={row['id']}: {e}")
 
     # ── Lookup ──────────────────────────────────────────────────────────────
 

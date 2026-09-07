@@ -11,7 +11,8 @@ on:
 
 # Don't cancel an in-progress run when a new one is queued; let the
 # earlier one complete and just queue the next. Previously concurrent
-# crons (May 3, May 4) auto-cancelled each other.
+# crons (May 3, May 4) auto-cancelled each other. weekly_heavy.yml
+# shares this group so it queues behind a daily run instead of racing it.
 concurrency:
   group: falco-daily-pipeline
   cancel-in-progress: false
@@ -19,6 +20,9 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    # The runner's own budget (FALCO_RUN_BUDGET_MIN) is 75 min with a 10
+    # min reserve for the critical tail, so this cap is a backstop, not
+    # the thing that ends the run. 9 of 20 runs were hitting it.
     timeout-minutes: 90
 
     env:
@@ -28,6 +32,12 @@ jobs:
       # read this live. Notion was removed 2026-04-29.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+      # ===== Runner budget =====
+      # Global wall clock for src.bots._run_new. Non-critical bots are
+      # skipped once less than the reserve remains; critical bots
+      # (auto_promoter, skip-trace, reaper, decision_engine) always run.
+      FALCO_RUN_BUDGET_MIN: "75"
 
       # ===== Optional enrichment APIs (currently unused in CI) =====
       # Stage 2/3 enrichment is gated off by default; runs via Vercel cron
@@ -39,6 +49,16 @@ jobs:
       # No-ops harmlessly until these secrets are set.
       FALCO_ENFORMION_AP_NAME: ${{ secrets.FALCO_ENFORMION_AP_NAME }}
       FALCO_ENFORMION_AP_PASSWORD: ${{ secrets.FALCO_ENFORMION_AP_PASSWORD }}
+
+      # ===== Register of Deeds subscriptions (mtn_lis_pendens_rod) =====
+      # Earliest foreclosure signal (60-120 days ahead). The bot reports
+      # skipped_no_creds until these are set; preflight lists them.
+      FALCO_DAVIDSON_ROD_USER: ${{ secrets.FALCO_DAVIDSON_ROD_USER }}
+      FALCO_DAVIDSON_ROD_PASSWORD: ${{ secrets.FALCO_DAVIDSON_ROD_PASSWORD }}
+      FALCO_WILLIAMSON_ROD_USER: ${{ secrets.FALCO_WILLIAMSON_ROD_USER }}
+      FALCO_WILLIAMSON_ROD_PASSWORD: ${{ secrets.FALCO_WILLIAMSON_ROD_PASSWORD }}
+      FALCO_HAMILTON_ROD_USER: ${{ secrets.FALCO_HAMILTON_ROD_USER }}
+      FALCO_HAMILTON_ROD_PASSWORD: ${{ secrets.FALCO_HAMILTON_ROD_PASSWORD }}
 
       # ===== Decision engine (LLM-based lead classifier) =====
       # decision_engine_bot needs OPENAI_API_KEY or it fails with
@@ -53,6 +73,12 @@ jobs:
       # at startup ("TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN not set").
       TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
       TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+
+      # ===== Alerting (src.bots._alert) =====
+      # Emails a report through Resend only when there is something to
+      # say. Without the key it prints to the job log and nothing else.
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      FALCO_ALERT_TO: ${{ secrets.FALCO_ALERT_TO }}
 
     steps:
       - name: Checkout repo
@@ -72,17 +98,22 @@ jobs:
           # installed" and we silently lose a lis pendens lead source.
           python -m playwright install --with-deps chromium
 
-      - name: Run Falco pipeline (bot scrapers \u2192 Supabase)
-        run: python -m src.run_all
-        continue-on-error: true   # don't let legacy bots block new ones
+      - name: Preflight (secrets, imports, Supabase reachable)
+        # Fails the job only when Supabase is unreachable. Everything
+        # else is reported and the run continues with that feature off.
+        run: python -m src.bots._preflight
 
-      - name: Run NEW staging scrapers (\u2192 homeowner_requests_staging)
-        # The new framework writes to a staging table for review at
-        # /admin/staging before promotion. Each scraper inherits health
-        # monitoring from BotBase \u2014 silent failures get caught in
-        # bot_run_health.
+      - name: Run Falco pipeline (legacy bot scrapers -> Supabase)
+        run: python -m src.run_all
+        continue-on-error: true   # legacy stage; ~30s; must not block the new one
+
+      - name: Run staging scrapers (-> homeowner_requests_staging)
+        # Exits non-zero only when a critical bot (auto_promoter and the
+        # chain feeding it) did not complete. Ordinary scraper failures
+        # go to the alert step instead of turning the build red. This
+        # step is deliberately NOT continue-on-error: a green check on a
+        # run where the promoter never fired was the whole problem.
         run: python -m src.bots._run_new
-        continue-on-error: true
 
       - name: Upload run status artifacts
         if: always()
@@ -90,25 +121,14 @@ jobs:
         with:
           name: falco-daily-status-${{ github.run_id }}
           path: |
+            out/reports/preflight.json
+            out/reports/new_bots_summary.json
             out/reports/latest_run_status.json
             out/reports/latest_run_summary.json
             out/reports/conversion_lane.json
           if-no-files-found: ignore
           retention-days: 30
 
-      - name: Post-run summary (queries bot_run_health for last 24h)
+      - name: Alert (bot_run_health last 30d + this run's summary)
         if: always()
-        run: |
-          python -c "
-          import os, urllib.request, json
-          url = os.environ['NEXT_PUBLIC_SUPABASE_URL'].rstrip('/') + '/rest/v1/bot_run_health?select=bot_source,status,fetched_count,staged_count,started_at,error_message&order=started_at.desc&limit=30'
-          req = urllib.request.Request(url, headers={
-              'apikey': os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-              'Authorization': 'Bearer ' + os.environ['SUPABASE_SERVICE_ROLE_KEY'],
-          })
-          rows = json.loads(urllib.request.urlopen(req, timeout=15).read())
-          print('=== Last 30 bot runs ===')
-          for r in rows:
-              when = (r.get('started_at') or '')[:16].replace('T',' ')
-              print(f\"  {when}  {r.get('bot_source','?'):>30}  {r.get('status','?'):>14}  fetched={r.get('fetched_count') or 0:>5}  staged={r.get('staged_count') or 0:>5}  {(r.get('error_message') or '')[:60]}\")
-          " || true
+        run: python -m src.bots._alert
