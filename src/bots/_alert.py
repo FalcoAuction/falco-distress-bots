@@ -90,16 +90,32 @@ def load_rows(days: int = LOOKBACK_DAYS) -> List[Dict[str, Any]]:
     client = _supabase()
     if client is None:
         raise RuntimeError("no supabase client (missing creds)")
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    res = (
-        client.table("bot_run_health")
-        .select("bot_source,status,staged_count,started_at,finished_at,error_message")
-        .gte("started_at", since)
-        .order("started_at", desc=True)
-        .limit(6000)
-        .execute()
-    )
-    return getattr(res, "data", None) or []
+    until = datetime.now(timezone.utc)
+    since = (until - timedelta(days=days)).isoformat()
+    rows: List[Dict[str, Any]] = []
+    # A large limit does not override the PostgREST response cap. Read
+    # every page, with a stable ordering and a fixed window for this run.
+    for _ in range(100):
+        res = (
+            client.table("bot_run_health")
+            .select("bot_source,status,staged_count,started_at,finished_at,error_message", count="exact")
+            .gte("started_at", since)
+            .lt("started_at", until.isoformat())
+            .order("started_at", desc=True)
+            .order("id", desc=True)
+            .range(len(rows), len(rows) + 499)
+            .execute()
+        )
+        page = getattr(res, "data", None) or []
+        rows.extend(page)
+        total = getattr(res, "count", None)
+        if total is not None and len(rows) >= total:
+            return rows
+        if not page:
+            if total is not None and len(rows) < total:
+                raise RuntimeError("bot_run_health history ended before the reported count")
+            return rows
+    raise RuntimeError("bot_run_health history exceeded 100 pages; refusing a partial alert report")
 
 
 def load_summary(path: Path = SUMMARY_PATH) -> Optional[Dict[str, Any]]:
