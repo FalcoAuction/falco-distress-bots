@@ -212,6 +212,10 @@ class WilliamsonAssessorBot(BotBase):
                     .select("id, property_address, county, owner_name_records, property_value, raw_payload")
                     .or_("county.eq.williamson,property_address.ilike.%franklin%,property_address.ilike.%brentwood%,property_address.ilike.%nolensville%,property_address.ilike.%spring hill%,property_address.ilike.%fairview%")
                     .is_("property_value", "null")
+                    # Live sale dates first; unordered, the cap filled
+                    # with whatever Postgres returned and upcoming sales
+                    # could wait indefinitely.
+                    .order("trustee_sale_date", desc=True, nullsfirst=False)
                     .limit(500)
                     .execute()
                 )

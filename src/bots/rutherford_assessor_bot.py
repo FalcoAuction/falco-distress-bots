@@ -188,6 +188,10 @@ class RutherfordAssessorBot(BotBase):
                     .select("id, property_address, county, owner_name_records, property_value, raw_payload")
                     .or_("county.eq.rutherford,property_address.ilike.%murfreesboro%,property_address.ilike.%smyrna%,property_address.ilike.%la vergne%,property_address.ilike.%lavergne%,property_address.ilike.%eagleville%")
                     .is_("property_value", "null")
+                    # Live sale dates first; unordered, the cap filled
+                    # with whatever Postgres returned and upcoming sales
+                    # could wait indefinitely.
+                    .order("trustee_sale_date", desc=True, nullsfirst=False)
                     .limit(500)
                     .execute()
                 )

@@ -259,8 +259,10 @@ class DavidsonAssessorBot(BotBase):
                         "raw_payload->padctn.is.null,"
                         f"raw_payload->padctn->>not_found_at.lt.{cutoff}"
                     )
-                    # Soonest trustee sale first; no-date rows last.
-                    .order("trustee_sale_date", desc=False, nullsfirst=False)
+                    # Latest sale date first, no-date rows last. Ascending
+                    # put sales from months ago ahead of next month's, so
+                    # live leads waited behind dead ones.
+                    .order("trustee_sale_date", desc=True, nullsfirst=False)
                     .limit(2000)
                     .execute()
                 )
