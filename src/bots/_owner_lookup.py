@@ -68,6 +68,7 @@ class PersonName:
     last: str
     middle_initial: Optional[str] = None
     suffix: Optional[str] = None
+    middle: Optional[str] = None  # full middle name when the notice spells it out
 
 
 def _tokens(value: str) -> List[str]:
@@ -95,13 +96,54 @@ def parse_person(name: str) -> Optional[PersonName]:
     first, last = toks[0], toks[-1]
     middle = toks[1:-1]
     mi = middle[0][0] if middle else None
-    return PersonName(first=first, last=last, middle_initial=mi, suffix=suffix)
+    full = middle[0] if middle and len(middle[0]) > 1 else None
+    return PersonName(first=first, last=last, middle_initial=mi, suffix=suffix, middle=full)
 
 
 def owner_segments(owner: str) -> List[List[str]]:
     """'SMITH HEATHER MARIE & SMITH JOHN MARTIN JR' -> [[SMITH,HEATHER,MARIE],[SMITH,JOHN,MARTIN,JR]]"""
     text = " ".join(_tokens(owner))
     return [_tokens(seg) for seg in _SEGMENT_SPLIT_RE.split(text) if seg.strip()]
+
+
+_CONNECTOR_RE = re.compile(r"\s*(&|\bAND\b|\bETUX\b|\bETVIR\b|\bETAL\b|\bET UX\b|\bET VIR\b|\bET AL\b|\bC/O\b)\s*")
+
+
+def person_segments(owner: str) -> List[List[str]]:
+    """owner_segments plus the surname a later co-owner shares with the lead
+    owner. Assessors write a spouse as "LANIER THOMAS E ETUX PAULETTE D" and
+    a co-owner as "GRIFFIN CARL W ETAL JEFFREY R GRIFFIN"; neither later
+    segment leads with a last name, so it gains the lead owner's surname:
+    [LANIER, PAULETTE, D] and [GRIFFIN, JEFFREY, R].
+
+    A later segment that is a full name under a different surname
+    ("TORRES PEARL R & GEORGE S WILCOX") does not inherit. An ETAL segment
+    inherits only when it ends in the lead surname; one or two words after
+    ETAL are as likely a different family as a first name. A C/O segment is
+    a mailing contact, not an owner, and is dropped."""
+    parts = _CONNECTOR_RE.split(" ".join(_tokens(owner)))
+    lead_seg = _tokens(parts[0])
+    out = [lead_seg] if lead_seg else []
+    lead = lead_seg[0] if lead_seg else None
+    for conn, seg in zip(parts[1::2], parts[2::2]):
+        toks = _tokens(seg)
+        # "HALEY KENNETH D AND WIFE KRISTINE M"
+        while toks and toks[0] in ("WIFE", "HUSBAND", "HUS", "HIS", "HER"):
+            toks = toks[1:]
+        if not toks or conn == "C/O":
+            continue
+        out.append(toks)
+        if not lead or toks[0] == lead:
+            continue
+        if len(toks) >= 2 and toks[-1] == lead:
+            out.append([lead] + toks[:-1])
+        elif conn.replace(" ", "") == "ETAL":
+            continue
+        elif len(toks) >= 3 and len(toks[-1]) > 1 and toks[-1] not in SUFFIXES:
+            continue
+        else:
+            out.append([lead] + toks)
+    return out
 
 
 def segment_person(person: PersonName, seg: List[str]) -> Optional[tuple]:
@@ -112,13 +154,24 @@ def segment_person(person: PersonName, seg: List[str]) -> Optional[tuple]:
     if _ENTITY_RE.search(" ".join(seg)):
         return None
     rest = seg[2:]
+    # A lone "V" after the first name is a middle initial, not "the fifth".
+    if rest == ["V"]:
+        rest = ["V."]
     seg_suffix = next((t for t in rest if t in SUFFIXES), None)
     middle = [t for t in rest if t not in SUFFIXES]
     seg_mi = middle[0][0] if middle else None
     if person.middle_initial and seg_mi and person.middle_initial != seg_mi:
-        return None
+        # A spelled-out middle name (often a maiden name) anywhere in the
+        # record still confirms: "WOOD PAMELA MARIE HOBBS" is Pamela Hobbs Wood.
+        if not (person.middle and person.middle in middle):
+            return None
+        seg_mi = person.middle_initial
+    # Suffixes must agree, except a "Sr." decedent recorded without one: the
+    # father is routinely deeded plain. A "Jr." on either side alone is a
+    # different person (father or son).
     if (person.suffix or seg_suffix) and person.suffix != seg_suffix:
-        return None
+        if not (person.suffix == "SR" and seg_suffix is None):
+            return None
     return (seg[0], seg[1], seg_mi, seg_suffix)
 
 
@@ -164,7 +217,7 @@ def choose(person: PersonName, candidates: List[Candidate]) -> MatchResult:
     """
     hits: List[tuple] = []
     for cand in candidates:
-        people = {h for h in (segment_person(person, seg) for seg in owner_segments(cand.owner)) if h}
+        people = {h for h in (segment_person(person, seg) for seg in person_segments(cand.owner)) if h}
         if people:
             hits.append((cand, people))
     if not hits:
@@ -181,6 +234,17 @@ def choose(person: PersonName, candidates: List[Candidate]) -> MatchResult:
     if len(matched) > MAX_NAME_ONLY_PARCELS:
         return MatchResult("ambiguous", matched, keys)
     return MatchResult("matched", matched, keys, confidence="name_only")
+
+
+def owner_agrees(decedent: str, owner: Optional[str]) -> bool:
+    """True when an assessor owner string names the decedent under the same
+    rules as choose(): last+first lead a segment, middle initial and suffix
+    do not conflict, no entity. Used to check single hits from Davidson's
+    PADCTN and statewide TPAD, which search by last+first only."""
+    person = parse_person(decedent)
+    if not person or not owner:
+        return False
+    return any(segment_person(person, seg) for seg in person_segments(owner))
 
 
 # ── Adapters ──────────────────────────────────────────────────────────────

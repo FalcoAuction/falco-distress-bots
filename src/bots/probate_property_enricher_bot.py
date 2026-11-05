@@ -191,12 +191,22 @@ class ProbatePropertyEnricherBot(BotBase):
                         self._park(client, row, "ambiguous")
                         continue
                     hit = results[0]
+                    if not owner_lookup.owner_agrees(decedent, hit.get("owner")):
+                        # PADCTN searches last+first only; "TATE, NORMA D." is
+                        # not "Norma Jean Tate".
+                        not_found += 1
+                        self._park(client, row, "name_conflict", detail={"query": query, "owner": hit.get("owner")})
+                        continue
                 elif county_key and county_key not in TPAD_EXTERNAL_COUNTIES:
                     tq = _decedent_to_tpad_query(decedent)
                     hit = self._tpad_lookup(county_key, tq) if tq else None
                     if hit is None:
                         not_found += 1
                         self._park(client, row, "not_found")
+                        continue
+                    if not owner_lookup.owner_agrees(decedent, hit.get("owner")):
+                        not_found += 1
+                        self._park(client, row, "name_conflict", detail={"query": tq, "owner": hit.get("owner")})
                         continue
                 elif county_key in owner_lookup.supported_counties():
                     # Montgomery, Rutherford, Williamson (and Shelby when enabled): not in TPAD,
@@ -237,10 +247,8 @@ class ProbatePropertyEnricherBot(BotBase):
                 if hit.get("property_address") and not row.get("property_address"):
                     update["property_address"] = hit["property_address"]
                 # Authoritative — override any prior HMDA-anchored phantom.
-                # homeowner_requests_staging has no property_value_source
-                # column (only the live table does); writing it made every
-                # valued match fail its update. The source is recorded in
-                # raw_payload['value_source'] and carried on promotion.
+                # The source goes in property_value_source (staging column
+                # added 2026-11-05) and raw_payload['value_source'].
                 value_source = None
                 if hit.get("appraised"):
                     update["property_value"] = int(round(float(hit["appraised"])))
@@ -264,6 +272,7 @@ class ProbatePropertyEnricherBot(BotBase):
                     value_source = f"{county_key}_assessor_owner_match" if value_source else None
                 if value_source:
                     existing_raw["value_source"] = value_source
+                    update["property_value_source"] = value_source
                 update["raw_payload"] = existing_raw
 
                 if not update:

@@ -79,6 +79,37 @@ class ChooseTests(unittest.TestCase):
         self.assertEqual(self.match("Example John", "EXAMPLE JOHN").status, "not_found")
 
 
+class OwnerAgreesTests(unittest.TestCase):
+    def test_single_hit_checks(self):
+        self.assertFalse(ol.owner_agrees("Norma Jean Example", "EXAMPLE, NORMA D."))
+        self.assertTrue(ol.owner_agrees("Norma Jean Example", "EXAMPLE, NORMA J."))
+        self.assertTrue(ol.owner_agrees("Norma Jean Example", "EXAMPLE, NORMA"))
+        self.assertTrue(ol.owner_agrees("Nestor Joseph Example Jr.", "EXAMPLE, NESTOR JOSEPH JR."))
+        self.assertFalse(ol.owner_agrees("Nestor Joseph Example Jr.", "EXAMPLE, NESTOR JOSEPH"))
+        self.assertTrue(ol.owner_agrees("Gregory Garland Example", "EXAMPLE, GREGORY G. & AMY M."))
+        self.assertFalse(ol.owner_agrees("Gregory Example", "EXAMPLE GREGORY FAMILY TRUST"))
+        self.assertFalse(ol.owner_agrees("Gregory Example", None))
+
+    def test_spouse_coowner_maiden_and_senior(self):
+        agrees = ol.owner_agrees
+        self.assertTrue(agrees("Paulette D Example", "EXAMPLE THOMAS E ET UX PAULETTE D"))
+        self.assertTrue(agrees("Cathy L. Example", "EXAMPLE JOHN N ETUX CATHY L"))
+        self.assertTrue(agrees("Wanda K. Example", "EXAMPLE ERNEST CLAYTON & WANDA"))
+        self.assertTrue(agrees("Brenda Example", "EXAMPLE DAVID C ETUX BRENDA M C/O PAUL EXAMPLE"))
+        self.assertFalse(agrees("Paul Example", "EXAMPLE DAVID C ETUX BRENDA M C/O PAUL EXAMPLE"))
+        self.assertTrue(agrees("Jeffrey Ray Example", "EXAMPLE CARL W ETAL JEFFREY R EXAMPLE"))
+        self.assertTrue(agrees("Duane Keith Example", "EXAMPLE BRADLEY K ETAL DUANE EXAMPLE"))
+        self.assertFalse(agrees("Mary Example", "EXAMPLE JOHN ETAL MARY OTHER"))
+        self.assertFalse(agrees("George S. Example", "EXAMPLE PEARL R & GEORGE S OTHER"))
+        self.assertFalse(agrees("Patricia Jannette Example", "EXAMPLE CHARLES D ETUX PATRICIA ANN"))
+        self.assertTrue(agrees("Pamela Hobbs Example", "EXAMPLE, PAMELA MARIE HOBBS"))
+        self.assertFalse(agrees("Pamela Jones Example", "EXAMPLE, PAMELA MARIE HOBBS"))
+        self.assertTrue(agrees("Ronald Dale Example Sr.", "EXAMPLE, RONALD DALE ETUX"))
+        self.assertFalse(agrees("Joseph Brown Example", "EXAMPLE, JOSEPH B., JR"))
+        self.assertFalse(agrees("Charles James Example, Jr.", "EXAMPLE CHARLES J"))
+        self.assertTrue(agrees("Mary Virginia Example", "EXAMPLE  MARY V "))
+        self.assertTrue(agrees("Kristine Example", "EXAMPLE KENNETH D AND WIFE KRISTINE M"))
+
 class ShelbyParsingTests(unittest.TestCase):
     RESULTS = ("<table><tr><th>Parcel ID</th><th>Owner Name</th><th>Property Location</th><th>Link</th></tr>"
                "<tr><td>011111  00001</td><td>EXAMPLE NORMA J</td><td>1 EXAMPLE AVE</td><td><a>view</a></td></tr>"
