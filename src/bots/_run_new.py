@@ -65,6 +65,9 @@ from . import courtlistener_bankruptcy_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import court_notices_bot
+from . import main_street_media_bot
+from . import warn_notices_bot
+from . import davidson_tax_sale_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
 from . import davidson_demolition_bot
@@ -151,6 +154,9 @@ NEW_BOTS = [
     # behind a CAPTCHA. Runs before probate_property_enricher, which matches
     # the decedent to parcels.
     ("court_notices", court_notices_bot.run),
+    ("main_street_media", main_street_media_bot.run),
+    ("warn_notices", warn_notices_bot.run),
+    ("davidson_tax_sale", davidson_tax_sale_bot.run),
     # Middle TN secondary cities — only Mt Juliet has a public scrapable
     # code-enforcement feed (SeeClickFix). Other 5 cities documented as
     # no-public-access in the bot file. New 2026-05-08.

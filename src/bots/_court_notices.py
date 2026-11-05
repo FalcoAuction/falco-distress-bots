@@ -90,8 +90,17 @@ def classify(lines: List[str]) -> str:
     if "JUVENILE COURT" in upper or "CHILDREN'S SERVICES" in upper:
         return KIND_OTHER
     if _SALE_RE.search(text):
+        # A substitute trustee's sale under a deed of trust is a foreclosure,
+        # not a court-ordered sale, even though it says "sale of real estate".
+        if "DEED OF TRUST" in upper and not _JUDICIAL_RE.search(text):
+            return KIND_OTHER
         return KIND_COURT_SALE
     return KIND_OTHER
+
+
+_JUDICIAL_RE = re.compile(
+    r"\bpartition\b|order of sale|judicial sale|clerk and master|special (?:master|commissioner)|chancery court|petition to sell",
+    re.I)
 
 
 # ── Field extraction ───────────────────────────────────────────────────────
@@ -110,7 +119,7 @@ _DIED_RE = re.compile(r"who died(?: on)?\s+([A-Za-z]{3,9}\.? \d{1,2},? \d{4}|\d{
 _LETTERS_RE = re.compile(r"on the (\d{1,2})(?:st|nd|rd|th)? day of ([A-Za-z]+),?\s*(\d{4})?", re.I)
 _LETTERS_TYPE_RE = re.compile(r"Letters\s+(?:of\s+)?(Testamentary|Administration|Authority)", re.I)
 _ROLE_RE = re.compile(
-    r"^(?:co-?)?(executor|executrix|executors|administrator|administratrix|administrators|personal representative)",
+    r"^(?:co[- ]?)?(executor|executrix|executors|administrator|administratrix|administrators|personal representative)",
     re.I,
 )
 _ROLE_TAIL_RE = re.compile(
@@ -127,7 +136,8 @@ _ATTORNEY_FOR_PERSON_RE = re.compile(
 # A docket line: "Case No.: MC CH CV PB-26-417", "Probate Docket No.: P-4289".
 _DOCKET_LINE_RE = re.compile(r"^(?:Probate\s+)?(?:Docket|Case|File)\s*(?:No\.?|Number|#)?\s*:?\s*([A-Za-z0-9][A-Za-z0-9 \-]{2,40})$", re.I)
 _ATTORNEY_AFTER_RE = re.compile(r"^Attorney for (?:the )?(?:Personal Representative|Estate|Executor|Administrator)", re.I)
-_CITY_ZIP_RE = re.compile(r"^[A-Za-z .']+,\s*(?:TN|Tennessee|[A-Z]{2})\.?\s+\d{5}(?:-\d{4})?$")
+# "Dickson, TN 37055" and, in Main Street Media papers, "Dickson TN 37055".
+_CITY_ZIP_RE = re.compile(r"^[A-Za-z .']+?,?\s+(?:TN|Tennessee|[A-Z]{2})\.?,?\s+\d{5}(?:-\d{4})?$")
 _STREET_RE = re.compile(r"^\d+[A-Za-z]?\s+\S+|^(?:P\.?\s?O\.?\s+Box|Suite|Ste\.?|Room)\b", re.I)
 _STOP_RE = re.compile(r"clerk|deputy|^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d", re.I)
 _SIGNED_RE = re.compile(r"^This\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?\s+day of", re.I)
@@ -145,7 +155,7 @@ def _county(text: str) -> Optional[str]:
     raw = _first(_COUNTY_RES, text)
     if not raw:
         return None
-    raw = re.sub(r"^(?:the|of)\s+", "", raw.strip(), flags=re.I)
+    raw = re.sub(r"^(?:(?:the|of|for)\s+)+", "", raw.strip(), flags=re.I)
     return raw.lower()
 
 
@@ -184,7 +194,11 @@ def _signature_block(lines: List[str]) -> List[str]:
         if _STOP_RE.search(line) and not _ATTORNEY_MARK_RE.match(line):
             # Davidson signs as "JOSEPH P. DAY" / "Probate Court Clerk": the
             # name line before a clerk title is the clerk, not a signer.
-            if re.search(r"clerk", line, re.I) and block and not _is_address(block[-1])                     and not re.match(r"^attorney", block[-1], re.I):
+            # Robertson prints the clerk's name on the title line itself
+            # ("Jon T Graves, Clerk & Master"); then the line above is a signer.
+            clerk_named_here = re.match(r"^[^,]+,\s*(?:deputy\s+)?clerk", line, re.I)
+            if re.search(r"clerk", line, re.I) and block and not clerk_named_here and not _is_address(block[-1]) \
+                    and not re.match(r"^attorney", block[-1], re.I) and not re.search(r",\s*attorney\b", block[-1], re.I):
                 block.pop()
             break
         block.append(line)
@@ -240,6 +254,13 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             pending_address.clear()
             reps.append({"name": _name(for_person.group(1)), "role": role_name(for_person.group(2)), "address": []})
             continue
+        # Robertson: "Rebecca A Bell-Houchin, Attorney" on one line.
+        trailing = re.match(r"^(.+?),\s*Attorney(?:\s+for\b.*)?$", line, re.I)
+        if trailing and not _ATTORNEY_FOR_PERSON_RE.match(line):
+            if pending_names:
+                flush_reps()
+            attorney["names"].append(_name(trailing.group(1)))
+            continue
         inline = _ATTORNEY_INLINE_RE.match(line)
         if inline and not _ATTORNEY_AFTER_RE.match(line):
             if pending_names:
@@ -257,6 +278,15 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             pending_address.clear()
             continue
         if _ATTORNEY_MARK_RE.match(line):
+            if ":" not in line and pending_names and pending_address:
+                # Main Street Media papers: "Brian Ragan" / street / city /
+                # "Attorney". A bare label after a name and address names
+                # that block, like Davidson's "Attorney for ..." label.
+                attorney["names"].extend(_name(n) for n in pending_names)
+                attorney["address"].extend(pending_address)
+                pending_names.clear()
+                pending_address.clear()
+                continue
             if pending_names:
                 flush_reps()
             mode = "attorney"

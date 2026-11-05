@@ -56,12 +56,13 @@ def lead_key(kind: str, county: Optional[str], docket: Optional[str], notice_id:
 
 
 def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
-               row: Dict[str, Any]) -> Optional[LeadPayload]:
+               row: Dict[str, Any], source_url: Optional[str] = None) -> Optional[LeadPayload]:
     kind = cn.classify(row["lines"])
     if kind == cn.KIND_OTHER:
         return None
-    date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-    source_url = f"{base}/Search/Details/ViewNotice.aspx?id={row['notice_id']}&date={date_param}"
+    if source_url is None:
+        date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
+        source_url = f"{base}/Search/Details/ViewNotice.aspx?id={row['notice_id']}&date={date_param}"
     raw: Dict[str, Any] = {
         "publication": publication,
         "notice_id": row["notice_id"],
