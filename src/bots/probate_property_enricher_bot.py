@@ -33,7 +33,7 @@ from __future__ import annotations
 import re
 import sys
 import traceback as tb
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
@@ -95,6 +95,9 @@ class ProbatePropertyEnricherBot(BotBase):
     expected_min_yield = 1
 
     max_leads_per_run = 100
+    # A miss (not found, ambiguous, unsupported county) is retried after this
+    # many days: estates get recorded and assessor rolls update, but not daily.
+    retry_after_days = 30
 
     # Lazily built so a Davidson-only run never opens a TPAD session.
     _tpad_sess = None
@@ -141,6 +144,7 @@ class ProbatePropertyEnricherBot(BotBase):
                 query = _decedent_to_owner_query(decedent)
                 if not query:
                     skipped += 1
+                    self._park(client, row, "no_query")
                     continue
                 # Route by county: Davidson has its own assessor portal,
                 # the other 85 TPAD counties go through the statewide
@@ -153,9 +157,11 @@ class ProbatePropertyEnricherBot(BotBase):
                     results = self._lookup_owner(query)
                     if not results:
                         not_found += 1
+                        self._park(client, row, "not_found")
                         continue
                     if len(results) > 1:
                         ambiguous += 1
+                        self._park(client, row, "ambiguous")
                         continue
                     hit = results[0]
                 elif county_key and county_key not in TPAD_EXTERNAL_COUNTIES:
@@ -163,9 +169,11 @@ class ProbatePropertyEnricherBot(BotBase):
                     hit = self._tpad_lookup(county_key, tq) if tq else None
                     if hit is None:
                         not_found += 1
+                        self._park(client, row, "not_found")
                         continue
                 else:
                     unsupported += 1
+                    self._park(client, row, "unsupported_county")
                     continue
                 update: Dict[str, Any] = {}
                 if hit.get("property_address") and not row.get("property_address"):
@@ -237,6 +245,19 @@ class ProbatePropertyEnricherBot(BotBase):
 
     # ── Internal ────────────────────────────────────────────────────────────
 
+    def _park(self, client, row: Dict[str, Any], result: str) -> None:
+        """Record an unsuccessful match so _candidates skips the row until
+        retry_after_days pass. Best-effort: a failed write only means the row
+        is tried again next run."""
+        raw = row.get("raw_payload") or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        raw["probate_match_attempt"] = {"at": datetime.now(timezone.utc).isoformat(), "result": result}
+        try:
+            client.table("homeowner_requests_staging").update({"raw_payload": raw}).eq("id", row["id"]).execute()
+        except Exception as e:
+            self.logger.warning(f"  park failed id={row['id']}: {e}")
+
     def _tpad_lookup(self, county_key: str, query: str) -> Optional[Dict[str, Any]]:
         """Owner-name lookup against the TN Comptroller's statewide TPAD.
 
@@ -283,6 +304,7 @@ class ProbatePropertyEnricherBot(BotBase):
         return out
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retry_after_days)).isoformat()
         try:
             q = (
                 client.table("homeowner_requests_staging")
@@ -294,6 +316,15 @@ class ProbatePropertyEnricherBot(BotBase):
                 # a property, so without a lookup the lead is just a name.
                 # TPAD covers 86 of 95 counties off the same owner-name key.
                 .is_("property_address", "null")
+                # Skip rows already tried within the retry window, newest
+                # notices first. Unordered and with no memory of misses, the
+                # bot re-walked the same 2,000 of ~8,400 rows every run and
+                # rarely reached a new estate.
+                .or_(
+                    "raw_payload->probate_match_attempt.is.null,"
+                    f"raw_payload->probate_match_attempt->>at.lt.{cutoff}"
+                )
+                .order("staged_at", desc=True)
                 .limit(2000)
                 .execute()
             )
