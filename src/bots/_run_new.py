@@ -78,6 +78,7 @@ from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
 from . import probate_property_enricher_bot
+from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
 from . import xref_avm_enricher_bot
@@ -181,6 +182,7 @@ NEW_BOTS = [
     # write defensible values; the order was inverted vs the intended
     # chain HMDA -> Ledger -> amortizer -> estimator.
     ("probate_property_enricher", probate_property_enricher_bot.run),
+    ("asset_profile", asset_profile_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
     ("xref_avm_enricher", xref_avm_enricher_bot.run),

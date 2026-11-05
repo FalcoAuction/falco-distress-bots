@@ -41,6 +41,7 @@ from bs4 import BeautifulSoup
 from ._base import BotBase, _supabase
 from . import _owner_lookup as owner_lookup
 from . import _court_notices as court_notices
+from ._asset_profile import asset_profile
 from .tpad_enricher_bot import (
     COUNTY_CODES as TPAD_COUNTY_CODES,
     EXTERNAL_COUNTIES as TPAD_EXTERNAL_COUNTIES,
@@ -182,21 +183,38 @@ class ProbatePropertyEnricherBot(BotBase):
 
                 if county_key == "davidson":
                     results = self._lookup_owner(query)
-                    if not results:
-                        not_found += 1
-                        self._park(client, row, "not_found")
+                    if results is None:
+                        not_found += 1   # portal error: retry next run, do not park
                         continue
-                    if len(results) > 1:
-                        ambiguous += 1
-                        self._park(client, row, "ambiguous")
+                    # PADCTN searches last+first only. Every record goes through
+                    # the shared matcher: "TATE, NORMA D." is not "Norma Jean
+                    # Tate", and two parcels owned by the same person are one
+                    # estate (previously any second record parked as ambiguous).
+                    cands = [owner_lookup.Candidate(
+                        owner=r.get("owner") or "", address=r.get("property_address"), parcel=r.get("parcel"),
+                        value=r.get("appraised"), acres=r.get("acres"), property_class=r.get("land_use"),
+                        extra={"account_id": r.get("account_id")}) for r in results]
+                    result = owner_lookup.match_candidates(decedent, cands, query)
+                    status = result["status"]
+                    if status != "matched":
+                        if status == "ambiguous":
+                            ambiguous += 1
+                        else:
+                            not_found += 1
+                        self._park(client, row, "name_conflict" if status == "not_found" and results else status,
+                                   detail={"query": query, "owners": [c.owner for c in cands][:10]})
                         continue
-                    hit = results[0]
-                    if not owner_lookup.owner_agrees(decedent, hit.get("owner")):
-                        # PADCTN searches last+first only; "TATE, NORMA D." is
-                        # not "Norma Jean Tate".
-                        not_found += 1
-                        self._park(client, row, "name_conflict", detail={"query": query, "owner": hit.get("owner")})
-                        continue
+                    primary = result["primary"] or {}
+                    hit = {
+                        "property_address": primary.get("address"),
+                        "appraised": primary.get("value"),
+                        "parcel": primary.get("parcel"),
+                        "owner": primary.get("owner"),
+                        "land_use": primary.get("class"),
+                        "acres": primary.get("acres"),
+                        "account_id": (primary.get("extra") or {}).get("account_id"),
+                        "owner_match": {**result, "county": "davidson"},
+                    }
                 elif county_key and county_key not in TPAD_EXTERNAL_COUNTIES:
                     tq = _decedent_to_tpad_query(decedent)
                     hit = self._tpad_lookup(county_key, tq) if tq else None
@@ -264,6 +282,7 @@ class ProbatePropertyEnricherBot(BotBase):
                     "parcel": hit.get("parcel"),
                     "appraised": hit.get("appraised"),
                     "land_use": hit.get("land_use"),
+                    "acres": hit.get("acres"),
                     "owner": hit.get("owner"),
                     "property_address": hit.get("property_address"),
                 }
@@ -273,6 +292,9 @@ class ProbatePropertyEnricherBot(BotBase):
                 if value_source:
                     existing_raw["value_source"] = value_source
                     update["property_value_source"] = value_source
+                profile = asset_profile(existing_raw)
+                if profile:
+                    existing_raw["asset_profile"] = profile
                 update["raw_payload"] = existing_raw
 
                 if not update:
@@ -444,6 +466,9 @@ class ProbatePropertyEnricherBot(BotBase):
             m = LAND_USE_RE.search(text)
             if m:
                 rec["land_use"] = m.group(1).strip()
+            m = LAND_SIZE_RE.search(text)
+            if m:
+                rec["acres"] = float(m.group(1))
             m = PARCEL_RE.search(text)
             if m:
                 rec["parcel"] = m.group(1).strip()

@@ -461,8 +461,23 @@ def lookup(fetch: Fetch, county: str, decedent: str) -> Dict[str, Any]:
         for cand in result.parcels:
             if cand.value is None:
                 cand.value = VALUE_FETCHERS[county](fetch, cand)
+    return result_dict(result, query)
+
+
+def _cand_dict(c: Candidate) -> Dict[str, Any]:
+    return {"owner": c.owner, "address": c.address, "parcel": c.parcel, "value": c.value,
+            "acres": c.acres, "class": c.property_class, **({"extra": c.extra} if c.extra else {})}
+
+
+def result_dict(result: MatchResult, query: str) -> Dict[str, Any]:
     primary = result.primary if result.status == "matched" else None
-    as_dict = lambda c: {"owner": c.owner, "address": c.address, "parcel": c.parcel, "value": c.value,
-                         "acres": c.acres, "class": c.property_class}
     return {"status": result.status, "query": query, "owner_keys": result.owner_keys, "confidence": result.confidence,
-            "parcels": [as_dict(c) for c in result.parcels], "primary": as_dict(primary) if primary else None}
+            "parcels": [_cand_dict(c) for c in result.parcels], "primary": _cand_dict(primary) if primary else None}
+
+
+def match_candidates(decedent: str, candidates: List[Candidate], query: str) -> Dict[str, Any]:
+    """choose() for a searcher outside this module (Davidson's PADCTN)."""
+    person = parse_person(decedent)
+    if person is None:
+        return {"status": "unparseable_name"}
+    return result_dict(choose(person, candidates), query)
