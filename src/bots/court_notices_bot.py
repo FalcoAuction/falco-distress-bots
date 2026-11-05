@@ -33,11 +33,6 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from ._base import BotBase, LeadPayload
 from . import _court_notices as cn
 
-# Same platform, same paths. Browser UA: these hosts sit behind the same
-# kind of datacenter-IP filtering that blocked mackie_wolf in CI.
-BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-              "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
-
 PUBLICATIONS: List[Dict[str, Any]] = [
     # The Ledger publishes notices weekly, on Fridays.
     {"key": "nashville_ledger", "base": "https://www.tnledger.com", "weekdays": {4}, "lookback_days": 21},
@@ -113,7 +108,6 @@ class CourtNoticesBot(BotBase):
     description = "Probate and court-ordered-sale notices from the Nashville Ledger and Memphis Daily News"
     throttle_seconds = 1.5
     expected_min_yield = 1
-    user_agent = BROWSER_UA
     # Weekly Ledger editions repeat for two weeks and estates rarely change,
     # so identical output across a few runs is normal; flag only a long freeze.
     frozen_after_runs = 10

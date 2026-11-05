@@ -39,6 +39,8 @@ from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, _supabase
+from . import _owner_lookup as owner_lookup
+from . import _court_notices as court_notices
 from .tpad_enricher_bot import (
     COUNTY_CODES as TPAD_COUNTY_CODES,
     EXTERNAL_COUNTIES as TPAD_EXTERNAL_COUNTIES,
@@ -51,6 +53,25 @@ from .davidson_assessor_bot import (
     PADCTN_HOME, PADCTN_QUICKSEARCH, PADCTN_SEARCH,
     ACCOUNT_RE, APPRAISED_RE, LAND_SIZE_RE, LAND_USE_RE, PARCEL_RE,
 )
+
+
+def _decedent_from_payload(raw: Any) -> str:
+    """Older tn_public_notice probate rows often left full_name empty even
+    though the excerpt reads "Estate of NAME, Deceased". Recover it from the
+    structured court notice or the excerpt; empty string when absent."""
+    if not isinstance(raw, dict):
+        return ""
+    notice = raw.get("court_notice")
+    if isinstance(notice, dict) and notice.get("decedent"):
+        return str(notice["decedent"])
+    excerpt = raw.get("excerpt") or ""
+    if not excerpt:
+        return ""
+    found = court_notices.extract_probate([excerpt]).get("decedent") or ""
+    # Excerpts are truncated; a "name" that runs into notice boilerplate is junk.
+    if len(found.split()) > 5 or re.search(r"notice|letters|hereby|court", found, re.I):
+        return ""
+    return found
 
 
 def _decedent_to_owner_query(decedent: str) -> Optional[str]:
@@ -95,6 +116,12 @@ class ProbatePropertyEnricherBot(BotBase):
     expected_min_yield = 1
 
     max_leads_per_run = 100
+    def __init__(self):
+        super().__init__()
+        # Shelby's Assessor server needs TLS legacy renegotiation; scope the
+        # adapter to that host only.
+        self.session.mount(owner_lookup.SHELBY_BASE, owner_lookup.LegacyTLSAdapter())
+
     # A miss (not found, ambiguous, unsupported county) is retried after this
     # many days: estates get recorded and assessor rolls update, but not daily.
     retry_after_days = 30
@@ -140,7 +167,7 @@ class ProbatePropertyEnricherBot(BotBase):
             )
 
             for row in candidates[:self.max_leads_per_run]:
-                decedent = row.get("full_name") or row.get("owner_name_records") or ""
+                decedent = row.get("full_name") or row.get("owner_name_records") or _decedent_from_payload(row.get("raw_payload"))
                 query = _decedent_to_owner_query(decedent)
                 if not query:
                     skipped += 1
@@ -171,6 +198,37 @@ class ProbatePropertyEnricherBot(BotBase):
                         not_found += 1
                         self._park(client, row, "not_found")
                         continue
+                elif county_key in owner_lookup.supported_counties():
+                    # Montgomery, Rutherford, Williamson (and Shelby when enabled): not in TPAD,
+                    # searched by owner name on each county's own system.
+                    result = owner_lookup.lookup(self.fetch, county_key, decedent)
+                    status = result["status"]
+                    if status == "source_error":
+                        # The county system was down or changed; do not park,
+                        # so the next run retries.
+                        not_found += 1
+                        continue
+                    if status != "matched":
+                        if status == "ambiguous":
+                            ambiguous += 1
+                        else:
+                            not_found += 1
+                        self._park(client, row, status, detail={k: result.get(k) for k in ("query", "owner_keys")})
+                        continue
+                    primary = result["primary"] or {}
+                    address = primary.get("address")
+                    # Montgomery and Shelby give the street only; name the
+                    # county rather than guess a city.
+                    if address and "," not in address:
+                        address = f"{address}, {county_key.title()} County, TN"
+                    hit = {
+                        "property_address": address,
+                        "appraised": primary.get("value"),
+                        "parcel": primary.get("parcel"),
+                        "owner": ", ".join(result.get("owner_keys") or []) or None,
+                        "land_use": primary.get("class"),
+                        "owner_match": {**result, "county": county_key},
+                    }
                 else:
                     unsupported += 1
                     self._park(client, row, "unsupported_county")
@@ -179,9 +237,14 @@ class ProbatePropertyEnricherBot(BotBase):
                 if hit.get("property_address") and not row.get("property_address"):
                     update["property_address"] = hit["property_address"]
                 # Authoritative — override any prior HMDA-anchored phantom.
+                # homeowner_requests_staging has no property_value_source
+                # column (only the live table does); writing it made every
+                # valued match fail its update. The source is recorded in
+                # raw_payload['value_source'] and carried on promotion.
+                value_source = None
                 if hit.get("appraised"):
                     update["property_value"] = int(round(float(hit["appraised"])))
-                    update["property_value_source"] = "probate_assessor"
+                    value_source = "probate_assessor"
 
                 # Merge into raw_payload for audit
                 existing_raw = row.get("raw_payload") or {}
@@ -196,6 +259,11 @@ class ProbatePropertyEnricherBot(BotBase):
                     "owner": hit.get("owner"),
                     "property_address": hit.get("property_address"),
                 }
+                if hit.get("owner_match"):
+                    existing_raw["owner_match"] = hit["owner_match"]
+                    value_source = f"{county_key}_assessor_owner_match" if value_source else None
+                if value_source:
+                    existing_raw["value_source"] = value_source
                 update["raw_payload"] = existing_raw
 
                 if not update:
@@ -245,14 +313,14 @@ class ProbatePropertyEnricherBot(BotBase):
 
     # ── Internal ────────────────────────────────────────────────────────────
 
-    def _park(self, client, row: Dict[str, Any], result: str) -> None:
+    def _park(self, client, row: Dict[str, Any], result: str, detail: Optional[Dict[str, Any]] = None) -> None:
         """Record an unsuccessful match so _candidates skips the row until
         retry_after_days pass. Best-effort: a failed write only means the row
         is tried again next run."""
         raw = row.get("raw_payload") or {}
         if not isinstance(raw, dict):
             raw = {}
-        raw["probate_match_attempt"] = {"at": datetime.now(timezone.utc).isoformat(), "result": result}
+        raw["probate_match_attempt"] = {"at": datetime.now(timezone.utc).isoformat(), "result": result, **(detail or {})}
         try:
             client.table("homeowner_requests_staging").update({"raw_payload": raw}).eq("id", row["id"]).execute()
         except Exception as e:
