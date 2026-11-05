@@ -37,6 +37,7 @@ except ImportError:
     pass
 
 from ._base import BotTimeout, close_open_runs
+from ._paid import PAID_BOTS, paid_data_enabled
 
 from . import hud_reo_bot
 from . import nashville_codes_bot
@@ -242,6 +243,7 @@ CRITICAL_BOTS = {
     "decision_engine",
 }
 
+# Paid bots are parked unless FALCO_PAID_DATA_ENABLED=1 (see _paid.py).
 # Slow, low-yield, and the source only refreshes weekly. Excluded from the
 # daily run; weekly_heavy.yml runs them with --only.
 HEAVY_BOTS = {"hamilton_tax_delinquent"}
@@ -355,6 +357,8 @@ def run_pipeline(
     """
     timeouts = timeouts if timeouts is not None else BOT_TIMEOUTS
     critical = critical if critical is not None else CRITICAL_BOTS
+    parked = set() if paid_data_enabled() else PAID_BOTS
+    critical = critical - parked
     t0 = clock()
     summary: Dict[str, Any] = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -387,6 +391,12 @@ def run_pipeline(
         # list. Once the last one has run (or none were selected, e.g.
         # `--only hamilton_tax_delinquent`), the rest can use everything.
         critical_ahead = any(n in critical for n, _ in bots[i + 1:])
+
+        if name in parked:
+            print(f"\n[{name}] PARKED (paid data off; set FALCO_PAID_DATA_ENABLED=1 to run)")
+            summary["bots"].append({"bot": name, "status": "parked_paid_data", "elapsed": 0.0})
+            _flush()
+            continue
 
         if not is_critical and critical_ahead and remaining < reserve_seconds:
             print(f"\n[{name}] SKIPPED (budget: {remaining / 60:.1f} min left, reserve {reserve_seconds / 60:.0f})")

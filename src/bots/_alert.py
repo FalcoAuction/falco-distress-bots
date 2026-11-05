@@ -54,6 +54,7 @@ except ImportError:
 
 from ._base import _supabase
 from .bot_health_monitor import EXPECTED_BOTS
+from ._paid import PAID_BOTS, paid_data_enabled
 
 SUMMARY_PATH = Path("out/reports/new_bots_summary.json")
 RESEND_URL = "https://api.resend.com/emails"
@@ -64,12 +65,14 @@ LOOKBACK_DAYS = 30
 
 # Failures that are decisions, not bugs. Listed, never alerted.
 ACKNOWLEDGED: Dict[str, str] = {
-    "middle_tn_skiptrace": "BatchData paused until after the license exam (Sep 2026)",
     "mtn_lis_pendens_rod": "ROD subscriptions not purchased; skipped_no_creds by design",
+    "courtlistener_bankruptcy": "skipped 2026-11-05: free API tier does not allow commercial use",
+    "bankruptcy_schedule_d": "depends on courtlistener_bankruptcy (skipped 2026-11-05)",
     "tn_probate": "disabled 2026-05-06 pending a per-bot cap; the cap exists now, re-enabling is a decision",
 }
 
 FAIL_STATUSES = {"failed", "crashed", "timed_out"}
+ZERO_STREAK_RUNS = 6  # about three days at two runs a day
 
 
 def _parse_ts(v: Any) -> Optional[datetime]:
@@ -112,12 +115,15 @@ def build_alerts(
     now: Optional[datetime] = None,
     acknowledged: Optional[Dict[str, str]] = None,
     expected: Optional[Dict[str, Dict[str, int]]] = None,
+    parked: Optional[frozenset] = None,
 ) -> Dict[str, List[str]]:
     """Pure: rows (newest first) + summary -> {heading: [lines]}.
     Acknowledged bots go under "known" only."""
     now = now or datetime.now(timezone.utc)
     ack = ACKNOWLEDGED if acknowledged is None else acknowledged
     exp = EXPECTED_BOTS if expected is None else expected
+    if parked is None:
+        parked = frozenset() if paid_data_enabled() else PAID_BOTS
     out: Dict[str, List[str]] = defaultdict(list)
 
     by_bot: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
@@ -155,6 +161,9 @@ def build_alerts(
         if bot in ack:
             out["known"].append(f"{bot}: {latest.get('status')} ({ack[bot]})")
             continue
+        if bot in parked:
+            out["parked"].append(f"{bot}: paid data off (FALCO_PAID_DATA_ENABLED=1 to run)")
+            continue
 
         recent = [r for r in runs if (_parse_ts(r.get("started_at")) or now) >= day_ago]
         if any(r.get("status") == "timed_out" or "BotTimeout" in (r.get("error_message") or "") for r in recent):
@@ -174,6 +183,14 @@ def build_alerts(
 
         if latest.get("status") == "frozen_source":
             out["frozen_source"].append(bot)
+
+        # A source that stops returning anything usually changed its page
+        # (Brock & Scott returned zero rows from 2026-08-31 to 11-05 as
+        # zero_yield, which no rule caught).
+        finished = [r for r in runs if r.get("status") != "running"][:ZERO_STREAK_RUNS]
+        if len(finished) == ZERO_STREAK_RUNS and all(
+                r.get("status") == "zero_yield" and not (r.get("fetched_count") or 0) for r in finished):
+            out["zero_streak"].append(f"{bot}: fetched nothing in its last {ZERO_STREAK_RUNS} runs (source changed or blocked?)")
 
         cfg = exp.get(bot)
         if cfg:
@@ -196,9 +213,71 @@ def build_alerts(
 
 ALERT_HEADINGS = [
     "runner_incomplete", "critical_incomplete", "overrun", "timed_out",
-    "failed_twice", "stuck_running", "frozen_source", "silent",
+    "failed_twice", "stuck_running", "frozen_source", "zero_streak", "silent",
+    "scorecard",
 ]
-INFO_HEADINGS = ["skipped_budget", "known"]
+INFO_HEADINGS = ["skipped_budget", "parked", "known", "lead_quality"]
+
+# ── lead quality scorecard (public.lead_quality_daily, refreshed 03:30 UTC
+#    by pg_cron; see falco-site 20261106_lead_quality_scorecard.sql) ──
+SCORECARD_STALE_AFTER = timedelta(hours=36)
+READY_DROP_ALERT = 0.25  # launch-ready down 25%+ against a week ago
+
+
+def scorecard_section(latest: List[Dict[str, Any]], week_ago: List[Dict[str, Any]],
+                      now: datetime) -> Dict[str, List[str]]:
+    """Pure: two snapshots (rows of lead_quality_daily) -> report lines.
+    'lead_quality' is informational; 'scorecard' lines are alerts."""
+    out: Dict[str, List[str]] = defaultdict(list)
+    if not latest:
+        out["scorecard"].append("no lead quality snapshot found (pg_cron job lead-quality-refresh not running?)")
+        return dict(out)
+    day = max(r["captured_on"] for r in latest)
+    try:
+        captured = datetime.fromisoformat(str(day)).replace(tzinfo=timezone.utc)
+        if now - captured > SCORECARD_STALE_AFTER + timedelta(hours=24):
+            out["scorecard"].append(f"lead quality snapshot is from {day} (pg_cron job lead-quality-refresh stopped?)")
+    except ValueError:
+        pass
+    total = sum(r.get("total") or 0 for r in latest)
+    ready = sum(r.get("launch_ready") or 0 for r in latest)
+    before = sum(r.get("launch_ready") or 0 for r in week_ago) if week_ago else None
+    trend = f", {before} a week ago" if before is not None else ""
+    out["lead_quality"].append(f"{ready} launch-ready of {total} graded ({day}{trend})")
+    if before and ready < before * (1 - READY_DROP_ALERT):
+        out["scorecard"].append(f"launch-ready leads fell from {before} to {ready} in a week")
+    reasons: Dict[str, int] = defaultdict(int)
+    for r in latest:
+        for k, v in (r.get("reasons") or {}).items():
+            reasons[k] += int(v or 0)
+    top = sorted(reasons.items(), key=lambda kv: -kv[1])[:4]
+    if top:
+        out["lead_quality"].append("top blockers: " + ", ".join(f"{k} {v}" for k, v in top))
+    prev = {r["bot_source"]: r.get("launch_ready") or 0 for r in week_ago or []}
+    for r in sorted(latest, key=lambda r: -(r.get("launch_ready") or 0))[:8]:
+        if not r.get("launch_ready"):
+            continue
+        delta = ""
+        if r["bot_source"] in prev:
+            d = (r.get("launch_ready") or 0) - prev[r["bot_source"]]
+            delta = f" ({d:+d} wk)"
+        out["lead_quality"].append(f"{r['bot_source']}: {r['launch_ready']} ready of {r['total']}{delta}")
+    return dict(out)
+
+
+def load_scorecard() -> tuple:
+    client = _supabase()
+    if client is None:
+        return [], []
+    latest_day = (client.table("lead_quality_daily").select("captured_on").order("captured_on", desc=True)
+                  .limit(1).execute().data or [])
+    if not latest_day:
+        return [], []
+    day = latest_day[0]["captured_on"]
+    latest = client.table("lead_quality_daily").select("*").eq("captured_on", day).execute().data or []
+    week = (datetime.fromisoformat(day) - timedelta(days=7)).date().isoformat()
+    week_ago = client.table("lead_quality_daily").select("*").eq("captured_on", week).execute().data or []
+    return latest, week_ago
 
 
 def alert_count(alerts: Dict[str, List[str]]) -> int:
@@ -261,6 +340,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         rows = load_rows()
         alerts = build_alerts(rows, summary, now=now)
+        try:
+            for k, v in scorecard_section(*load_scorecard(), now=now).items():
+                alerts.setdefault(k, []).extend(v)
+        except Exception as e:
+            alerts.setdefault("scorecard", []).append(f"could not read lead_quality_daily: {type(e).__name__}: {str(e)[:150]}")
     except Exception as e:
         # Supabase itself is down or creds are wrong. That IS the alert.
         alerts = {"runner_incomplete": [f"could not read bot_run_health: {type(e).__name__}: {str(e)[:200]}"]}

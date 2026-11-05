@@ -177,6 +177,25 @@ class RunPipelineTests(unittest.TestCase):
         self.assertEqual(got, {"a": "ok", "b": "ok", "x": "skipped_budget", "crit": "ok"})
         self.assertEqual(s["critical_incomplete"], [])
 
+    def test_paid_bots_are_parked_unless_enabled(self):
+        import os
+        clock = FakeClock()
+        ran = []
+        bots = [("enformion_skip_trace", lambda: ran.append("e") or {"status": "failed"}), ("auto_promoter", self._bot(clock, 1))]
+        os.environ.pop("FALCO_PAID_DATA_ENABLED", None)
+        s = run_pipeline(bots, budget_seconds=500, reserve_seconds=0, critical={"enformion_skip_trace", "auto_promoter"},
+                         clock=clock, summary_path=None)
+        self.assertEqual({b["bot"]: b["status"] for b in s["bots"]},
+                         {"enformion_skip_trace": "parked_paid_data", "auto_promoter": "ok"})
+        self.assertEqual((ran, s["critical_incomplete"]), ([], []))
+        os.environ["FALCO_PAID_DATA_ENABLED"] = "1"
+        try:
+            s = run_pipeline(bots, budget_seconds=500, reserve_seconds=0, critical={"enformion_skip_trace"},
+                             clock=clock, summary_path=None)
+        finally:
+            os.environ.pop("FALCO_PAID_DATA_ENABLED", None)
+        self.assertEqual((ran, s["critical_incomplete"]), (["e"], ["enformion_skip_trace"]))
+
     def test_reserve_only_protects_critical_bots_still_ahead(self):
         clock = FakeClock()
         # No critical bot selected (the weekly --only case): nothing to
@@ -426,6 +445,39 @@ class AlertRuleTests(unittest.TestCase):
                          now=self.NOW, acknowledged={"bd": "paused"}, expected={})
         self.assertEqual(alert_count(a), 0)
         self.assertEqual(a["known"], ["bd: failed (paused)"])
+
+    def test_zero_streak_catches_a_source_that_stopped_returning_rows(self):
+        dead = [dict(self._row("bs", "zero_yield", 12 * i), fetched_count=0) for i in range(6)]
+        quiet = [dict(self._row("q", "zero_yield", 12 * i), fetched_count=0) for i in range(5)]
+        fetched = [dict(self._row("f", "zero_yield", 12 * i), fetched_count=3) for i in range(6)]
+        a = build_alerts(dead + quiet + fetched, {"finished_at": "x", "critical_incomplete": [], "bots": [], "planned": []},
+                         now=self.NOW, acknowledged={}, expected={}, parked=frozenset())
+        self.assertEqual([line.split(":")[0] for line in a.get("zero_streak", [])], ["bs"])
+
+    def test_scorecard_section(self):
+        from src.bots._alert import scorecard_section
+        latest = [{"captured_on": "2026-09-06", "bot_source": "a", "total": 100, "launch_ready": 30, "reasons": {"no_value": 50, "duplicate": 5}},
+                  {"captured_on": "2026-09-06", "bot_source": "b", "total": 50, "launch_ready": 0, "reasons": {"no_value": 50}}]
+        week = [{"captured_on": "2026-08-30", "bot_source": "a", "total": 90, "launch_ready": 50, "reasons": {}}]
+        out = scorecard_section(latest, week, self.NOW)
+        self.assertEqual(out["lead_quality"][0], "30 launch-ready of 150 graded (2026-09-06, 50 a week ago)")
+        self.assertEqual(out["lead_quality"][1], "top blockers: no_value 100, duplicate 5")
+        self.assertEqual(out["lead_quality"][2], "a: 30 ready of 100 (-20 wk)")
+        self.assertEqual(out["scorecard"], ["launch-ready leads fell from 50 to 30 in a week"])
+        self.assertNotIn("scorecard", scorecard_section(latest, [], self.NOW))
+        stale = scorecard_section([dict(latest[0], captured_on="2026-09-01")], [], self.NOW)
+        self.assertIn("stopped", stale["scorecard"][0])
+        self.assertIn("no lead quality snapshot", scorecard_section([], [], self.NOW)["scorecard"][0])
+
+    def test_parked_paid_bots_are_listed_not_alerted(self):
+        rows = [self._row("enformion_skip_trace", "failed", 1), self._row("enformion_skip_trace", "failed", 13)]
+        a = build_alerts(rows, {"finished_at": "x", "critical_incomplete": [], "bots": [], "planned": []},
+                         now=self.NOW, acknowledged={}, expected={}, parked=frozenset({"enformion_skip_trace"}))
+        self.assertEqual(alert_count(a), 0)
+        self.assertEqual(len(a["parked"]), 1)
+        a = build_alerts(rows, {"finished_at": "x", "critical_incomplete": [], "bots": [], "planned": []},
+                         now=self.NOW, acknowledged={}, expected={}, parked=frozenset())
+        self.assertIn("failed_twice", a)
 
 
 if __name__ == "__main__":

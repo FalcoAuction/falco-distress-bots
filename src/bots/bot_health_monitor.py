@@ -49,6 +49,14 @@ EXPECTED_BOTS = {
     "johnson_city_bdsr":         {"max_silent_days": 30, "min_total": 0},
     "tn_tax_delinquent":         {"max_silent_days": 30, "min_total": 0},
     "usda_rhs":                  {"max_silent_days": 30, "min_total": 0},
+    # Added 2026-11-05 (Middle TN sources).
+    "tn_lis_pendens":            {"max_silent_days": 7,  "min_total": 0},
+    "brock_scott_trustee":       {"max_silent_days": 14, "min_total": 0},
+    "mackie_wolf_trustee":       {"max_silent_days": 14, "min_total": 0},
+    "court_notices":             {"max_silent_days": 14, "min_total": 0},
+    "main_street_media":         {"max_silent_days": 14, "min_total": 0},
+    "davidson_demolition":       {"max_silent_days": 30, "min_total": 0},
+    "warn_notices":              {"max_silent_days": 120, "min_total": 0},
 }
 
 
