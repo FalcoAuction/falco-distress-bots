@@ -30,6 +30,13 @@ Page structure (verified 2026-05-12):
 Pagination: ?_sft_foreclosure_state=tn&sf_paged=N — Next > link visible
 when more pages exist.
 
+Redesigned 2026 (verified 2026-11-05): results are a plain
+<table class="bs-table"> with header columns County, Sale Date, State,
+Court SP #, Case #, Address, Opening Bid Amt., Book Page; 20 rows per page,
+pages at /foreclosure-sales/page/N/?_sft_foreclosure_state=tn. The old
+<article> layout returned zero rows from 2026-08-31 on, which is why this
+bot went silent. robots.txt allows the listing pages.
+
 Borrower names are NOT exposed on the listing pages — Brock & Scott
 withholds them. Owner enrichment happens downstream via the assessor
 bots (davidson_assessor, williamson_assessor, etc.) which look up the
@@ -74,10 +81,8 @@ class BrockScottTrusteeBot(BotBase):
         "10-25 days earlier than newspaper notice."
     )
     throttle_seconds = 2.0  # polite — small firm site
-    # WAF drops the honest bot UA from CI datacenter IPs.
-    user_agent = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    # Honest UA (BotBase default). The site serves it from the local
+    # runner; FALCO does not impersonate browsers to get past blocks.
     expected_min_yield = 5  # they normally have 25+ TN listings live
 
     # Walk at most this many paginated pages before stopping.
@@ -89,10 +94,8 @@ class BrockScottTrusteeBot(BotBase):
         seen_keys: set[str] = set()
 
         for page in range(1, self.max_pages + 1):
-            params = dict(BS_TN_PARAMS)
-            if page > 1:
-                params["sf_paged"] = str(page)
-            res = self.fetch(BS_INDEX, params=params)
+            url = BS_INDEX if page == 1 else f"{BS_INDEX}page/{page}/"
+            res = self.fetch(url, params=dict(BS_TN_PARAMS))
             if res is None:
                 self.logger.warning(f"page {page}: fetch failed")
                 break
@@ -100,16 +103,15 @@ class BrockScottTrusteeBot(BotBase):
                 self.logger.warning(f"page {page}: HTTP {res.status_code}")
                 break
 
-            soup = BeautifulSoup(res.text, "html.parser")
-            articles = soup.find_all("article", class_=re.compile(r"foreclosure_search"))
-            if not articles:
+            rows = parse_table(res.text)
+            if not rows:
                 self.logger.info(f"page {page}: no listings (end of pagination)")
                 break
 
-            self.logger.info(f"page {page}: {len(articles)} listing articles")
+            self.logger.info(f"page {page}: {len(rows)} listing rows")
             new_this_page = 0
-            for art in articles:
-                lead = self._parse_article(art)
+            for fields in rows:
+                lead = self._lead_from_fields(fields)
                 if lead is None:
                     continue
                 if lead.pipeline_lead_key in seen_keys:
@@ -129,18 +131,8 @@ class BrockScottTrusteeBot(BotBase):
 
     # ── Parsing ─────────────────────────────────────────────────────────────
 
-    def _parse_article(self, art) -> Optional[LeadPayload]:
-        """Extract one lead from an <article class="foreclosure_search ...">."""
-        fields = {}
-        for col in art.find_all("div", class_="forecol"):
-            paras = col.find_all("p")
-            if len(paras) < 2:
-                continue
-            label = paras[0].get_text(strip=True).rstrip(":").lower()
-            value = paras[1].get_text(strip=True)
-            if label in FIELD_LABELS:
-                fields[label] = value
-
+    def _lead_from_fields(self, fields: dict) -> Optional[LeadPayload]:
+        """One lead from a row's {label: value} (labels as in FIELD_LABELS)."""
         # State filter at URL level should already restrict to TN, but
         # double-check in case Brock & Scott adds multi-state pages later.
         state = (fields.get("state") or "").upper()
@@ -221,6 +213,39 @@ class BrockScottTrusteeBot(BotBase):
             return float(m.group(1).replace(",", ""))
         except ValueError:
             return None
+
+
+_HEADER_ALIASES = {"opening bid amt.": "opening bid amount", "opening bid amt": "opening bid amount"}
+
+
+def parse_table(page_html: str) -> List[dict]:
+    """Rows of <table class="bs-table"> keyed by normalized header label."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    table = soup.find("table", class_="bs-table")
+    if table is None:
+        return []
+    headers = []
+    for th in table.select("thead th"):
+        label = re.sub(r"\s+", " ", th.get_text(" ", strip=True)).replace("▲", "").replace("▼", "").strip().lower()
+        headers.append(_HEADER_ALIASES.get(label, label))
+    rows = []
+    for tr in table.select("tbody tr"):
+        cells = tr.find_all("td")
+        if len(cells) != len(headers):
+            continue
+        fields = {}
+        for label, td in zip(headers, cells):
+            if label not in FIELD_LABELS:
+                continue
+            t = td.find("time")
+            if label == "sale date" and t is not None and t.get("datetime"):
+                # "2026-11-05" -> "11/05/2026" so _parse_sale_date keeps one format
+                y, m, d = t["datetime"][:10].split("-")
+                fields[label] = f"{m}/{d}/{y}"
+            else:
+                fields[label] = re.sub(r"\s+", " ", td.get_text(" ", strip=True))
+        rows.append(fields)
+    return rows
 
 
 def run() -> dict:

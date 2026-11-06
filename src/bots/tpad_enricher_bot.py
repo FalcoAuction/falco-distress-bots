@@ -436,7 +436,18 @@ def run() -> Dict[str, Any]:
                 sel += ", raw_payload"
             else:
                 sel += ", source"
-            q = client.table(table).select(sel).limit(500)
+            # Only rows that still need a value and have not been tried,
+            # live sale dates first. This used to be an unfiltered,
+            # unordered limit(500) out of ~38k staging rows: once those
+            # 500 were enriched or unmatched the bot re-walked them every
+            # run and never reached a new lead.
+            q = (
+                client.table(table).select(sel)
+                .is_("property_value", "null")
+                .or_('admin_notes.is.null,admin_notes.not.ilike."*TPAD:*"')
+                .order("trustee_sale_date", desc=True, nullsfirst=False)
+                .limit(1000)
+            )
             if table == "homeowner_requests":
                 q = q.eq("source", "bot")
             res = q.execute()
@@ -447,6 +458,15 @@ def run() -> Dict[str, Any]:
         rows = getattr(res, "data", None) or []
         # Skip leads already enriched
         rows = [r for r in rows if "TPAD:" not in (r.get("admin_notes") or "")]
+        # Drop counties TPAD does not serve BEFORE the per-run cap, so
+        # 100 Davidson rows cannot use up the whole run.
+        covered = []
+        for r in rows:
+            ck = _norm_county(r.get("county") or "")
+            if ck and ck.lower() not in EXTERNAL_COUNTIES:
+                covered.append(r)
+        external += len(rows) - len(covered)
+        rows = covered
         print(f"  {len(rows)} candidates")
 
         for i, lead in enumerate(rows[:100]):  # cap per run
@@ -458,6 +478,17 @@ def run() -> Dict[str, Any]:
                     external += 1
                 else:
                     no_match += 1
+                    # Park the miss. The "TPAD:" marker is what the
+                    # candidate filter skips, so this row is not retried
+                    # on every run.
+                    try:
+                        notes = lead.get("admin_notes") or ""
+                        stamp = datetime.now(timezone.utc).date().isoformat()
+                        client.table(table).update({
+                            "admin_notes": (notes + (" | " if notes else "") + f"TPAD: {err} {stamp}")[:4000]
+                        }).eq("id", lead["id"]).execute()
+                    except Exception as e:
+                        print(f"  park miss failed: {e}")
                 print(f"-> SKIP ({err})")
                 skipped += 1
                 continue

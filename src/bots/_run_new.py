@@ -37,6 +37,7 @@ except ImportError:
     pass
 
 from ._base import BotTimeout, close_open_runs
+from ._paid import PAID_BOTS, paid_data_enabled
 
 from . import hud_reo_bot
 from . import nashville_codes_bot
@@ -64,6 +65,11 @@ from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
+from . import court_notices_bot
+from . import main_street_media_bot
+from . import warn_notices_bot
+from . import davidson_tax_sale_bot
+from . import montgomery_tax_sale_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
 from . import davidson_demolition_bot
@@ -72,11 +78,14 @@ from . import notice_enricher_bot
 from . import phone_classifier_bot
 from . import tpad_enricher_bot
 from . import davidson_assessor_bot
+from . import davidson_parcels_bot
+from . import landlord_portfolio_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
 from . import probate_property_enricher_bot
+from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
 from . import xref_avm_enricher_bot
@@ -143,6 +152,16 @@ NEW_BOTS = [
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
+    # Full-text court notices from the Ledger and Memphis Daily News: probate
+    # notices with executor and attorney, plus partition / court-ordered
+    # sales. tnpublicnotice.com truncates these and gates the full text
+    # behind a CAPTCHA. Runs before probate_property_enricher, which matches
+    # the decedent to parcels.
+    ("court_notices", court_notices_bot.run),
+    ("main_street_media", main_street_media_bot.run),
+    ("warn_notices", warn_notices_bot.run),
+    ("davidson_tax_sale", davidson_tax_sale_bot.run),
+    ("montgomery_tax_sale", montgomery_tax_sale_bot.run),
     # Middle TN secondary cities — only Mt Juliet has a public scrapable
     # code-enforcement feed (SeeClickFix). Other 5 cities documented as
     # no-public-access in the bot file. New 2026-05-08.
@@ -163,7 +182,9 @@ NEW_BOTS = [
     ("notice_enricher", notice_enricher_bot.run),
     ("phone_classifier", phone_classifier_bot.run),
     ("tpad_enricher", tpad_enricher_bot.run),
+    ("davidson_parcels", davidson_parcels_bot.run),
     ("davidson_assessor", davidson_assessor_bot.run),
+    ("landlord_portfolio", landlord_portfolio_bot.run),
     ("williamson_assessor", williamson_assessor_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
@@ -174,6 +195,7 @@ NEW_BOTS = [
     # write defensible values; the order was inverted vs the intended
     # chain HMDA -> Ledger -> amortizer -> estimator.
     ("probate_property_enricher", probate_property_enricher_bot.run),
+    ("asset_profile", asset_profile_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
     ("xref_avm_enricher", xref_avm_enricher_bot.run),
@@ -227,6 +249,7 @@ CRITICAL_BOTS = {
     "decision_engine",
 }
 
+# Paid bots are parked unless FALCO_PAID_DATA_ENABLED=1 (see _paid.py).
 # Slow, low-yield, and the source only refreshes weekly. Excluded from the
 # daily run; weekly_heavy.yml runs them with --only.
 HEAVY_BOTS = {"hamilton_tax_delinquent"}
@@ -340,6 +363,8 @@ def run_pipeline(
     """
     timeouts = timeouts if timeouts is not None else BOT_TIMEOUTS
     critical = critical if critical is not None else CRITICAL_BOTS
+    parked = set() if paid_data_enabled() else PAID_BOTS
+    critical = critical - parked
     t0 = clock()
     summary: Dict[str, Any] = {
         "started_at": datetime.now(timezone.utc).isoformat(),
@@ -372,6 +397,12 @@ def run_pipeline(
         # list. Once the last one has run (or none were selected, e.g.
         # `--only hamilton_tax_delinquent`), the rest can use everything.
         critical_ahead = any(n in critical for n, _ in bots[i + 1:])
+
+        if name in parked:
+            print(f"\n[{name}] PARKED (paid data off; set FALCO_PAID_DATA_ENABLED=1 to run)")
+            summary["bots"].append({"bot": name, "status": "parked_paid_data", "elapsed": 0.0})
+            _flush()
+            continue
 
         if not is_critical and critical_ahead and remaining < reserve_seconds:
             print(f"\n[{name}] SKIPPED (budget: {remaining / 60:.1f} min left, reserve {reserve_seconds / 60:.0f})")
