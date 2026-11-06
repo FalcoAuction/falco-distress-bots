@@ -76,6 +76,7 @@ from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
+from . import comptroller_parcels_bot
 from . import probate_property_enricher_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
@@ -169,6 +170,9 @@ NEW_BOTS = [
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
+    # 86 Comptroller counties from local weekly files; reports no_data
+    # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
+    ("comptroller_parcels", comptroller_parcels_bot.run),
     # mortgage_estimator moved AFTER hmda_enricher + mortgage_amortizer
     # (see below) so it acts as a true final fallback. Previously it ran
     # here and pre-filled nulls with 80% LTV before HMDA had a chance to

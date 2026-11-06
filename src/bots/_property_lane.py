@@ -35,7 +35,8 @@ COMMERCIAL_MIN_VALUE = 25000
 COMMERCIAL_MAX_VALUE = 10_000_000   # bigger is institutional: refer it, don't work it
 LAND_MIN_VALUE = 3000
 
-_LAND_RE = re.compile(r"VACANT|FARM|AGRIC|FOREST|GREENBELT|TIMBER|PASTURE|ACREAGE|UNDEVELOPED|\bAGRI\b", re.I)
+_LAND_RE = re.compile(r"VACANT|FARM|AGRIC|FOREST|GREENBELT|TIMBER|PASTURE|ACREAGE|UNDEVELOPED|\bAGRI\b|"
+                      r"OPEN SPACE|HOMEBELT", re.I)
 _RES_RE = re.compile(
     r"SINGLE FAMILY|DUPLEX|TRIPLEX|QUAD|CONDO|ZERO LOT|TOWNHOUSE|TOWNHOME|TOWNHOUSE/CO|MOBILE HOME|"
     r"MANUFACTURED|RESIDENTIAL|^RS$|RURAL COMBO|HOUSEHOLD UNIT|FAMILY UNIT", re.I)
@@ -148,6 +149,9 @@ def land_use_signals(raw: Dict[str, Any], bot_source: str = "") -> List[Tuple[st
     add("padctn", _d(raw.get("padctn")).get("land_use"))
     add("metro", _d(raw.get("metro_parcel")).get("land_use"))
     add("hamilton_assessor", _d(raw.get("hamilton_assessor")).get("land_use"))
+    comp = _d(raw.get("comptroller_parcel"))
+    add("comptroller", comp.get("land_use"))
+    add("comptroller_class", comp.get("class"))
     tpad = _d(raw.get("tpad"))
     add("tpad", tpad.get("class"))
     shel = _d(raw.get("shelby_arcgis"))
@@ -164,7 +168,58 @@ def land_use_signals(raw: Dict[str, Any], bot_source: str = "") -> List[Tuple[st
     return out
 
 
+_SLUCM_EXEMPT = {"41", "48", "49", "67", "68", "71", "76"}   # rail, utilities, government, schools, culture, parks
+_SLUCM_COMMERCIAL_RES = {"13", "14", "15"}                  # residential hotels, mobile home parks
+_SLUCM_AMENITY = {"74", "75"}                               # recreation on a home or farm: not a business
+
+
+def _slucm_one(code: str) -> Optional[str]:
+    if len(code) != 2 or not code.isdigit():
+        return None
+    if code in _SLUCM_EXEMPT:
+        return "exempt"
+    if code in _SLUCM_COMMERCIAL_RES:
+        return "commercial"
+    return {"1": "residential", "2": "commercial", "3": "commercial", "4": "commercial", "5": "commercial",
+            "6": "commercial", "7": "commercial", "8": "land", "9": "land"}.get(code[0])
+
+
+def _classify_slucm(text: str) -> Optional[str]:
+    """Comptroller LANDUSE, Standard Land Use codes: '53 - RETAIL TRADE - GENERAL',
+    '11:81 - MULTIPLE LAND USES' (house + agriculture), '62:65 - ...'."""
+    m = re.match(r"^\s*([\d:]+)\s*-", text or "")
+    if not m:
+        return None
+    codes = [c for c in m.group(1).split(":") if c]
+    lanes = {c: _slucm_one(c) for c in codes}
+    business = [c for c, l in lanes.items() if l == "commercial" and c not in _SLUCM_AMENITY]
+    if business:
+        return "commercial"
+    vals = {l for l in lanes.values() if l}
+    if vals and vals <= {"land"}:
+        return "land"
+    if "residential" in vals:
+        return "residential"        # a house with farm or timber; big acreage still becomes land
+    if vals == {"exempt"}:
+        return "exempt"
+    return None
+
+
+def _classify_comptroller_class(text: str) -> Optional[str]:
+    """Comptroller CLASS, e.g. '08 COMMERCIAL', '11 AGRICULTURAL', '05 RELIGIOUS', '02 CITY'."""
+    t = re.sub(r"^\d+\s*", "", text.strip().upper())
+    if not t:
+        return None
+    if "RELIGIOUS" in t:                     # exempt; becomes a church lead only for a religious owner
+        return "exempt"
+    return _classify_text(t)
+
+
 def _classify_signal(src: str, text: str) -> Optional[str]:
+    if src == "comptroller_class":
+        return _classify_comptroller_class(text)
+    if src == "comptroller":
+        return _classify_slucm(text) or _classify_text(re.sub(r"^[\d:\s]+-\s*", "", text))
     if src == "hamilton":
         return _classify_hamilton(text)
     if src == "shelby" and len(text.strip()) == 1:
@@ -174,7 +229,7 @@ def _classify_signal(src: str, text: str) -> Optional[str]:
 
 def _acres(raw: Dict[str, Any]) -> Optional[float]:
     for v in (_d(raw.get("padctn")).get("land_acres"), _d(raw.get("metro_parcel")).get("acres"),
-              _d(raw.get("hamilton_assessor")).get("calc_acres"),
+              _d(raw.get("hamilton_assessor")).get("calc_acres"), _d(raw.get("comptroller_parcel")).get("acres"),
               _d(raw.get("tpad")).get("acres"),
               _d(raw.get("williamson_inigo")).get("acreage"), _d(raw.get("padctn_owner_match")).get("acres"),
               _d(raw.get("asset_profile")).get("total_acres")):
@@ -187,7 +242,7 @@ def _acres(raw: Dict[str, Any]) -> Optional[float]:
 def _value(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[float]:
     for v in (row.get("property_value"), _d(raw.get("padctn")).get("appraised"),
               _d(raw.get("metro_parcel")).get("total_appraisal"),
-              _d(raw.get("hamilton_assessor")).get("appraised"),
+              _d(raw.get("hamilton_assessor")).get("appraised"), _d(raw.get("comptroller_parcel")).get("appraisal"),
               _d(raw.get("tpad")).get("appraised_value_num"), _d(raw.get("shelby_arcgis")).get("appraised"),
               _d(raw.get("rutherford_arcgis")).get("appraised"), _d(raw.get("williamson_inigo")).get("appraised"),
               _d(raw.get("padctn_owner_match")).get("appraised")):
@@ -213,9 +268,10 @@ def owner_type(owner: Optional[str], owner_class: Optional[str] = None) -> str:
 def _mailing(raw: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     """Best owner mailing address and its state, from any assessor record."""
     cands: List[Tuple[Optional[str], Optional[str]]] = []
-    ham = _d(raw.get("hamilton_assessor"))
-    if ham.get("owner_mailing"):           # already "street, CITY ST ZIP"
-        cands.append((ham["owner_mailing"], (ham.get("owner_state") or "").strip().upper() or None))
+    for key in ("hamilton_assessor", "comptroller_parcel"):   # already "street, CITY ST ZIP"
+        rec = _d(raw.get(key))
+        if rec.get("owner_mailing"):
+            cands.append((rec["owner_mailing"], (rec.get("owner_state") or "").strip().upper() or None))
     for key in ("shelby_arcgis", "rutherford_arcgis"):
         r = _d(raw.get(key))
         if r.get("owner_mailing"):
@@ -322,6 +378,15 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         subtype = "commercial_land"
     elif lane == "commercial" and basis and re.search(r"APARTMENT", basis, re.I):
         subtype = "multifamily"
+
+    # Comptroller records carry building count and improvement value: a
+    # residential or commercial parcel with neither is a vacant lot.
+    comp = _d(raw.get("comptroller_parcel"))
+    if (basis or "").startswith("comptroller") and lane in ("residential", "commercial") and comp \
+            and not _num(comp.get("improvement_value")) and not comp.get("buildings") \
+            and _num(comp.get("appraisal")):
+        subtype = "vacant_residential" if lane == "residential" else "commercial_land"
+        lane = "land"
 
     acres = _acres(raw)
     if acres is not None and acres >= ACREAGE_LAND and lane in ("residential", "unknown") and subtype != "exempt":

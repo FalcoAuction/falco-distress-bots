@@ -37,7 +37,7 @@ from ._property_lane import property_lane
 
 PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
-RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
+RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
                 "phone,alternate_phones,email,trustee_sale_date,"
