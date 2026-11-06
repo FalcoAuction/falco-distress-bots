@@ -69,6 +69,7 @@ from . import court_notices_bot
 from . import main_street_media_bot
 from . import warn_notices_bot
 from . import davidson_tax_sale_bot
+from . import montgomery_tax_sale_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
 from . import davidson_demolition_bot
@@ -160,6 +161,7 @@ NEW_BOTS = [
     ("main_street_media", main_street_media_bot.run),
     ("warn_notices", warn_notices_bot.run),
     ("davidson_tax_sale", davidson_tax_sale_bot.run),
+    ("montgomery_tax_sale", montgomery_tax_sale_bot.run),
     # Middle TN secondary cities — only Mt Juliet has a public scrapable
     # code-enforcement feed (SeeClickFix). Other 5 cities documented as
     # no-public-access in the bot file. New 2026-05-08.

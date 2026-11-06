@@ -55,6 +55,7 @@ EXPECTED_BOTS = {
     "mackie_wolf_trustee":       {"max_silent_days": 14, "min_total": 0},
     "court_notices":             {"max_silent_days": 14, "min_total": 0},
     "main_street_media":         {"max_silent_days": 14, "min_total": 0},
+    "montgomery_tax_sale":       {"max_silent_days": 400, "min_total": 0},  # one sale a year
     "davidson_demolition":       {"max_silent_days": 30, "min_total": 0},
     "warn_notices":              {"max_silent_days": 120, "min_total": 0},
 }
