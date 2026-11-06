@@ -74,6 +74,27 @@ class MainStreetMediaTests(unittest.TestCase):
         self.assertEqual(lead_key("probate_notice_to_creditors", "dickson", "22CH1-2026-PR-001", "x"),
                          ("court_notice", "probate_notice_to_creditors|dickson|22CH1-2026-PR-001"))
 
+    def test_trustee_sale_layouts(self):
+        # "believed to be" layout, hyphenated column breaks, numeric date
+        a = msm.trustee_sale([
+            "TS#: 2026-00001-TN Notice Of Substitute Trustee's Sale Whereas, Pat Example, unmarried by Deed of Trust,",
+            "certain real property located in Montgomery County, Tennessee. The street address of the above-de- scribed",
+            "property is believed to be 12 Example Ct, Clarksville, TN 37042, but if such address is not part",
+            "will proceed to sell the below-mentioned property on 11/18/2026, at 2:00 PM at the Courthouse.",
+            "THIS LAW FIRM IS ATTEMPTING TO COLLECT A DEBT. ANY INFORMATION OBTAINED WILL BE USED FOR THAT PURPOSE. Example Law, PLLC, Substitute Trustee"])
+        self.assertEqual((a["county"], a["address"], a["sale_date"], a["owner"], a["trustee"]),
+                         ("montgomery", "12 Example Ct, Clarksville, TN 37042", "2026-11-18", "Pat Example, unmarried", "Example Law, PLLC"))
+        # labeled layout, "on or about", printed in a neighboring county's paper
+        b = msm.trustee_sale([
+            "SUBSTITUTE TRUSTEE'S SALE Sale at public auction will be on December 3, 2026 on or about 12:00PM local time,",
+            "The following real estate located in Rutherford County, Tennessee, will be sold.",
+            "Current Owner(s) of Property: LEE SAMPLE Street Address: 47 Sample Rd, Murfreesboro, TN 37128 Parcel ID: 1-2"])
+        self.assertEqual((b["county"], b["address"], b["sale_date"], b["owner"]),
+                         ("rutherford", "47 Sample Rd, Murfreesboro, TN 37128", "2026-12-03", "LEE SAMPLE"))
+        self.assertIsNone(msm.trustee_sale(["NOTICE OF SUBSTITUTE TRUSTEE'S SALE", "Land described by metes and bounds only."]))
+        self.assertIsNone(msm.trustee_sale(["PUBLIC NOTICE", "The Beer Board will meet on November 12, 2026 at 5:30 p.m."]))
+        self.assertEqual(msm.address_key("12 Example Ct., Clarksville, TN"), "12 EXAMPLE CT")
+
 
 if __name__ == "__main__":
     unittest.main()

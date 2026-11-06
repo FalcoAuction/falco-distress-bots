@@ -108,6 +108,63 @@ def notices(post_html: str) -> List[List[str]]:
     return out
 
 
+TRUSTEE_SALE_RE = re.compile(r"trustee.{0,3}s\s+(?:notice\s+of\s+)?(?:foreclosure\s+)?sale", re.I)
+_DATE = r"(?:[A-Z][a-z]+\s+\d{1,2},\s+\d{4}|\d{1,2}/\d{1,2}/\d{4})"
+SALE_DATE_RE = re.compile(rf"\bon\s+({_DATE})\s*,?\s*(?:at|on)\s+(?:or\s+about\s+)?\d{{1,2}}:\d{{2}}", re.I)
+ADDRESS_RES = [
+    re.compile(r"street address of the (?:above[- ]?described )?property is believed to be\s+(.+?)(?:,\s*but|\s+but)\b", re.I),
+    re.compile(r"(?:street|property) address:\s*(.+?)(?=\s+(?:parcel|tax id|map|current owner|this sale|other interested|note)\b|$)", re.I),
+    re.compile(r"commonly known as:?\s*(\d{1,6}\s[^;]{3,90}?\b(?:TN|Tennessee)\s*\d{5})", re.I),
+    re.compile(r"commonly known as:?\s*(\d{1,6}\s[^,;]{3,60})", re.I),
+]
+OWNER_RES = [
+    re.compile(r"Current Owner\(s\) of Property:\s*(.+?)(?=\s+(?:The street|Other interested|This sale|Street Address)\b|$)", re.I),
+    re.compile(r"executed by\s+(.+?)(?:,\s*(?:to|conveying)\b|\s+conveying\b|,?\s+to\s)", re.I),
+    re.compile(r"Whereas,\s+(.+?)\s+by Deed of Trust", re.I),
+]
+# The property's county as the notice states it; a paper can print a sale
+# from a neighboring county.
+NOTICE_COUNTY_RE = re.compile(r"(?:located|situated|lying|land) in (?:the County of )?([A-Z][a-z]+) County", re.I)
+TRUSTEE_RES = re.compile(r"([A-Z][A-Za-z&.,' ]{2,60}?(?:LLC|PLLC|P\.C\.|PC|LLP|Inc\.?))\s*,?\s+(?:as\s+)?Substitute Trustee", re.I)
+
+
+def _date_iso(value: str) -> Optional[str]:
+    for fmt in ("%B %d, %Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(re.sub(r"\s+", " ", value.strip()), fmt).date().isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+def trustee_sale(lines: List[str]) -> Optional[Dict[str, Any]]:
+    """Foreclosure (substitute trustee's sale) notice -> {address, sale_date,
+    owner, trustee}. None when it is not one or no street address is printed
+    (some give only a legal description)."""
+    text = re.sub(r"\s+", " ", " ".join(lines))
+    if not TRUSTEE_SALE_RE.search(text[:400]):
+        return None
+    # Column hyphenation: "above-de- scribed", "Fol- lowing".
+    text = re.sub(r"([a-z])- ([a-z])", r"\1\2", text)
+    address = next((m.group(1).strip(" .,") for r in ADDRESS_RES for m in [r.search(text)] if m), None)
+    if not address or not re.match(r"\d", address):
+        return None
+    m = SALE_DATE_RE.search(text)
+    owner = next((m2.group(1).strip(" .,") for r in OWNER_RES for m2 in [r.search(text)] if m2), None)
+    trustees = TRUSTEE_RES.findall(text)
+    # The lazy match starts after any earlier sentence; keep the name only.
+    trustee = re.split(r"[.:;]\s+|\.com\s+|\band that\s+", trustees[-1])[-1].strip(" ,") if trustees else None
+    county = next((c.lower() for c in NOTICE_COUNTY_RE.findall(text)), None)
+    return {"county": county, "address": address[:160], "sale_date": _date_iso(m.group(1)) if m else None,
+            "owner": owner[:200] if owner else None,
+            "trustee": trustee}
+
+
+def address_key(address: str) -> str:
+    """'1017 Fillmore Ct, Clarksville, TN 37042' -> '1017 FILLMORE CT'."""
+    return re.sub(r"[^A-Z0-9 ]", "", address.split(",")[0].upper()).strip()
+
+
 def tax_parcels(lines: List[str]) -> List[Dict[str, Any]]:
     """Map/parcel numbers with their tax years from a chancery tax notice."""
     text = " ".join(lines)
@@ -168,6 +225,29 @@ class MainStreetMediaBot(BotBase):
                     lead.raw_payload["court_notice"]["county"] = county
             lead.raw_payload["paper_county"] = county
             return [lead]
+        # Davidson foreclosures come from the Ledger with structured fields.
+        sale = trustee_sale(lines)
+        if sale:
+            county = sale["county"] or county
+            if county not in set(PAPERS.values()) or county == "davidson":
+                return []
+            address = sale["address"] if re.search(r"\bTN\b|Tennessee", sale["address"], re.I) else f"{sale['address']}, TN"
+            return [LeadPayload(
+                bot_source=self.name,
+                pipeline_lead_key=self.make_lead_key("msm_trustee", f"{county}|{address_key(sale['address'])}"),
+                property_address=address,
+                county=county,
+                full_name=sale["owner"],
+                owner_name_records=sale["owner"],
+                trustee_sale_date=sale["sale_date"],
+                distress_type="TRUSTEE_NOTICE",
+                admin_notes=f"Substitute trustee's sale {sale['sale_date'] or '?'}, {county.title()} County"
+                            + (f", trustee {sale['trustee']}" if sale["trustee"] else "") + ".",
+                raw_payload={"publication": "main_street_media", "publication_date": issued.isoformat(),
+                             "kind": "trustee_sale", **sale, "notice_id": notice_id,
+                             "headline": " ".join(lines[:3])[:300]},
+                source_url=url,
+            )]
         out = []
         for parcel in tax_parcels(lines):
             out.append(LeadPayload(
