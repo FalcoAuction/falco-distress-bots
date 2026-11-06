@@ -87,6 +87,7 @@ from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import stacked_distress_aggregator_bot
+from . import faa_aircraft_bot
 from . import decision_engine_bot
 # MTN-focused enrichment chain (added 2026-05-06). These are what
 # graduate staged leads into dialer-ready leads:
@@ -187,6 +188,8 @@ NEW_BOTS = [
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
+    # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
+    ("faa_aircraft", faa_aircraft_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
     # HMDA's mortgage_signal); skip-trace before Twilio lookup (validates
