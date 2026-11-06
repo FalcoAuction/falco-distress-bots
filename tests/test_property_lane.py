@@ -145,6 +145,33 @@ class GradeTests(unittest.TestCase):
         raw = {"padctn": {"land_use": "C38 - APARTMENT", "appraised": 45000000, "mailing_address": "1 A St, Nashville, TN 37203"}}
         self.assertEqual(property_lane(row(raw_payload=raw))["exclude_reason"], "institutional_size")
 
+    def test_hamilton_personal_property_excluded(self):
+        raw = {"county": "hamilton", "parcel": "PER--10052662",
+               "hamilton_assessor": {"land_use": "Apartment:  10 units or more", "appraised": 6940000,
+                                     "owner_mailing": "5583 BOBBY HICKS HWY, GRAY TN 37615", "owner_state": "TN"}}
+        r = property_lane(row(bot_source="hamilton_tax_delinquent", owner_name_records="HATTIE BELL CATERING",
+                              raw_payload=raw))
+        self.assertEqual((r["grade"], r["exclude_reason"]), (None, "personal_property_tax"))
+        from src.bots.hamilton_tax_delinquent_bot import HamiltonTaxDelinquentBot as H
+        self.assertTrue(H.is_personal_property("PER--10052662"))
+        self.assertFalse(H.is_personal_property("147G-B-012"))
+
+    def test_owner_mismatch_excluded(self):
+        raw = {"hamilton_assessor": {"land_use": "Apartment:  10 units or more", "appraised": 4150000,
+                                     "owner": "1717 WHITE OAK TN LLC",
+                                     "owner_mailing": "321 N CLARK ST, CHICAGO IL 60654", "owner_state": "IL"}}
+        r = property_lane(row(owner_name_records="OPTIC UNITY", raw_payload=raw))
+        self.assertEqual(r["exclude_reason"], "owner_mismatch")
+        generic = property_lane(row(owner_name_records="GW & SONS PROFESSIONAL TRUCK & TRAILER CENTERS", raw_payload={
+            "hamilton_assessor": {"land_use": "Repair Services", "appraised": 1500000,
+                                  "owner": "FRONTIER TRUCK WASH INC & ATTN DAVID MYERS",
+                                  "owner_mailing": "1 A ST, CHATTANOOGA TN 37402"}}))
+        self.assertEqual(generic["exclude_reason"], "owner_mismatch")
+        ok = property_lane(row(owner_name_records="Byrd Tyrone & Beth", raw_payload={
+            "hamilton_assessor": {"land_use": "Retail Trade - General", "appraised": 300000,
+                                  "owner": "BYRD TYRONE & BETH DENISE", "owner_mailing": "127 FAIR ST, CHATTANOOGA TN 37415"}}))
+        self.assertIsNone(ok["exclude_reason"])
+
     def test_past_trustee_sale_excluded(self):
         r = self.office(distress_type="PRE_FORECLOSURE", trustee_sale_date="2020-01-01")
         self.assertEqual(r["exclude_reason"], "sale_passed")

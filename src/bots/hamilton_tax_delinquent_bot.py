@@ -94,7 +94,14 @@ class HamiltonTaxDelinquentBot(BotBase):
         skipped_noaddr = 0
         entity_leads = 0
 
+        skipped_personal = 0
         for parcel_key, row in latest_by_parcel.items():
+            # Map "PER" rows are business personal-property tax (a tenant's
+            # equipment and fixtures), not real estate. The address is the
+            # building the business rents in; the debtor is not the owner.
+            if self.is_personal_property(parcel_key):
+                skipped_personal += 1
+                continue
             year = self._safe_int(row.get("Bill Year"))
             if year is None or year < cutoff_year:
                 skipped_old += 1
@@ -165,7 +172,8 @@ class HamiltonTaxDelinquentBot(BotBase):
 
         self.logger.info(
             f"yielded={len(leads)} skipped_old={skipped_old} "
-            f"skipped_small={skipped_small} skipped_noaddr={skipped_noaddr}"
+            f"skipped_small={skipped_small} skipped_noaddr={skipped_noaddr} "
+            f"skipped_personal_property={skipped_personal}"
         )
         return leads
 
@@ -287,6 +295,11 @@ class HamiltonTaxDelinquentBot(BotBase):
     def _looks_like_business(owner: str) -> bool:
         upper = f" {owner.upper()} "
         return any(pat in upper for pat in _BUSINESS_OWNER_PATTERNS)
+
+    @staticmethod
+    def is_personal_property(parcel_key: Optional[str]) -> bool:
+        """Personal-property tax accounts use the map code PER ('PER--10052662')."""
+        return str(parcel_key or "").upper().startswith("PER-")
 
     @staticmethod
     def _looks_like_government(owner: str) -> bool:

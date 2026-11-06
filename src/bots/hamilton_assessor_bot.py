@@ -172,6 +172,13 @@ class HamiltonAssessorBot(BotBase):
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} Hamilton candidates to enrich")
             for row in candidates[:self.max_leads_per_run]:
+                # Personal-property tax leads carry the address of the building a
+                # business rents in; attaching that parcel would hand a tenant
+                # the landlord's land use, value and mailing.
+                raw0 = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                if str(raw0.get("parcel") or "").upper().startswith("PER-"):
+                    skipped += 1
+                    continue
                 hit = self._lookup(row, index, addr_index)
                 if hit is None:
                     no_match += 1

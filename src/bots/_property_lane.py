@@ -325,6 +325,39 @@ def contact_path(row: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
 
 # ── lane ────────────────────────────────────────────────────────────────────
 
+_NAME_STOP = {"LLC", "INC", "CORP", "CO", "LP", "LLP", "LTD", "TRUST", "TR", "TRS", "THE", "AND", "OF", "ETUX",
+              "ETAL", "ETVIR", "JR", "SR", "II", "III", "ATTN", "C/O", "TN", "LIVING", "REVOCABLE", "FAMILY",
+              # generic business words: sharing one is not sharing a name
+              "TRUCK", "TRAILER", "WASH", "PROFESSIONAL", "CENTER", "CENTERS", "SERVICE", "SERVICES", "AUTO",
+              "HOMES", "HOME", "PROPERTIES", "PROPERTY", "GROUP", "HOLDINGS", "COMPANY", "ENTERPRISES",
+              "INVESTMENTS", "REALTY", "DEVELOPMENT", "MANAGEMENT", "PARTNERS", "CHURCH", "MINISTRIES",
+              "NASHVILLE", "CHATTANOOGA", "MEMPHIS", "KNOXVILLE", "TENNESSEE", "AMERICA", "AMERICAN", "NATIONAL"}
+
+
+def _name_set(name: Optional[str]) -> set:
+    return {t for t in re.sub(r"[^A-Z ]", " ", str(name or "").upper()).split()
+            if len(t) >= 3 and t not in _NAME_STOP}
+
+
+def parcel_owner(raw: Dict[str, Any]) -> Optional[str]:
+    """Owner on the matched parcel record, from whichever assessor source is present."""
+    for key in ("metro_parcel", "hamilton_assessor", "comptroller_parcel", "padctn", "williamson_inigo",
+                "rutherford_arcgis", "shelby_arcgis", "tpad"):
+        v = _d(raw.get(key)).get("owner")
+        if v:
+            return str(v)
+    return None
+
+
+def owner_mismatch(lead_owner: Optional[str], raw: Dict[str, Any]) -> bool:
+    """True when the parcel record's owner shares no name with the lead: the lead
+    is a tenant, contractor or business at the address, not the owner (e.g. a
+    business personal-property tax account matched to its landlord's building)."""
+    po = parcel_owner(raw)
+    a, b = _name_set(lead_owner), _name_set(po)
+    return bool(a and b and not (a & b))
+
+
 def _sale_passed(row: Dict[str, Any]) -> bool:
     s = row.get("trustee_sale_date")
     if not s:
@@ -416,7 +449,13 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
 
     dt = (row.get("distress_type") or "").upper()
     floor = COMMERCIAL_MIN_VALUE if lane == "commercial" else LAND_MIN_VALUE
-    if otype == "government":
+    if str(raw.get("parcel") or "").upper().startswith("PER-"):
+        # Hamilton business personal-property tax: a tenant's debt at the
+        # address of the building it rents, not the owner's real estate.
+        out["exclude_reason"] = "personal_property_tax"
+    elif owner_mismatch(owner, raw):
+        out["exclude_reason"] = "owner_mismatch"
+    elif otype == "government":
         out["exclude_reason"] = "government_owner"
     elif dt == "DEMOLITION":
         out["exclude_reason"] = "permit_not_distress"
