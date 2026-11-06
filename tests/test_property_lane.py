@@ -35,6 +35,14 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(r["lane"], "commercial")
         self.assertEqual(r["grade"], "B")          # value + strong distress, mail only
 
+    def test_metro_parcel_layer(self):
+        raw = {"metro_parcel": {"land_use": "STRIP SHOPPING CENTER", "total_appraisal": 1200000, "acres": 1.4,
+                                "owner_mailing": "220 GREAT CIRCLE RD STE 126, NASHVILLE TN 37228"}}
+        r = property_lane(row(raw_payload=raw))
+        self.assertEqual((r["lane"], r["value"], r["contact"]["mailing_state"]), ("commercial", 1200000, "TN"))
+        self.assertEqual(property_lane(row(raw_payload={"metro_parcel": {"land_use": "QUADPLEX"}}))["lane"],
+                         "residential")
+
     def test_duplex_stays_residential(self):
         r = property_lane(row(raw_payload={"padctn": {"land_use": "C12 - DUPLEX"}}))
         self.assertEqual(r["lane"], "residential")

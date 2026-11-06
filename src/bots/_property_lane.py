@@ -132,6 +132,7 @@ def land_use_signals(raw: Dict[str, Any], bot_source: str = "") -> List[Tuple[st
             out.append((src, str(v).strip()))
 
     add("padctn", _d(raw.get("padctn")).get("land_use"))
+    add("metro", _d(raw.get("metro_parcel")).get("land_use"))
     tpad = _d(raw.get("tpad"))
     add("tpad", tpad.get("class"))
     shel = _d(raw.get("shelby_arcgis"))
@@ -157,7 +158,8 @@ def _classify_signal(src: str, text: str) -> Optional[str]:
 
 
 def _acres(raw: Dict[str, Any]) -> Optional[float]:
-    for v in (_d(raw.get("padctn")).get("land_acres"), _d(raw.get("tpad")).get("acres"),
+    for v in (_d(raw.get("padctn")).get("land_acres"), _d(raw.get("metro_parcel")).get("acres"),
+              _d(raw.get("tpad")).get("acres"),
               _d(raw.get("williamson_inigo")).get("acreage"), _d(raw.get("padctn_owner_match")).get("acres"),
               _d(raw.get("asset_profile")).get("total_acres")):
         n = _num(v)
@@ -168,6 +170,7 @@ def _acres(raw: Dict[str, Any]) -> Optional[float]:
 
 def _value(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[float]:
     for v in (row.get("property_value"), _d(raw.get("padctn")).get("appraised"),
+              _d(raw.get("metro_parcel")).get("total_appraisal"),
               _d(raw.get("tpad")).get("appraised_value_num"), _d(raw.get("shelby_arcgis")).get("appraised"),
               _d(raw.get("rutherford_arcgis")).get("appraised"), _d(raw.get("williamson_inigo")).get("appraised"),
               _d(raw.get("padctn_owner_match")).get("appraised")):
@@ -200,7 +203,8 @@ def _mailing(raw: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
                                                " ".join(str(y) for y in (r.get("owner_state"), r.get("owner_zip")) if y))
                              if x)
             cands.append((line, (r.get("owner_state") or "").strip().upper() or None))
-    for v in (_d(raw.get("padctn")).get("mailing_address"), _d(raw.get("tpad")).get("mailing_address"),
+    for v in (_d(raw.get("padctn")).get("mailing_address"), _d(raw.get("metro_parcel")).get("owner_mailing"),
+              _d(raw.get("tpad")).get("mailing_address"),
               _d(raw.get("williamson_inigo")).get("owner_address"), raw.get("mailing_address"),
               _d(raw.get("padctn_owner_match")).get("mailing_address")):
         if v:
