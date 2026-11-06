@@ -37,7 +37,7 @@ from ._property_lane import property_lane
 
 PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
-RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
+RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "davidson_tax_sale", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
                 "phone,alternate_phones,email,trustee_sale_date,"
@@ -97,7 +97,7 @@ def _tag(lane: Dict[str, Any]) -> Dict[str, Any]:
     """What gets stored on the row: lane facts, without the PII-heavy contact detail."""
     c = lane["contact"]
     tag = {k: lane[k] for k in ("lane", "subtype", "basis", "acres", "value", "owner_type",
-                                "grade", "exclude_reason", "version")}
+                                "grade", "exclude_reason", "stacked_distress", "version")}
     tag["contact_tier"] = c["tier"]
     tag["out_of_state_owner"] = c["out_of_state"]
     if "land_flip" in lane:
@@ -139,6 +139,8 @@ class PropertyLaneBot(BotBase):
                 key = lane["lane"]
                 if lane["contact"]["unverified_phone"]:
                     c[f"{key}_phone_unverified"] += 1
+                if lane["stacked_distress"]:
+                    c[f"{key}_stacked_distress"] += 1
                 if lane["grade"]:
                     c[f"{key}_qualified"] += 1
                     c[f"{key}_grade_{lane['grade']}"] += 1
@@ -196,13 +198,14 @@ class PropertyLaneBot(BotBase):
             fp = self.out_dir / f"{name}.csv"
             with open(fp, "w", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)
-                w.writerow(["grade", "land_flip_score", "land_flip_signals", "subtype", "basis", "bot_source",
+                w.writerow(["grade", "land_flip_score", "land_flip_signals", "stacked_distress", "subtype", "basis", "bot_source",
                             "distress_type", "county", "property_address", "owner", "owner_type", "value", "acres",
                             "contact_tier", "phones", "email", "mailing", "out_of_state", "trustee_sale_date", "id"])
                 for it in sorted(items, key=sort_key):
                     r, ln, c = it["row"], it["lane"], it["lane"]["contact"]
                     lf = ln.get("land_flip") or {}
-                    w.writerow([ln["grade"], lf.get("score", ""), " ".join(lf.get("signals", [])), ln["subtype"] or "",
+                    w.writerow([ln["grade"], lf.get("score", ""), " ".join(lf.get("signals", [])),
+                                " ".join(ln["stacked_distress"]), ln["subtype"] or "",
                                 ln["basis"], r.get("bot_source"), r.get("distress_type"), r.get("county"),
                                 r.get("property_address"), r.get("owner_name_records") or r.get("full_name"),
                                 ln["owner_type"], ln["value"] or "", ln["acres"] or "", c["tier"], " ".join(c["phones"]),

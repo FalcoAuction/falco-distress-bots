@@ -87,6 +87,7 @@ from . import stale_regrade_bot
 from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
+from . import davidson_tax_stack_bot
 from . import property_lane_bot
 from . import stacked_distress_aggregator_bot
 from . import decision_engine_bot
@@ -193,6 +194,7 @@ NEW_BOTS = [
     ("phone_resolver", phone_resolver_bot.run),
     # Commercial / land lanes: after assessor matches and phone trust exist,
     # so grades see the owner's land use and verified phones.
+    ("davidson_tax_stack", davidson_tax_stack_bot.run),
     ("property_lane", property_lane_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.

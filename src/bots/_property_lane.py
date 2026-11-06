@@ -335,6 +335,17 @@ def _sale_passed(row: Dict[str, Any]) -> bool:
         return False
 
 
+def stacked_distress(raw: Dict[str, Any]) -> List[str]:
+    """Distress found by cross-checking other sources, on top of the lead's own
+    distress_type. Only forcing signals count: a parcel still unpaid when its
+    tax sale was held (one-year redemption clock running)."""
+    out = []
+    ts = _d(raw.get("davidson_tax_sale"))
+    if ts.get("status") == "unpaid_at_sale":
+        out.append("davidson_tax_sale_unpaid")
+    return out
+
+
 def _land_flip(row: Dict[str, Any], contact: Dict[str, Any], acres: Optional[float],
                value: Optional[float]) -> Dict[str, Any]:
     """Signals that a private TN landowner would sell vacant land cheap."""
@@ -343,7 +354,7 @@ def _land_flip(row: Dict[str, Any], contact: Dict[str, Any], acres: Optional[flo
     dt = (row.get("distress_type") or "").upper()
     if contact["out_of_state"]:
         signals.append("out_of_state_owner"); score += 3
-    if dt in ("TAX_LIEN", "TAX_DELINQUENT", "TAX_SALE"):
+    if dt in ("TAX_LIEN", "TAX_DELINQUENT", "TAX_SALE") or stacked_distress(_d(row.get("raw_payload"))):
         signals.append("tax_delinquent"); score += 2
     if dt == "PROBATE":
         signals.append("probate"); score += 2
@@ -398,7 +409,7 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "lane": lane, "subtype": subtype, "basis": basis, "acres": acres, "value": value,
         "owner_type": otype, "contact": contact, "grade": None, "exclude_reason": None,
-        "version": VERSION,
+        "stacked_distress": stacked_distress(raw), "version": VERSION,
     }
     if lane not in ("commercial", "land"):
         return out
@@ -423,7 +434,7 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         # A: owner reachable directly, value known, distress that forces a sale.
         # Code violations alone never reach A.
         direct = contact["tier"] in ("phone", "email")
-        strong = dt in STRONG_DISTRESS
+        strong = dt in STRONG_DISTRESS or bool(out["stacked_distress"])
         out["grade"] = "A" if (direct and value and strong) else "B" if (direct or (value and strong)) else "C"
     if lane == "land":
         out["land_flip"] = _land_flip(row, contact, acres, value)
