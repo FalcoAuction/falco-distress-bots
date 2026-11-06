@@ -78,6 +78,7 @@ from . import phone_classifier_bot
 from . import tpad_enricher_bot
 from . import davidson_assessor_bot
 from . import davidson_parcels_bot
+from . import landlord_portfolio_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
@@ -181,6 +182,7 @@ NEW_BOTS = [
     ("tpad_enricher", tpad_enricher_bot.run),
     ("davidson_parcels", davidson_parcels_bot.run),
     ("davidson_assessor", davidson_assessor_bot.run),
+    ("landlord_portfolio", landlord_portfolio_bot.run),
     ("williamson_assessor", williamson_assessor_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
