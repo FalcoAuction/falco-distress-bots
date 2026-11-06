@@ -6,9 +6,11 @@ stores. Pure; no network, no DB.
 Patrick's bar: high-value only, no household contents. So a lead qualifies
 only on a hard signal, never on the distress type alone:
 
-  estate               PROBATE with a TN aircraft on the decedent (FAA overlay)
-                       or a home appraised at ESTATE_HOME_MIN+ (affluent
-                       household proxy for vehicles, guns, collections)
+  estate               PROBATE with a contents signal at any home value: a TN
+                       aircraft (FAA), an ATF firearms license, a big detached
+                       garage / barn / shop on the assessor card, or an
+                       obituary naming a collection; or, as a weak proxy, a
+                       home appraised at ESTATE_HOME_MIN+
   business_liquidation BANKRUPTCY by an entity (not chapter 13) or a WARN
                        closure, in a hard-asset industry (equipment, fleet,
                        guns, collectibles, vehicles); WARN_WORKERS_MIN+
@@ -26,10 +28,13 @@ appraisals; `signals` says what each one rests on.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-ESTATE_HOME_MIN = 1_000_000
+ESTATE_HOME_MIN = 1_000_000       # proxy only; contents signals qualify an estate at any home value
 ESTATE_HOME_A = 2_000_000
+OUTBUILDING_GARAGE_MIN = 600       # detached 2+ car garage
+OUTBUILDING_BARN_MIN = 1_000
+OUTBUILDING_SHOP_MIN = 400
 WARN_WORKERS_MIN = 75             # grade A boost only; size alone never qualifies
 SEIZURE_VALUE_MIN = 250_000
 SEIZURE_MIN_YEARS = 2              # one year late is a slow payer, not a seizure
@@ -165,19 +170,78 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _ffl_people(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    f = raw.get("ffl")
+    return [x for x in f if isinstance(x, dict)] if isinstance(f, list) else []
+
+
+def _ffl_signal(lic: List[Dict[str, Any]]) -> str:
+    return "; ".join(f"ATF {x.get('license_label')} {x.get('license_name')} at {x.get('premise')} "
+                     f"({x.get('match_type')}, {x.get('listing')})" for x in lic)
+
+
+def outbuilding_signals(raw: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """(category, description) for each assessor outbuilding big enough to hold
+    something worth selling. raw_payload.outbuildings: [{type, description, area}]."""
+    out = []
+    items = raw.get("outbuildings")
+    for o in items if isinstance(items, list) else []:
+        if not isinstance(o, dict):
+            continue
+        text = f"{o.get('type') or ''} {o.get('description') or ''}".upper()
+        area = _num(o.get("area")) or 0
+        label = f"{text.strip()} ({area:,.0f} sq ft)" if area else text.strip()
+        if re.search(r"HORSE|STABLE|EQUINE", text):
+            out.append(("farm_equipment", label))
+        elif re.search(r"GARAGE|CARPORT", text) and re.search(r"DET|DETACHED|SEPARATE", text) and area >= OUTBUILDING_GARAGE_MIN:
+            out.append(("vehicles", label))
+        elif re.search(r"BARN|POLE|MACHINE|EQUIP|IMPLEMENT", text) and area >= OUTBUILDING_BARN_MIN:
+            out.append(("farm_equipment", label))
+        elif re.search(r"SHOP|WORKSHOP", text) and area >= OUTBUILDING_SHOP_MIN:
+            out.append(("business_equipment", label))
+    return out
+
+
+def obituary_signals(raw: Dict[str, Any]) -> Tuple[List[str], List[str], Optional[str]]:
+    """raw_payload.obituary: {categories, phrases, url} written by the obituary bot."""
+    ob = raw.get("obituary")
+    if not isinstance(ob, dict):
+        return [], [], None
+    cats = [c for c in ob.get("categories") or [] if isinstance(c, str)]
+    return cats, [p for p in ob.get("phrases") or [] if isinstance(p, str)], ob.get("url")
+
+
 def _estate(lead, raw, planes, plane_bands):
     home = _num(lead.get("property_value")) or 0
     signals, cats, caveats = [], [], []
+    strong = 0
     if planes:
         signals.append("decedent's aircraft: " + _aircraft_signal(planes))
         cats.append("aircraft")
+        strong += "A" in plane_bands
+    lic = _ffl_people(raw)
+    if lic:
+        signals.append("decedent was a federal firearms licensee: " + _ffl_signal(lic))
+        cats.append("guns")
+        strong += 1
+    sheds = outbuilding_signals(raw)
+    if sheds:
+        signals.append("assessor outbuildings: " + "; ".join(d for _, d in sheds))
+        cats += [c for c, _ in sheds]
+    ob_cats, ob_phrases, ob_url = obituary_signals(raw)
+    if ob_cats:
+        signals.append("obituary mentions: " + "; ".join(ob_phrases[:4]) + (f" ({ob_url})" if ob_url else ""))
+        cats += ob_cats
     if home >= ESTATE_HOME_MIN:
         signals.append(f"home appraised ${home:,.0f} (affluent-household proxy)")
         cats += ["vehicles", "collections"]
-        caveats.append("contents are unseen; home value is a proxy, confirm with the executor")
+        caveats.append("home value is a proxy for contents, confirm with the executor")
+        strong += home >= ESTATE_HOME_A
     if not signals:
         return None
-    grade = "A" if ("A" in plane_bands or home >= ESTATE_HOME_A or (planes and home >= ESTATE_HOME_MIN)) else "B"
+    if not lic and not planes:
+        caveats.append("contents are unseen: ask the executor about vehicles, guns, collections and equipment")
+    grade = "A" if (strong or len(signals) >= 2) else "B"
     est = 300_000 if "A" in plane_bands else 100_000 if planes else None
     return _result("estate", grade, cats, est, signals, raw, caveats)
 
@@ -188,18 +252,19 @@ def _liquidation(lead, raw, planes, dt):
     chapter = str(raw.get("chapter") or "").strip()
     if dt == "BANKRUPTCY" and (not is_entity(name) or chapter == "13"):
         return None   # individual debtors belong to the estate/owner lanes, not liquidations
-    cat = category_of(name)
+    lic = _ffl_people(raw)
+    cat = "guns" if lic else category_of(name)
     if not cat:
         return None   # national closures move their equipment; only hard-asset businesses qualify
     workers = _num(warn.get("workers")) if warn else None
     signals = [f"{'WARN closure' if warn else 'chapter ' + (chapter or '?') + ' business bankruptcy'}: {name}",
-               f"hard-asset industry ({cat.replace('_', ' ')})"]
+               _ffl_signal(lic) if lic else f"hard-asset industry ({cat.replace('_', ' ')})"]
     caveats = []
     if workers:
         signals.append(f"{workers:.0f} workers on the WARN notice")
     elif dt == "BANKRUPTCY":
         caveats.append("size unverified: check estimated assets on the petition (Official Form 201)")
-    grade = "A" if (workers and workers >= WARN_WORKERS_MIN) else "B"
+    grade = "A" if (lic or (workers and workers >= WARN_WORKERS_MIN)) else "B"
     cats = [cat]
     if planes:
         cats.append("aircraft")
@@ -219,10 +284,13 @@ def _seizure(lead, raw):
     dormant = years > SEIZURE_DORMANT_YEARS
     if dormant and value < SEIZURE_DORMANT_VALUE_MIN:
         return None
-    cat = category_of(name)
+    lic = _ffl_people(raw)
+    cat = "guns" if lic else category_of(name)
     signals = [f"delinquent business personal property: ${_num(raw.get('cumulative_owed')):,.0f} owed over "
                f"{years:.0f} yr(s), implied equipment value ~${value:,.0f}"]
-    if cat:
+    if lic:
+        signals.append(_ffl_signal(lic))
+    elif cat:
         signals.append(f"hard-asset industry ({cat.replace('_', ' ')})")
     caveats = ["implied value backs out of taxes owed; confirm with the assessor's personal property schedule"]
     if dormant:

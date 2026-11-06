@@ -8,7 +8,9 @@ homeowner_requests_staging and homeowner_requests. No schema change.
 Leads that no longer qualify have the key removed, so the tag always
 reflects today's rules and data.
 
-Runs after faa_aircraft (it reads raw_payload.aircraft).
+Runs after the signal bots it reads: faa_aircraft (raw_payload.aircraft),
+ffl_overlay (raw_payload.ffl), obituary_signals (raw_payload.obituary),
+and whatever fills raw_payload.outbuildings.
 
 Distress type: N/A — utility enricher.
 """
@@ -27,7 +29,7 @@ from ._personal_property import classify
 # Only the raw_payload keys the rules read (JSON-path selects keep pages small).
 _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "chapter", "case_name",
              "court_id", "docket_number", "courtlistener_docket_url")
-_RAW_JSON = ("court_notice", "warn", "aircraft")
+_RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary")
 _BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value"
 
 
