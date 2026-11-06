@@ -77,6 +77,25 @@ class LaneTests(unittest.TestCase):
         r = property_lane(row(bot_source="nashville_codes", raw_payload={"land_use": "550"}))
         self.assertEqual(r["lane"], "unknown")
 
+    def test_hamilton_assessor_descriptions(self):
+        mk = lambda d: property_lane(row(raw_payload={"hamilton_assessor": {"land_use": d}}))
+        self.assertEqual(mk("One Family Household Unit")["lane"], "residential")
+        self.assertEqual(mk("UNDEVELOPED LAND AND WATER AREAS")["lane"], "land")
+        self.assertEqual(mk("Business Services")["lane"], "commercial")
+        self.assertEqual(mk("Transient Lodging")["lane"], "commercial")
+        self.assertEqual(mk("Mobile Home Park")["lane"], "commercial")
+        self.assertEqual(mk("Mobile Homes (Single Trailer)")["lane"], "residential")
+        self.assertEqual(mk("Governmental Functions and Services")["lane"], "unknown")
+        self.assertEqual(mk("Parks")["lane"], "unknown")
+        self.assertEqual(property_lane(row(raw_payload={"metro_parcel": {"land_use": "PARKING LOT"}}))["lane"],
+                         "commercial")
+
+    def test_hamilton_assessor_mailing_and_value(self):
+        raw = {"hamilton_assessor": {"land_use": "Retail Trade - General", "appraised": 300000,
+                                     "owner_mailing": "PO BOX 12, ATLANTA GA 30301", "owner_state": "GA"}}
+        r = property_lane(row(raw_payload=raw))
+        self.assertEqual((r["lane"], r["value"], r["contact"]["mailing_state"]), ("commercial", 300000, "GA"))
+
     def test_shelby_class_letter(self):
         r = property_lane(row(raw_payload={"shelby_arcgis": {"class": "C"}}))
         self.assertEqual(r["lane"], "commercial")

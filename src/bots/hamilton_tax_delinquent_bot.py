@@ -41,7 +41,8 @@ HAMILTON_ZIP_URL = "https://www.hamiltontn.gov/_downloadsTrusteeDelinquent/CTRUD
 
 MIN_BILL_YEAR_LOOKBACK = 5      # only delinquencies from the last 5 years
 MIN_GRAND_TOTAL_DOLLARS = 500   # skip parcels owing less than $500 total
-MAX_LEADS = 2000                # safety cap per run
+MAX_LEADS = 2000                # safety cap per run (individual owners)
+MAX_ENTITY_LEADS = 1500         # separate cap for LLC / church / estate owners
 
 # Owner-name patterns that indicate a business/institution rather than a
 # homeowner. We're targeting residential distress, so filter these out.
@@ -53,6 +54,12 @@ _BUSINESS_OWNER_PATTERNS = (
     " HOSPITAL", " CHURCH", " MOSQUE", " TEMPLE", " SCHOOL", " UNIVERSITY",
     " HOMES", " AUTHORITY", " DISTRICT", " GOVERNMENT", " HEIRS OF", " ESTATE OF",
     " LIMITED", " LP ", " L P", " PLC", " S CORPORATION", " GENERAL PARTNERSHIP",
+)
+
+# Public and institutional owners are never sellers we can work: skip.
+_GOVERNMENT_OWNER_PATTERNS = (
+    " CITY OF", " COUNTY OF", " STATE OF", " AUTHORITY", " DISTRICT", " GOVERNMENT",
+    " SCHOOL", " UNIVERSITY", " HOSPITAL", " UNITED STATES", " LAND BANK",
 )
 
 # Common street keywords used to validate the Property Address column —
@@ -85,6 +92,7 @@ class HamiltonTaxDelinquentBot(BotBase):
         skipped_old = 0
         skipped_small = 0
         skipped_noaddr = 0
+        entity_leads = 0
 
         for parcel_key, row in latest_by_parcel.items():
             year = self._safe_int(row.get("Bill Year"))
@@ -104,9 +112,19 @@ class HamiltonTaxDelinquentBot(BotBase):
                 continue
 
             owner = self._compose_owner(row)
-            if owner is None or self._looks_like_business(owner):
+            if owner is None or self._looks_like_government(owner):
                 skipped_small += 1  # bucket with small for telemetry
                 continue
+            # Entity, church and estate owners used to be dropped here.
+            # They are the commercial / land lanes' leads, so keep them
+            # (the residential decision engine still rejects entities),
+            # on their own cap so they never crowd out homeowner parcels.
+            is_entity = self._looks_like_business(owner)
+            if is_entity:
+                if entity_leads >= MAX_ENTITY_LEADS:
+                    skipped_small += 1
+                    continue
+                entity_leads += 1
             mailing_address = self._compose_mailing(row)
             full_address = f"{address}, Chattanooga, TN"
 
@@ -137,10 +155,11 @@ class HamiltonTaxDelinquentBot(BotBase):
                     "property_type": (row.get("Property Type") or "").strip() or None,
                     "back_tax_indicator": (row.get("Back Tax Indicator") or "").strip() or None,
                     "tax_relief_indicator": (row.get("Tax Relief Indicator") or "").strip() or None,
+                    "owner_is_entity": is_entity,
                 },
             ))
 
-            if len(leads) >= MAX_LEADS:
+            if len(leads) - entity_leads >= MAX_LEADS:
                 self.logger.info(f"hit max_leads cap of {MAX_LEADS}; truncating")
                 break
 
@@ -268,6 +287,11 @@ class HamiltonTaxDelinquentBot(BotBase):
     def _looks_like_business(owner: str) -> bool:
         upper = f" {owner.upper()} "
         return any(pat in upper for pat in _BUSINESS_OWNER_PATTERNS)
+
+    @staticmethod
+    def _looks_like_government(owner: str) -> bool:
+        upper = f" {owner.upper()} "
+        return any(pat in upper for pat in _GOVERNMENT_OWNER_PATTERNS)
 
     @staticmethod
     def _compose_owner(row: Dict[str, str]) -> Optional[str]:

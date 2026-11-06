@@ -38,12 +38,22 @@ LAND_MIN_VALUE = 3000
 _LAND_RE = re.compile(r"VACANT|FARM|AGRIC|FOREST|GREENBELT|TIMBER|PASTURE|ACREAGE|UNDEVELOPED|\bAGRI\b", re.I)
 _RES_RE = re.compile(
     r"SINGLE FAMILY|DUPLEX|TRIPLEX|QUAD|CONDO|ZERO LOT|TOWNHOUSE|TOWNHOME|TOWNHOUSE/CO|MOBILE HOME|"
-    r"MANUFACTURED|RESIDENTIAL|^RS$|RURAL COMBO", re.I)
+    r"MANUFACTURED|RESIDENTIAL|^RS$|RURAL COMBO|HOUSEHOLD UNIT|FAMILY UNIT", re.I)
 _COM_RE = re.compile(
     r"COMMERCIAL|INDUSTRIAL|OFFICE|RETAIL|STORE|SHOPPING|SHOP\b|WAREHOUSE|RESTAURANT|RESTURANT|AUTO|"
     r"APARTMENT|CHURCH|RELIGIOUS|MANUFACTURING|TERMINAL|MEDICAL|HOTEL|MOTEL|SERVICE STATION|GAS STATION|"
     r"CONVENIENCE|BANK|MORTUARY|FUNERAL|DAY CARE|NURSING|PARKING|STORAGE|THEATER|BOWLING|MARINA|CLUB|"
-    r"LODGE|GARAGE|HOSPITAL|CLINIC|SCHOOL", re.I)
+    r"LODGE|GARAGE|HOSPITAL|CLINIC|SCHOOL|"
+    # Hamilton's Standard Land Use descriptions
+    r"SERVICE|TRADE|LODGING|DENTIST|MOTOR VEHICLE|DINER|LUNCHEONETTE|\bBARS?\b|TAVERN|GROCER|LIQUOR|"
+    r"LUMBER|PRINTING|GOLF|LEGAL|FINANCE|BROKER|COMMUNICATIONS|TRANSPORTATION|ENTERTAINMENT|RECREATION|"
+    r"BAKER|ANTIQUE|SPORTING|PAINT|ACCOUNTING|MOTORCYCLE|AMUSEMENT|EQUIPMENT|SUPPLIES|ENGINEERING|"
+    r"ARCHITECT|INSTRUMENT|FRUITS|MARINE CRAFT|GROUP QUARTERS", re.I)
+# Public and institutional uses: never a seller we can work.
+_INSTITUTIONAL_RE = re.compile(
+    r"GOVERNMENT|UTILIT|UTILTIES|CEMETER|\bPARKS?\b|PLAYGROUND|COMMUNITY LOTS|UNIVERSIT|COLLEGE|"
+    r"EDUCATIONAL|RAIL TRANSPORT|SEWAGE|FRATERNAL|LABOR UNION|AIRPORT|POSTAL|PROTECTIVE FUNCTIONS|"
+    r"RIGHT OF WAY|VOCATIONAL|PUBLIC ASSEMBLY|CULTURAL ACTIVITIES", re.I)
 _EXEMPT_RE = re.compile(r"EXEMPT|\bCITY\b|\bCOUNTY\b|\bSTATE\b", re.I)
 
 _GOV_OWNER_RE = re.compile(
@@ -91,6 +101,10 @@ def _classify_text(text: str) -> Optional[str]:
         return "exempt"
     if _LAND_RE.search(t):
         return "land"
+    if "MOBILE HOME PARK" in t:              # income property, not a home
+        return "commercial"
+    if _INSTITUTIONAL_RE.search(t):
+        return "exempt"
     if _RES_RE.search(t):
         return "residential"
     if _COM_RE.search(t):
@@ -133,6 +147,7 @@ def land_use_signals(raw: Dict[str, Any], bot_source: str = "") -> List[Tuple[st
 
     add("padctn", _d(raw.get("padctn")).get("land_use"))
     add("metro", _d(raw.get("metro_parcel")).get("land_use"))
+    add("hamilton_assessor", _d(raw.get("hamilton_assessor")).get("land_use"))
     tpad = _d(raw.get("tpad"))
     add("tpad", tpad.get("class"))
     shel = _d(raw.get("shelby_arcgis"))
@@ -159,6 +174,7 @@ def _classify_signal(src: str, text: str) -> Optional[str]:
 
 def _acres(raw: Dict[str, Any]) -> Optional[float]:
     for v in (_d(raw.get("padctn")).get("land_acres"), _d(raw.get("metro_parcel")).get("acres"),
+              _d(raw.get("hamilton_assessor")).get("calc_acres"),
               _d(raw.get("tpad")).get("acres"),
               _d(raw.get("williamson_inigo")).get("acreage"), _d(raw.get("padctn_owner_match")).get("acres"),
               _d(raw.get("asset_profile")).get("total_acres")):
@@ -171,6 +187,7 @@ def _acres(raw: Dict[str, Any]) -> Optional[float]:
 def _value(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[float]:
     for v in (row.get("property_value"), _d(raw.get("padctn")).get("appraised"),
               _d(raw.get("metro_parcel")).get("total_appraisal"),
+              _d(raw.get("hamilton_assessor")).get("appraised"),
               _d(raw.get("tpad")).get("appraised_value_num"), _d(raw.get("shelby_arcgis")).get("appraised"),
               _d(raw.get("rutherford_arcgis")).get("appraised"), _d(raw.get("williamson_inigo")).get("appraised"),
               _d(raw.get("padctn_owner_match")).get("appraised")):
@@ -196,6 +213,9 @@ def owner_type(owner: Optional[str], owner_class: Optional[str] = None) -> str:
 def _mailing(raw: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     """Best owner mailing address and its state, from any assessor record."""
     cands: List[Tuple[Optional[str], Optional[str]]] = []
+    ham = _d(raw.get("hamilton_assessor"))
+    if ham.get("owner_mailing"):           # already "street, CITY ST ZIP"
+        cands.append((ham["owner_mailing"], (ham.get("owner_state") or "").strip().upper() or None))
     for key in ("shelby_arcgis", "rutherford_arcgis"):
         r = _d(raw.get(key))
         if r.get("owner_mailing"):
