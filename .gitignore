@@ -26,3 +26,6 @@ Thumbs.db
 # HMDA cache — large CSVs from CFPB, regenerated on demand
 data/hmda_cache/
 
+
+# Comptroller county parcel + assessment files (owner PII, ~2GB, refreshed weekly)
+data/comptroller/
