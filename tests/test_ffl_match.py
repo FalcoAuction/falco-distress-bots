@@ -57,6 +57,11 @@ class FflMatchTests(unittest.TestCase):
         self.assertEqual([(t["license_label"], t["match_type"]) for t in tags],
                          [("firearms manufacturer", "business_name")])
 
+    def test_chain_business_not_matched(self):
+        chain = [f'1,62,037,02,9A,{30000 + i},"FCFS TN, INC","CASH AMERICA PAWN","{i} PIKE ST",NASHVILLE,TN,37211,,,,,'
+                 for i in range(8)]
+        self.assertEqual(index(ROWS + chain).match({"distress_type": "CODE_VIOLATION", "full_name": "FCFS TN, INC"}), [])
+
     def test_same_license_across_months_counted_once(self):
         rows = rows_from_text("\n".join([HEADER] + ROWS), "0926.csv") + rows_from_text("\n".join([HEADER] + ROWS), "1026.csv")
         self.assertEqual(FflIndex(rows).count, 3)

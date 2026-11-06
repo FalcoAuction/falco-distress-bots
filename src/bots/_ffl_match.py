@@ -35,6 +35,9 @@ TYPE_LABEL = {
     "06": "ammunition maker", "07": "firearms manufacturer", "08": "importer",
     "09": "destructive device dealer", "10": "destructive device maker", "11": "destructive device importer",
 }
+# A business name on more licenses than this is a chain: its stores are not
+# one distressed dealer's inventory.
+MAX_LICENSES_PER_BUSINESS = 5
 
 
 def _row_dicts(text_lines: Iterable[str]) -> Iterable[Dict[str, str]]:
@@ -118,7 +121,10 @@ class FflIndex:
         for nm in names:
             ek = entity_key(nm)
             if ek:
-                for r in self.by_entity.get(ek, []):
+                held = self.by_entity.get(ek, [])
+                if len(held) > MAX_LICENSES_PER_BUSINESS:
+                    continue   # a chain (e.g. FirstCash pawn shops), not a local dealer to liquidate
+                for r in held:
                     hits.setdefault(key(r), (r, "business_name", "high"))
                 continue
             for last, first, mi in person_keys(nm):
