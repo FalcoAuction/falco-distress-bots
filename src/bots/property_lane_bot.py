@@ -94,12 +94,18 @@ def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _tag(lane: Dict[str, Any]) -> Dict[str, Any]:
-    """What gets stored on the row: lane facts, without the PII-heavy contact detail."""
+    """What gets stored on the row: lane facts plus the contact path the grade
+    rests on (owner mailing, and phones only when phone_trust ties them to the
+    owner), so /admin/lanes can be worked without re-deriving it."""
     c = lane["contact"]
     tag = {k: lane[k] for k in ("lane", "subtype", "basis", "acres", "value", "owner_type",
                                 "grade", "exclude_reason", "stacked_distress", "version")}
     tag["contact_tier"] = c["tier"]
     tag["out_of_state_owner"] = c["out_of_state"]
+    tag["mailing"] = c["mailing"]
+    tag["mailing_state"] = c["mailing_state"]
+    tag["phones"] = c["phones"]
+    tag["email"] = c["email"]
     if "land_flip" in lane:
         tag["land_flip"] = lane["land_flip"]
     return tag
