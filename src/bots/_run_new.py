@@ -86,6 +86,7 @@ from . import stale_regrade_bot
 from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
+from . import property_lane_bot
 from . import stacked_distress_aggregator_bot
 from . import decision_engine_bot
 # MTN-focused enrichment chain (added 2026-05-06). These are what
@@ -186,6 +187,9 @@ NEW_BOTS = [
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
+    # Commercial / land lanes: after assessor matches and phone trust exist,
+    # so grades see the owner's land use and verified phones.
+    ("property_lane", property_lane_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
