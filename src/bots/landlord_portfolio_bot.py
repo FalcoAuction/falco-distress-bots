@@ -15,7 +15,8 @@ one of those parcels, or when the owner is an aging passive landlord:
 
 tired_score = signal weights + rentals (capped at 10) + years owned / 5
 (capped at 4) + 2 for out-of-state mailing. A starting judgment, not a
-model. expected_fee = residential value x 10% x 20%.
+model. expected_fee = residential value x 0.90 (auctions modeled at 90% of
+assessed value) x 10% buyer's premium x 20% FALCO share.
 
 How: staged leads in the county are tied to an owner through the parcel
 at their address (Davidson leads already carry Metro's owner), then every
@@ -288,7 +289,7 @@ def build_portfolio(county: str, owner: str, parcels: List[Dict[str, Any]], sign
                     for p in sorted(residential, key=lambda p: -(p.get("value") or 0))][:MAX_RESIDENTIAL],
         "is_company": bool(COMPANY_RE.search(owner)),
         "signals": {k: v for k, v in signals.items() if v}, "signal_count": signal_count, "passive": passive,
-        "tired_score": score, "expected_fee": round(res_value * 0.10 * 0.20, 2),
+        "tired_score": score, "expected_fee": round(res_value * 0.90 * 0.10 * 0.20, 2),
         "refreshed_at": datetime.now(timezone.utc).isoformat(),
     }
 
