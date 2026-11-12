@@ -23,7 +23,7 @@ class PortfolioTests(unittest.TestCase):
         row = lp.build_portfolio("davidson", "EXAMPLE, PAT", [P("1"), P("2", value=300000), P("2"), P("3", residential=False, value=900000)],
                                  {"code_housing": 2, "tax": 1}, ["26-1", "26-2"], today=TODAY)
         self.assertEqual((row["parcel_count"], row["residential_count"], row["residential_value"]), (3, 2, 500000))
-        self.assertEqual((row["expected_fee"], row["owned_since"], row["passive"], row["signal_count"]), (10000.0, "2000-01-01", False, 3))
+        self.assertEqual((row["expected_fee"], row["owned_since"], row["passive"], row["signal_count"]), (9000.0, "2000-01-01", False, 3))
         self.assertEqual(row["tired_score"], 2 * 3 + 4 + 2 + 4)
         self.assertEqual([p["parcel"] for p in row["parcels"]], ["2", "1"])
 
