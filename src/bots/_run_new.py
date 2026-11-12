@@ -84,6 +84,7 @@ from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
+from . import comptroller_parcels_bot
 from . import probate_property_enricher_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
@@ -95,6 +96,8 @@ from . import stale_regrade_bot
 from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
+from . import davidson_tax_stack_bot
+from . import property_lane_bot
 from . import stacked_distress_aggregator_bot
 from . import decision_engine_bot
 # MTN-focused enrichment chain (added 2026-05-06). These are what
@@ -189,6 +192,9 @@ NEW_BOTS = [
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
+    # 86 Comptroller counties from local weekly files; reports no_data
+    # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
+    ("comptroller_parcels", comptroller_parcels_bot.run),
     # mortgage_estimator moved AFTER hmda_enricher + mortgage_amortizer
     # (see below) so it acts as a true final fallback. Previously it ran
     # here and pre-filled nulls with 80% LTV before HMDA had a chance to
@@ -208,6 +214,10 @@ NEW_BOTS = [
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
+    # Commercial / land lanes: after assessor matches and phone trust exist,
+    # so grades see the owner's land use and verified phones.
+    ("davidson_tax_stack", davidson_tax_stack_bot.run),
+    ("property_lane", property_lane_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
