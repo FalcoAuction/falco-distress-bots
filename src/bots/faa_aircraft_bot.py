@@ -51,6 +51,12 @@ class FaaAircraftBot(BotBase):
     name = "faa_aircraft"
     description = "Tag leads whose owner is the registrant of a TN aircraft worth ~$100K+ (FAA registry)"
     throttle_seconds = 0.0
+    # registry.faa.gov (Akamai) 403s user agents that do not start with
+    # "Mozilla/5.0", and also ones carrying a contact email or "+URL" (tested
+    # 2026-11-15). This is the standard crawler form: it names FALCO and does
+    # not pose as a browser; the contact rides in the HTTP From header.
+    user_agent = "Mozilla/5.0 (compatible; FALCO-Lead-Research/1.0)"
+    contact = "ops@falco.llc"
     expected_min_yield = 0          # matches are rare; zero is a normal day
     frozen_after_runs = 10_000      # enricher, not a source
 
@@ -137,7 +143,7 @@ class FaaAircraftBot(BotBase):
         fd, path = tempfile.mkstemp(suffix=".zip")
         os.close(fd)
         try:
-            res = self.session.get(FAA_ZIP_URL, timeout=300, stream=True)
+            res = self.session.get(FAA_ZIP_URL, timeout=300, stream=True, headers={"From": self.contact})
             if res.status_code != 200:
                 self.logger.warning(f"FAA zip -> HTTP {res.status_code}")
                 return None
