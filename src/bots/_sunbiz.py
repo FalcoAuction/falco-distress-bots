@@ -15,9 +15,10 @@ runners, so no new Python dependency.
 from __future__ import annotations
 
 import os
+import zipfile
 import re
 import subprocess
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 HOST = "sftp://sftp.floridados.gov/Public/doc"
 INFO_PAGE = "https://dos.fl.gov/sunbiz/other-services/data-downloads/"
@@ -151,9 +152,61 @@ def public_login(session) -> Optional[str]:
     return f"{u.group(1)}:{p.group(1)}" if u and p else None
 
 
+_CURL: List[Optional[str]] = []
+
+
+def curl_bin() -> Optional[str]:
+    """A curl built with sftp. Ubuntu runners' curl has it; Windows'
+    System32 curl does not, Git for Windows' does."""
+    if _CURL:
+        return _CURL[0]
+    cands = [os.environ.get("SUNBIZ_CURL"), "curl", r"C:\Program Files\Git\mingw64\bin\curl.exe"]
+    found = None
+    for c in cands:
+        if not c:
+            continue
+        try:
+            out = subprocess.run([c, "-V"], capture_output=True, timeout=20).stdout.decode("latin-1")
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if re.search(r"^Protocols:.*\bsftp\b", out, re.M):
+            found = c
+            break
+    _CURL.append(found)
+    return found
+
+
+def zip_lines(path: str) -> Iterator[bytes]:
+    """Lines of every member of a zip. The quarterly corporate file is
+    Deflate64, which Python's zipfile cannot read; Info-ZIP unzip (Ubuntu
+    runners, Git for Windows) can, so stream through it in that case."""
+    try:
+        with zipfile.ZipFile(path) as zf:
+            for member in zf.namelist():
+                with zf.open(member) as fh:
+                    yield from fh
+        return
+    except NotImplementedError:
+        pass
+    for exe in ("unzip", r"C:\Program Files\Git\usr\bin\unzip.exe"):
+        try:
+            proc = subprocess.Popen([exe, "-p", path], stdout=subprocess.PIPE)
+        except OSError:
+            continue
+        assert proc.stdout is not None
+        yield from proc.stdout
+        if proc.wait() not in (0, 1):   # 1 = warnings only
+            raise RuntimeError(f"unzip exited {proc.returncode}")
+        return
+    raise RuntimeError("no unzip binary for a Deflate64 archive")
+
+
 def sftp(login: str, path: str, listing: bool = False, timeout: int = 300,
          out_file: Optional[str] = None) -> Optional[bytes]:
-    args = ["curl", "-s", "-k", "--max-time", str(timeout), "-u", login, f"{HOST}/{path}"]
+    curl = curl_bin()
+    if curl is None:
+        return None
+    args = [curl, "-s", "-k", "--max-time", str(timeout), "-u", login, f"{HOST}/{path}"]
     if listing:
         args.append("-l")
     if out_file:

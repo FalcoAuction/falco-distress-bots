@@ -232,8 +232,11 @@ class FlRoll:
         key = street_key(street, zip5)
         if not key:
             return None
-        q = "SELECT * FROM parcel WHERE addr_key = ?" + (" AND co_no = ?" if ck else "")
-        rows = self.db.execute(q, (key, TARGET_COUNTIES[ck]) if ck else (key,)).fetchall()
+        # Always bind co_no so the (co_no, addr_key) index is used; with no
+        # county, probe each FALCO county (an unbound addr_key scans 5M rows).
+        cos = [TARGET_COUNTIES[ck]] if ck else list(TARGET_COUNTIES.values())
+        rows = [r for co in cos
+                for r in self.db.execute("SELECT * FROM parcel WHERE co_no = ? AND addr_key = ?", (co, key)).fetchall()]
         if not rows:
             return None
         # Condo towers share a street key; prefer the unit match, else the
@@ -253,9 +256,17 @@ class FlRoll:
         pid = re.sub(r"[\s\-.]", "", parcel_id or "")
         if not ck or not pid:
             return None
-        row = self.db.execute("SELECT * FROM parcel WHERE co_no = ? AND parcel_id = ?",
-                              (TARGET_COUNTIES[ck], pid)).fetchone()
-        return dict(row) if row else None
+        cands = [pid]
+        if len(pid) >= 6 and pid[:6].isdigit():
+            # City of Orlando writes range-township-section ('29 22 05 ...');
+            # the DOR roll keeps section-township-range ('05 22 29 ...').
+            cands.append(pid[4:6] + pid[2:4] + pid[0:2] + pid[6:])
+        for c in cands:
+            row = self.db.execute("SELECT * FROM parcel WHERE co_no = ? AND parcel_id = ?",
+                                  (TARGET_COUNTIES[ck], c)).fetchone()
+            if row:
+                return dict(row)
+        return None
 
     def parcels_of(self, name: Optional[str], county: Optional[str] = None, limit: int = 25) -> List[Dict[str, Any]]:
         keys = person_owner_keys(name)

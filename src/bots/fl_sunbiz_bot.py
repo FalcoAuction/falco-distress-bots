@@ -26,15 +26,14 @@ from __future__ import annotations
 import os
 import re
 import sys
-import zipfile
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._aircraft_match import clean, entity_key
 from ._base import BotBase, LeadPayload
-from ._fl_roll import DATA_DIR, open_roll, parcel_tag, tpp_tag
+from ._fl_roll import DATA_DIR, name_compatible, open_roll, parcel_tag, tpp_tag
 from ._personal_property import FL_EQUIPMENT_MIN
-from ._sunbiz import (CORP_COLS, QUARTERLY_COR, corp_row, debtor_person_name, list_dir, parse_cor_line,
+from ._sunbiz import (CORP_COLS, QUARTERLY_COR, corp_row, curl_bin, zip_lines, debtor_person_name, list_dir, parse_cor_line,
                       parse_debtors, parse_events, parse_liens, public_login, remote_mtime, sftp)
 
 PARCEL_MIN = 150_000
@@ -51,6 +50,9 @@ class FlSunbizBot(BotBase):
     frozen_after_runs = 10_000
 
     def scrape(self) -> List[LeadPayload]:
+        if curl_bin() is None:
+            self.logger.warning("no curl with sftp support on this machine; set SUNBIZ_CURL")
+            return []
         login = public_login(self.session)
         if not login:
             self.logger.warning("Sunbiz public login not found on the data-downloads page")
@@ -87,14 +89,14 @@ class FlSunbizBot(BotBase):
             return
         rows = []
         try:
-            with zipfile.ZipFile(path) as zf:
-                for member in zf.namelist():
-                    with zf.open(member) as fh:
-                        for bline in fh:
-                            line = bline.decode("latin-1")
-                            name = line[12:204].strip()
-                            if (entity_key(name) or clean(name)) in wanted:
-                                rows.append(corp_row(parse_cor_line(line)))
+            for bline in zip_lines(path):
+                line = bline.decode("latin-1")
+                name = line[12:204].strip()
+                if (entity_key(name) or clean(name)) in wanted:
+                    rows.append(corp_row(parse_cor_line(line)))
+        except Exception as e:
+            self.logger.warning(f"Sunbiz quarterly file unreadable ({type(e).__name__}: {e}); index unchanged")
+            return
         finally:
             os.remove(path)
         db.execute("DELETE FROM corp")
@@ -175,6 +177,10 @@ class FlSunbizBot(BotBase):
         equipment = [tpp_tag(t) for t in roll.equipment_of(name)] if d["entity"] else []
         total = sum(t["equipment_value"] or 0 for t in equipment)
         parcel = roll.parcel_at(None, addr) if d["state"] == "FL" else None
+        # The lien address is often a leased office or a tower; the parcel
+        # counts only when the debtor is its owner of record.
+        if parcel is not None and not name_compatible(name, parcel["own_name"]):
+            parcel = None
         ptag = parcel_tag(parcel) if parcel else None
         if ptag and (ptag["just_value"] or 0) < PARCEL_MIN:
             ptag = None

@@ -34,6 +34,9 @@ from ._base import BotBase, _supabase
 from ._fl_roll import RESIDENTIAL_UC, county_key, open_roll, parcel_tag, tpp_tag
 
 MAX_NAME_PARCELS = 3
+# Bots that stage FL leads (court_rss stages both states; the state filter
+# below keeps only its FL rows).
+FL_BOT_SOURCES = ("fl_hillsborough_clerk", "fl_code_enforcement", "fl_sunbiz", "court_rss")
 TPP_MIN_VALUE = 25_000
 _SELECT = "id, distress_type, full_name, owner_name_records, property_address, county, property_value"
 
@@ -151,8 +154,12 @@ class FlRollEnricherBot(BotBase):
                 "_fl_tpp:raw_payload->fl_tpp")
         last_id = None
         for _ in range(self.max_pages):
-            q = (client.table(table).select(cols).eq("raw_payload->>state", "FL")
-                 .order("id").limit(self.page_size))
+            q = client.table(table).select(cols)
+            # Staging is ~400 MB: a JSON-path filter seq-scans it into the
+            # statement timeout, so filter on the FL bots' bot_source there.
+            q = (q.in_("bot_source", list(FL_BOT_SOURCES)).eq("raw_payload->>state", "FL")
+                 if table == "homeowner_requests_staging" else q.eq("raw_payload->>state", "FL"))
+            q = q.order("id").limit(self.page_size)
             if last_id is not None:
                 q = q.gt("id", last_id)
             rows = getattr(q.execute(), "data", None) or []

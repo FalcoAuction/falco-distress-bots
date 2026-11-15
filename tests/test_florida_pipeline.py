@@ -133,6 +133,25 @@ class RollTests(unittest.TestCase):
         r = roll()
         self.assertEqual(len(r.parcels_of("James Henry", "Hillsborough")), 2)   # two people: enricher refuses
 
+    def test_parcel_id_orlando_order(self):
+        db = sqlite3.connect(":memory:")
+        db.executescript(SCHEMA)
+        row = nal("052229774400160", "SMITH JANE", "5050 CINDERLANE PKWY", "32808")
+        row["CO_NO"] = "58"
+        load_rows(db, "NAL", 58, [row])
+        r = FlRoll(db)
+        self.assertEqual(r.parcel_by_id("Orange", "05-2229-7744-00-160")["parcel_id"], "052229774400160")
+        self.assertEqual(r.parcel_by_id("Orange", "292205774400160")["parcel_id"], "052229774400160")
+        self.assertIsNone(r.parcel_by_id("Orange", "999999774400160"))
+
+    def test_statewide_address_probe(self):
+        r = roll()
+        self.assertEqual(r.parcel_at(None, "5321 Sandy Shell Dr, Apollo Beach, FL 33572")["parcel_id"], "A1")
+
+    def test_lien_debtor_must_own_the_parcel(self):
+        self.assertFalse(name_compatible("PRIMITIVE PARTNERS LLC", "CP MIAMI CENTER LLC"))
+        self.assertTrue(name_compatible("SMITH, JOHN A", "SMITH JOHN A & MARY"))
+
     def test_absentee_flag(self):
         r = roll()
         self.assertTrue(parcel_tag(r.parcels_of("Acme Holdings LLC")[0])["absentee"])
