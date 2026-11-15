@@ -35,12 +35,17 @@ from ._aircraft_match import AircraftIndex, build_index_from_zip
 from ._base import BotBase, _supabase
 
 FAA_ZIP_URL = "https://registry.faa.gov/database/ReleasableAircraft.zip"
+# Registrant states indexed. Leads are TN unless raw_payload.state says
+# otherwise (the court-feed bot stages FL leads with state=FL).
+STATES = ("TN", "FL")
+# One download per process: the court-feed bot and this bot share it.
+_INDEX_CACHE: Dict[str, AircraftIndex] = {}
 
 # Flattened raw_payload fields the matcher reads. PostgREST JSON-path
 # selects keep the page small; the full raw_payload is fetched only for
 # rows that need a write.
 _RAW_FIELDS = ("subject", "owner_name_1", "owner_name_2", "case_name", "mailing_address",
-               "city", "court_id", "excerpt")
+               "city", "court_id", "excerpt", "state")
 _SELECT = {
     "homeowner_requests_staging": "id, distress_type, full_name, owner_name_records, property_address, county",
     "homeowner_requests": "id, distress_type, full_name, owner_name_records, property_address, county",
@@ -49,7 +54,7 @@ _SELECT = {
 
 class FaaAircraftBot(BotBase):
     name = "faa_aircraft"
-    description = "Tag leads whose owner is the registrant of a TN aircraft worth ~$100K+ (FAA registry)"
+    description = "Tag leads whose owner is the registrant of a TN/FL aircraft worth ~$100K+ (FAA registry)"
     throttle_seconds = 0.0
     # registry.faa.gov (Akamai) 403s user agents that do not start with
     # "Mozilla/5.0", and also ones carrying a contact email or "+URL" (tested
@@ -84,7 +89,7 @@ class FaaAircraftBot(BotBase):
             index = self._load_index()
             if index is None:
                 raise RuntimeError("faa_registry_download_failed")
-            self.logger.info(f"FAA index: {sum(len(v) for v in index.by_addr.values())} TN aircraft in value bands")
+            self.logger.info(f"FAA index: {sum(len(v) for v in index.by_addr.values())} {'/'.join(STATES)} aircraft in value bands")
 
             for table in ("homeowner_requests", "homeowner_requests_staging"):
                 for lead in self._leads(client, table):
@@ -135,11 +140,19 @@ class FaaAircraftBot(BotBase):
     # ── FAA registry ────────────────────────────────────────────────────
 
     def _load_index(self) -> Optional[AircraftIndex]:
+        if "index" in _INDEX_CACHE:
+            return _INDEX_CACHE["index"]
+        index = self._build_index()
+        if index is not None:
+            _INDEX_CACHE["index"] = index
+        return index
+
+    def _build_index(self) -> Optional[AircraftIndex]:
         # FALCO_FAA_ZIP lets a local run reuse an already-downloaded zip.
         local = os.environ.get("FALCO_FAA_ZIP")
         if local and os.path.exists(local):
             with zipfile.ZipFile(local) as zf:
-                return build_index_from_zip(zf)
+                return build_index_from_zip(zf, STATES)
         fd, path = tempfile.mkstemp(suffix=".zip")
         os.close(fd)
         try:
@@ -151,7 +164,7 @@ class FaaAircraftBot(BotBase):
                 for chunk in res.iter_content(1 << 20):
                     f.write(chunk)
             with zipfile.ZipFile(path) as zf:
-                return build_index_from_zip(zf)
+                return build_index_from_zip(zf, STATES)
         finally:
             try:
                 os.remove(path)

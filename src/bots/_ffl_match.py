@@ -106,6 +106,8 @@ class FflIndex:
     def match(self, lead: Dict[str, Any]) -> List[Dict[str, Any]]:
         """lead: distress_type, full_name, owner_name_records, property_address, and flattened raw
         fields subject, owner_name_1, case_name, decedent (court_notice), warn_company."""
+        if (lead.get("distress_type") or "").upper() == "VESSEL_ARREST":
+            return []   # names are the plaintiff, not an owner
         hits: Dict[Tuple, Tuple[Dict[str, str], str, str]] = {}
         names = [lead.get(k) for k in ("decedent", "full_name", "owner_name_records", "subject",
                                        "owner_name_1", "case_name", "warn_company")]

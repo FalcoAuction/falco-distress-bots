@@ -17,8 +17,11 @@ only on a hard signal, never on the distress type alone:
                        workers lifts it to A. Size alone never qualifies.
   seizure              delinquent business personal property tax, 2+ years,
                        whose implied equipment value is SEIZURE_VALUE_MIN+
-  owner_asset          any other distressed lead whose owner holds a TN
-                       aircraft (sell the plane, not the house)
+  owner_asset          any other distressed lead whose owner holds a TN or
+                       FL aircraft (sell the plane, not the house)
+  vessel_arrest        a boat arrested in federal court (court RSS feeds);
+                       A when the caption says yacht and a lender or marina
+                       is the plaintiff
 
 Grade A = strongest, B = qualifies with a caveat. Anything below B is not
 tagged at all. Dollar figures are rough, documented estimates, never
@@ -59,7 +62,7 @@ CATEGORY_PATTERNS = [
     ("guns", re.compile(r"\b(FIREARMS?|GUNS?|GUNSMITH|ARMORY|ARMOURY|PAWN|SPORTING GOODS|AMMO|AMMUNITION|TACTICAL)\b", re.I)),
     ("collections", re.compile(r"\b(COINS?|NUMISMATIC|JEWEL(?:ER|ERS|RY)|ANTIQUES?|GALLERY|FINE ART|COLLECTIBLES?|BULLION|PRECIOUS METALS)\b", re.I)),
     # Not bare "AIR" (HVAC companies).
-    ("vehicles", re.compile(r"\b(AUTO(?:MOTIVE)?|MOTORS|MOTOR ?SPORTS|CARS?|TRUCK SALES|RV|MARINE|BOATS?|YACHTS?|AVIATION|AIRCRAFT|POWERSPORTS|CYCLES?)\b", re.I)),
+    ("vehicles", re.compile(r"\b(AUTO(?:MOTIVE)?|MOTORS|MOTOR ?SPORTS|CARS?|TRUCK SALES|RV|MARINE|BOATS?|YACHTS?|AVIATION|AIRCRAFT|JETS?|HELICOPTERS?|AVIONICS|SEAPLANES?|POWERSPORTS|CYCLES?)\b", re.I)),
     ("heavy_equipment", re.compile(r"\b(CONSTRUCTION|CONTRACTORS?|CONTRACTING|EXCAVAT\w*|GRADING|PAVING|ASPHALT|CONCRETE|"
                                    r"DEMOLITION|CRANES?|EQUIPMENT|EARTHWORK|SITE ?WORK|UTILITIES|PIPELINE|DRILLING|"
                                    r"TRUCKING|TRANSPORT\w*|FREIGHT|HAULING|LOGISTICS|DELIVERY|COURIER|TOWING|WRECKER|FLEET)\b", re.I)),
@@ -127,10 +130,13 @@ def _contacts(raw: Dict[str, Any]) -> Dict[str, Any]:
             out["representatives"] = [{"name": r.get("name"), "address": r.get("address")} for r in reps]
         if notice.get("docket"):
             out["probate_docket"] = f'{notice.get("county") or ""} {notice.get("docket")}'.strip()
-    if raw.get("courtlistener_docket_url"):
-        out["bankruptcy_docket"] = raw.get("courtlistener_docket_url")
-    if raw.get("docket_number"):
-        out["case_number"] = raw.get("docket_number")
+    if raw.get("courtlistener_docket_url") or raw.get("docket_url"):
+        out["bankruptcy_docket"] = raw.get("courtlistener_docket_url") or raw.get("docket_url")
+    if raw.get("docket_number") or raw.get("case_number"):
+        out["case_number"] = raw.get("docket_number") or raw.get("case_number")
+    vc = raw.get("vessel_case")
+    if isinstance(vc, dict) and vc.get("plaintiff"):
+        out["plaintiff"] = vc.get("plaintiff")
     return out
 
 
@@ -154,7 +160,8 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     planes = _aircraft(raw)
     plane_bands = {p.get("value_band") for p in planes}
 
-    tag = (_estate(lead, raw, planes, plane_bands) if dt == "PROBATE"
+    tag = (_vessel_arrest(raw) if dt == "VESSEL_ARREST"
+           else _estate(lead, raw, planes, plane_bands) if dt == "PROBATE"
            else _liquidation(lead, raw, planes, dt) if dt in ("BANKRUPTCY", "BUSINESS_CLOSURE")
            else _seizure(lead, raw) if dt == "TAX_LIEN"
            else None)
@@ -168,6 +175,24 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                        ["owner's aircraft: " + _aircraft_signal(planes)], raw,
                        ["owner-direct: pitch selling the plane to cure the distress"])
     return None
+
+
+def _vessel_arrest(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A boat arrested in federal court (court RSS bot). Yachts with a lender or
+    marina plaintiff are the cleanest consignments: the lien holder wants the
+    boat sold, and a private auction beats the Marshal's sale."""
+    vc = raw.get("vessel_case")
+    if not isinstance(vc, dict):
+        return None
+    vessel = vc.get("vessel") or "unnamed vessel"
+    kind = {"lender": "lender foreclosure", "service_lien": "marina / yard lien"}.get(vc.get("claim_kind"), "maritime claim")
+    signals = [f"federal arrest of {vessel}: {raw.get('case_name') or ''}".strip(),
+               f"{kind} brought by {vc.get('plaintiff') or 'unknown plaintiff'} ({raw.get('court_id')} {raw.get('case_number')})"]
+    caveats = ["value unknown until the docket or listing is checked; pitch the plaintiff's counsel, not the owner"]
+    if not vc.get("yacht"):
+        caveats.append("caption does not say yacht: may be a commercial vessel, confirm it is a recreational boat")
+    grade = "A" if vc.get("yacht") and vc.get("claim_kind") in ("lender", "service_lien") else "B"
+    return _result("vessel_arrest", grade, ["boats"], None, signals, raw, caveats)
 
 
 def _ffl_people(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
