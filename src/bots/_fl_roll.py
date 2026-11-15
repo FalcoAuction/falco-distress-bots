@@ -48,7 +48,7 @@ DATA_DIR = os.environ.get("FALCO_FL_DOR_DIR") or os.path.join(
 
 # Residential DOR use codes 000-009 (single family, condo, mobile home,
 # multifamily under 10 units, etc.).
-RESIDENTIAL_UC = {f"{i:03d}" for i in range(10)}
+RESIDENTIAL_UC = {f"{i:03d}" for i in range(10)} - {"003"}   # 003 = 10+ unit apartments
 OWNER_SPLIT = re.compile(r"\s*(?:&|\bAND\b|;)\s*")
 
 
