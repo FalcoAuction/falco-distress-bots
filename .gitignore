@@ -26,3 +26,6 @@ Thumbs.db
 # HMDA cache — large CSVs from CFPB, regenerated on demand
 data/hmda_cache/
 
+
+# Florida DOR parcel roll cache (rebuilt from the free DOR portal)
+data/fl_dor/

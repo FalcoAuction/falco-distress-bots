@@ -28,8 +28,10 @@ from ._personal_property import classify
 
 # Only the raw_payload keys the rules read (JSON-path selects keep pages small).
 _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "chapter", "case_name",
-             "court_id", "docket_number", "courtlistener_docket_url", "case_number", "docket_url", "state")
-_RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case")
+             "court_id", "docket_number", "courtlistener_docket_url", "case_number", "docket_url", "state",
+             "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor")
+_RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
+             "fl_tpp", "sunbiz_event")
 _BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value"
 
 

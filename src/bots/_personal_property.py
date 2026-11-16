@@ -43,6 +43,10 @@ SEIZURE_VALUE_MIN = 250_000
 SEIZURE_MIN_YEARS = 2              # one year late is a slow payer, not a seizure
 SEIZURE_DORMANT_YEARS = 6          # older than this: assets may be long gone
 SEIZURE_DORMANT_VALUE_MIN = 500_000
+# Florida: the DOR NAP roll states business equipment value directly, so
+# no back-out from taxes owed is needed.
+FL_EQUIPMENT_MIN = 100_000
+FL_EQUIPMENT_A = 250_000
 
 # Delinquent personalty: TN assesses commercial/industrial tangible personal
 # property at 30% of appraised value (Tenn. Code Ann. 67-5-801). Combined
@@ -137,7 +141,27 @@ def _contacts(raw: Dict[str, Any]) -> Dict[str, Any]:
     vc = raw.get("vessel_case")
     if isinstance(vc, dict) and vc.get("plaintiff"):
         out["plaintiff"] = vc.get("plaintiff")
+    if raw.get("source") == "hillsclerk_daily" and raw.get("kind") == "probate":
+        if raw.get("attorney") and "attorney" not in out:
+            out["attorney"] = {"names": [raw["attorney"]], "address": None}
+        if raw.get("petitioner") and "representatives" not in out:
+            out["representatives"] = [{"name": raw["petitioner"], "address": raw.get("petitioner_address")}]
+        out.setdefault("probate_docket", f"Hillsborough {raw.get('case_number')}")
     return out
+
+
+def _fl_equipment(raw: Dict[str, Any]) -> Tuple[float, Optional[Dict[str, Any]]]:
+    """Total DOR NAP equipment value on the lead and the largest account."""
+    accts = [t for t in raw.get("fl_tpp") or [] if isinstance(t, dict) and _num(t.get("equipment_value"))]
+    if not accts:
+        return 0.0, None
+    top = max(accts, key=lambda t: _num(t.get("equipment_value")) or 0)
+    return sum(_num(t.get("equipment_value")) or 0 for t in accts), top
+
+
+def _equipment_signal(total: float, top: Dict[str, Any]) -> str:
+    return (f"business equipment on the FL roll: ${total:,.0f} (NAICS {top.get('naics') or '?'}, "
+            f"{top.get('situs') or top.get('county')})")
 
 
 def _result(lane, grade, categories, est_value, signals, raw, caveats=()):
@@ -278,27 +302,54 @@ def _liquidation(lead, raw, planes, dt):
     if dt == "BANKRUPTCY" and (not is_entity(name) or chapter == "13"):
         return None   # individual debtors belong to the estate/owner lanes, not liquidations
     lic = _ffl_people(raw)
-    cat = "guns" if lic else category_of(name)
+    equip, top = _fl_equipment(raw)
+    big = equip >= FL_EQUIPMENT_MIN
+    cat = "guns" if lic else category_of(name) or ("business_equipment" if big else None)
     if not cat:
         return None   # national closures move their equipment; only hard-asset businesses qualify
     workers = _num(warn.get("workers")) if warn else None
-    signals = [f"{'WARN closure' if warn else 'chapter ' + (chapter or '?') + ' business bankruptcy'}: {name}",
-               _ffl_signal(lic) if lic else f"hard-asset industry ({cat.replace('_', ' ')})"]
+    event = raw.get("sunbiz_event") if isinstance(raw.get("sunbiz_event"), dict) else None
+    head = ("WARN closure" if warn else f"{event['description'].lower()} filed {event['filed']}" if event
+            else "chapter " + (chapter or "?") + " business bankruptcy")
+    signals = [f"{head}: {name}",
+               _ffl_signal(lic) if lic else _equipment_signal(equip, top) if big
+               else f"hard-asset industry ({cat.replace('_', ' ')})"]
     caveats = []
+    if event and not big:
+        return None   # a dissolution alone says nothing about assets
     if workers:
         signals.append(f"{workers:.0f} workers on the WARN notice")
     elif dt == "BANKRUPTCY":
         caveats.append("size unverified: check estimated assets on the petition (Official Form 201)")
-    grade = "A" if (lic or (workers and workers >= WARN_WORKERS_MIN)) else "B"
+    grade = "A" if (lic or (workers and workers >= WARN_WORKERS_MIN) or equip >= FL_EQUIPMENT_A) else "B"
+    if big and top and top.get("late_filing_penalty"):
+        signals.append("late filing penalty on the equipment return (business may already be winding down)")
     cats = [cat]
     if planes:
         cats.append("aircraft")
         signals.append("entity aircraft: " + _aircraft_signal(planes))
         grade = "A"
-    return _result("business_liquidation", grade, cats, None, signals, raw, caveats)
+    return _result("business_liquidation", grade, cats, equip if big else None, signals, raw, caveats)
+
+
+def _fl_federal_lien(lead, raw):
+    """IRS lien filed against a Florida business that the DOR roll shows
+    holding $100K+ of equipment: the IRS can levy it, an auction can beat that."""
+    equip, top = _fl_equipment(raw)
+    if equip < FL_EQUIPMENT_MIN:
+        return None
+    name = lead.get("full_name") or raw.get("debtor") or ""
+    cat = category_of(name) or "business_equipment"
+    signals = [f"federal tax lien filed {raw.get('filed') or '?'} against {name}", _equipment_signal(equip, top)]
+    if top and top.get("late_filing_penalty"):
+        signals.append("late filing penalty on the equipment return")
+    caveats = ["lien amount is not in the state file; pull the notice of federal tax lien for the balance"]
+    return _result("seizure", "A" if equip >= FL_EQUIPMENT_A else "B", [cat], equip, signals, raw, caveats)
 
 
 def _seizure(lead, raw):
+    if raw.get("source") == "sunbiz_flr":
+        return _fl_federal_lien(lead, raw)
     if not str(raw.get("parcel") or "").upper().startswith("PER"):
         return None   # real-property tax liens are the real estate lanes' job
     name = raw.get("owner_name_1") or lead.get("full_name") or ""

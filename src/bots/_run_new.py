@@ -115,6 +115,10 @@ from . import enformion_skip_trace_bot
 from . import middle_tn_twilio_lookup_bot
 from . import auto_promoter_bot
 from . import tn_lis_pendens_bot
+from . import fl_hillsborough_clerk_bot
+from . import fl_code_enforcement_bot
+from . import fl_sunbiz_bot
+from . import fl_roll_enricher_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -186,6 +190,13 @@ NEW_BOTS = [
     ("davidson_demolition", davidson_demolition_bot.run),
     # ("craigslist_tn", craigslist_tn_bot.run),  # disabled — scam pond
     ("usda_rhs", usda_rhs_bot.run),
+    # Florida (free sources only; every lead carries raw_payload.state=FL).
+    # Hillsborough clerk daily CSVs: mortgage/HOA foreclosures, partitions,
+    # probate. Miami-Dade + Orlando code enforcement open data. Sunbiz
+    # dissolutions and federal tax liens joined to the DOR roll.
+    ("fl_hillsborough_clerk", fl_hillsborough_clerk_bot.run),
+    ("fl_code_enforcement", fl_code_enforcement_bot.run),
+    ("fl_sunbiz", fl_sunbiz_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
     ("notice_enricher", notice_enricher_bot.run),
     ("phone_classifier", phone_classifier_bot.run),
@@ -197,6 +208,9 @@ NEW_BOTS = [
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
+    # Florida counterpart of TPAD + the county assessors: DOR statewide
+    # roll (value, homestead, mailing, business equipment) for FL leads.
+    ("fl_roll_enricher", fl_roll_enricher_bot.run),
     # mortgage_estimator moved AFTER hmda_enricher + mortgage_amortizer
     # (see below) so it acts as a true final fallback. Previously it ran
     # here and pre-filled nulls with 80% LTV before HMDA had a chance to

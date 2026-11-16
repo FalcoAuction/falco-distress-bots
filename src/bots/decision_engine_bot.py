@@ -343,6 +343,12 @@ class DecisionEngineBot(BotBase):
 
         try:
             candidates = self._candidates(client)
+            # Florida leads are not graded here: the LLM pass costs money and
+            # its Tennessee thresholds (focus counties, TN outreach rules) do
+            # not apply. FL leads are ranked by the personal-property lane and
+            # the DOR roll tags instead.
+            candidates = [c for c in candidates
+                          if not (isinstance(c.get("raw_payload"), dict) and c["raw_payload"].get("state") == "FL")]
             self.logger.info(f"{len(candidates)} leads to grade")
 
             # Pass 1: apply fast rules sequentially. Cheap, no LLM.
