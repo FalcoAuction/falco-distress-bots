@@ -39,12 +39,32 @@ Trousdale Unicoi Union VanBuren Warren Washington Wayne Weakley White Williamson
 # TN county FIPS codes are the odd numbers 001..189 in alphabetical order.
 FIPS_TO_COUNTY = {f"{2 * i + 1:03d}": c.lower() for i, c in enumerate(TN_COUNTIES)}
 
+# FL county FIPS codes: odd numbers in alphabetical order, except that Dade
+# (025) became Miami-Dade (086) in 1997, so the list skips 025.
+FL_COUNTIES = ["alachua", "baker", "bay", "bradford", "brevard", "broward", "calhoun", "charlotte", "citrus",
+               "clay", "collier", "columbia", None, "desoto", "dixie", "duval", "escambia", "flagler", "franklin",
+               "gadsden", "gilchrist", "glades", "gulf", "hamilton", "hardee", "hendry", "hernando", "highlands",
+               "hillsborough", "holmes", "indian river", "jackson", "jefferson", "lafayette", "lake", "lee", "leon",
+               "levy", "liberty", "madison", "manatee", "marion", "martin", "monroe", "nassau", "okaloosa",
+               "okeechobee", "orange", "osceola", "palm beach", "pasco", "pinellas", "polk", "putnam", "st. johns",
+               "st. lucie", "santa rosa", "sarasota", "seminole", "sumter", "suwannee", "taylor", "union",
+               "volusia", "wakulla", "walton", "washington"]
+FL_FIPS_TO_COUNTY = {f"{2 * i + 1:03d}": c for i, c in enumerate(FL_COUNTIES) if c}
+FL_FIPS_TO_COUNTY["086"] = "miami-dade"
+COUNTY_BY_STATE = {"TN": FIPS_TO_COUNTY, "FL": FL_FIPS_TO_COUNTY}
+
 # 28 U.S.C. 123 — bankruptcy district by county (everything else is tneb).
 TNWB = set("benton carroll chester crockett decatur dyer fayette gibson hardeman hardin haywood henderson "
            "henry lake lauderdale madison mcnairy obion perry shelby tipton weakley".split())
 TNMB = set("cannon cheatham clay cumberland davidson dekalb dickson fentress giles hickman houston humphreys "
            "jackson lawrence lewis macon marshall maury montgomery overton pickett putnam robertson rutherford "
            "smith stewart sumner trousdale wayne williamson wilson white".split())
+# 28 U.S.C. 89 — Florida districts (everything else is flmb).
+FLNB = {"alachua", "bay", "calhoun", "dixie", "escambia", "franklin", "gadsden", "gilchrist", "gulf", "holmes",
+        "jackson", "jefferson", "lafayette", "leon", "levy", "liberty", "madison", "okaloosa", "santa rosa",
+        "taylor", "wakulla", "walton", "washington"}
+FLSB = {"broward", "miami-dade", "monroe", "palm beach", "martin", "st. lucie", "indian river", "okeechobee",
+        "highlands"}
 
 SUFFIX = {"STREET": "ST", "DRIVE": "DR", "ROAD": "RD", "LANE": "LN", "COURT": "CT", "CIRCLE": "CIR",
           "AVENUE": "AVE", "BOULEVARD": "BLVD", "HIGHWAY": "HWY", "PLACE": "PL", "TRAIL": "TRL",
@@ -72,10 +92,13 @@ def clean(s: Optional[str]) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", (s or "").upper())).strip()
 
 
-def district_of(county: Optional[str]) -> Optional[str]:
-    c = (county or "").replace(" ", "").lower()
-    if not c:
+def district_of(county: Optional[str], state: str = "TN") -> Optional[str]:
+    if not county:
         return None
+    if state == "FL":
+        c = county.lower().replace(" county", "").strip()
+        return "flnb" if c in FLNB else "flsb" if c in FLSB else "flmb"
+    c = county.replace(" ", "").lower()
     return "tnwb" if c in TNWB else "tnmb" if c in TNMB else "tneb"
 
 
@@ -195,10 +218,12 @@ def load_docs(lines: Iterable[str]) -> Dict[str, List[str]]:
     return docs
 
 
-def load_aircraft(lines: Iterable[str], ref: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
+def load_aircraft(lines: Iterable[str], ref: Dict[str, Dict[str, str]],
+                  states: Iterable[str] = ("TN",)) -> List[Dict[str, Any]]:
+    states = set(states)
     out = []
     for r in _rows(lines):
-        if len(r) < 30 or r[10].strip() != "TN":
+        if len(r) < 30 or r[10].strip() not in states:
             continue
         a = {"n": r[0].strip(), "serial": r[1].strip(), "mdl": r[2].strip(), "year": r[4].strip(),
              "name": r[6].strip(), "street": r[7].strip(), "street2": r[8].strip(), "city": r[9].strip(),
@@ -211,7 +236,8 @@ def load_aircraft(lines: Iterable[str], ref: Dict[str, Dict[str, str]]) -> List[
             continue
         a["band"] = band
         a["aircraft"] = f'{a["year"]} {m.get("mfr", "")} {m.get("model", "")}'.strip()
-        a["county"] = FIPS_TO_COUNTY.get(a["county_fips"], "")
+        a["state"] = r[10].strip()
+        a["county"] = COUNTY_BY_STATE.get(a["state"], {}).get(a["county_fips"], "")
         out.append(a)
     return out
 
@@ -236,7 +262,7 @@ class AircraftIndex:
                     pk = faa_person_key(nm)
                     if pk:
                         self.by_person[pk[:2]].append((a, pk[2]))
-                        self.person_count[pk[:2]] += 1
+                        self.person_count[(a["state"],) + pk[:2]] += 1
                 ek = entity_key(nm)
                 if ek:
                     self.by_entity[ek].append(a)
@@ -247,6 +273,9 @@ class AircraftIndex:
         and raw_* fields flattened from raw_payload (subject, owner_name_1, owner_name_2, case_name,
         mailing_address, city, court_id, excerpt)."""
         dt = (lead.get("distress_type") or "").upper()
+        state = (lead.get("state") or "TN").upper()   # pipeline leads are TN unless tagged otherwise
+        if dt == "VESSEL_ARREST":
+            return []   # the names on these are the plaintiff (often a bank), not an owner
         is_bk = dt == "BANKRUPTCY"
         if is_bk:
             base = [lead.get("full_name"), lead.get("owner_name_records"), lead.get("case_name")]
@@ -288,18 +317,21 @@ class AircraftIndex:
             ek = entity_key(nm)
             if ek:
                 for a in self.by_entity.get(ek, []):
-                    hits.setdefault(a["n"], (a, "entity_name", "high"))
+                    if a["state"] == state:
+                        hits.setdefault(a["n"], (a, "entity_name", "high"))
             for last, first, mi in person_keys(nm):
                 if not mi or len(first) < 2:
                     continue
                 for a, fmi in self.by_person.get((last, first), []):
                     if fmi != mi:
                         continue
+                    if a["state"] != state:
+                        continue   # a TN debtor never matches an FL registrant by name, and vice versa
                     geo = clean(a["city"]) in cities or a["county"].replace(" ", "") in counties
                     if geo:
                         hits.setdefault(a["n"], (a, "name_middle_geo", "medium"))
-                    elif is_bk and self.person_count[(last, first)] == 1 \
-                            and district_of(a["county"]) == lead.get("court_id"):
+                    elif is_bk and self.person_count[(state, last, first)] == 1 \
+                            and district_of(a["county"], a["state"]) == lead.get("court_id"):
                         hits.setdefault(a["n"], (a, "name_middle_bk_district", "medium"))
         return [self._tag(a, how, conf) for a, how, conf in hits.values()]
 
@@ -322,10 +354,10 @@ class AircraftIndex:
         }
 
 
-def build_index_from_zip(zf) -> AircraftIndex:
+def build_index_from_zip(zf, states: Iterable[str] = ("TN",)) -> AircraftIndex:
     """zf: zipfile.ZipFile of ReleasableAircraft.zip."""
     def lines(name):
         return io.TextIOWrapper(zf.open(name), encoding="utf-8-sig", errors="ignore", newline="")
     ref = load_ref(lines("ACFTREF.txt"))
     docs = load_docs(lines("DOCINDEX.txt")) if "DOCINDEX.txt" in zf.namelist() else {}
-    return AircraftIndex(load_aircraft(lines("MASTER.txt"), ref), docs)
+    return AircraftIndex(load_aircraft(lines("MASTER.txt"), ref, states), docs)

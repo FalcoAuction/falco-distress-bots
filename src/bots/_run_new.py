@@ -63,6 +63,7 @@ from . import brock_scott_trustee_bot
 from . import mackie_wolf_trustee_bot
 from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
+from . import court_rss_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import court_notices_bot
@@ -97,6 +98,8 @@ from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
+from . import ffl_overlay_bot
+from . import personal_property_lane_bot
 from . import decision_engine_bot
 # MTN-focused enrichment chain (added 2026-05-06). These are what
 # graduate staged leads into dialer-ready leads:
@@ -151,6 +154,10 @@ NEW_BOTS = [
     # via the TN Press Association aggregator in the meantime.
     # ("tn_probate", tn_probate_bot.run),
     ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
+    # Free court RSS (no PACER/CourtListener account): vessel arrests in FL
+    # + TN district courts, and FL bankruptcies that hold an aircraft or a
+    # marine/aviation business. Feeds cover ~24h, so this must run daily.
+    ("court_rss", court_rss_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
     # Full-text court notices from the Ledger and Memphis Daily News: probate
@@ -212,6 +219,12 @@ NEW_BOTS = [
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),
+    # Decedent / owner / business is an ATF firearms licensee. Reads the
+    # monthly listings saved in data/atf; skips cleanly when there are none.
+    ("ffl_overlay", ffl_overlay_bot.run),
+    # High-value estate / liquidation / seizure / owner-asset auctions only.
+    # Reads the aircraft / ffl / obituary tags, so it runs after them.
+    ("personal_property_lane", personal_property_lane_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
     # HMDA's mortgage_signal); skip-trace before Twilio lookup (validates
