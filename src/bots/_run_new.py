@@ -87,6 +87,7 @@ from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
+from . import comptroller_parcels_bot
 from . import probate_property_enricher_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
@@ -98,6 +99,8 @@ from . import stale_regrade_bot
 from . import bot_health_monitor
 from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
+from . import davidson_tax_stack_bot
+from . import property_lane_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
 from . import ffl_overlay_bot
@@ -226,6 +229,9 @@ NEW_BOTS = [
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
+    # 86 Comptroller counties from local weekly files; reports no_data
+    # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
+    ("comptroller_parcels", comptroller_parcels_bot.run),
     # Florida counterpart of TPAD + the county assessors: DOR statewide
     # roll (value, homestead, mailing, business equipment) for FL leads.
     ("fl_roll_enricher", fl_roll_enricher_bot.run),
@@ -248,6 +254,10 @@ NEW_BOTS = [
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
+    # Commercial / land lanes: after assessor matches and phone trust exist,
+    # so grades see the owner's land use and verified phones.
+    ("davidson_tax_stack", davidson_tax_stack_bot.run),
+    ("property_lane", property_lane_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),
@@ -318,6 +328,7 @@ BOT_TIMEOUTS = {
     "hmda_enricher": 900,          # median 5.4m, max 12.6m; 954 leads/14d
     "hamilton_tax_delinquent": 1200,  # weekly only; 2,000-lead CSV
     "davidson_assessor": 480,      # 150 x 1.5s throttle + fetches
+    "comptroller_parcels": 900,    # 54k-row scan + up to 1500 debtor searches (~0.1s)
 }
 
 # Wall clock held back for the critical tail. decision_engine's worst

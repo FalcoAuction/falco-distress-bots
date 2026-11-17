@@ -127,6 +127,36 @@ jobs:
         timeout-minutes: 30
         continue-on-error: true
 
+      - name: Week key for the Comptroller cache
+        id: week
+        run: echo "yw=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Comptroller parcel index (86 TN counties)
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/comptroller/index.sqlite
+            data/comptroller/refresh_state.json
+          # Weekly key: the state posts new county files on Mondays, so the
+          # first run of each ISO week refreshes and saves; later runs restore.
+          key: comptroller-${{ steps.week.outputs.yw }}
+          restore-keys: comptroller-
+
+      - name: Restore debtor-match progress (small, saved every run)
+        uses: actions/cache@v4
+        with:
+          path: data/comptroller/debtor_tried.json
+          key: comptroller-tried-${{ github.run_id }}
+          restore-keys: comptroller-tried-
+
+      - name: Refresh Comptroller parcel index
+        # Cold build ~20 min / ~5 GB; a warm run is 86 HEAD requests. Kept
+        # out of _run_new so it never eats a bot's time cap;
+        # comptroller_parcels reports no_data if the index is missing.
+        run: python -m src.bots.comptroller_refresh
+        timeout-minutes: 45
+        continue-on-error: true
+
       - name: Run staging scrapers (-> homeowner_requests_staging)
         # Exits non-zero only when a critical bot (auto_promoter and the
         # chain feeding it) did not complete. Ordinary scraper failures

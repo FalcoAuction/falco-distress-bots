@@ -1,0 +1,480 @@
+"""Which lane a staged lead belongs in: residential, commercial or land,
+and whether a commercial/land lead is worth working (a real way to reach
+the owner, a live distress signal, not government-owned).
+
+Reads only what the assessor enrichers already stored in raw_payload
+(padctn, tpad, shelby_arcgis, rutherford_arcgis, williamson_inigo,
+Hamilton's land_use, probate owner matches). No network.
+
+    lane = property_lane(row)   # row has raw_payload, phone, email, ...
+    lane["lane"]   -> "residential" | "commercial" | "land" | "unknown"
+    lane["grade"]  -> "A" | "B" | "C" | None (None = excluded or residential)
+
+Land-use sources, in the order they are trusted:
+  padctn             Davidson descriptions, e.g. "C32 - OFFICE BLDG"
+  tpad               statewide class, e.g. "Commercial", "Agricultural"
+  shelby_arcgis      one-letter class: R, C, I, E, A
+  williamson_inigo   e.g. "108 Commercial", "112 Forest"
+  rutherford_arcgis  building type description
+  hamilton           numeric Standard Land Use codes (1xx residential,
+                     2xx-7xx commercial, 8xx resource land, 9xx vacant)
+  owner matches      probate matches written by the probate enricher
+"""
+from __future__ import annotations
+
+import re
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional, Tuple
+
+from ._address import is_natural_person
+from ._field_confidence import phone_trust
+
+VERSION = "property-lane-2026-11-05"
+ACREAGE_LAND = 10.0          # a house on 10+ acres sells as land
+COMMERCIAL_MIN_VALUE = 25000
+COMMERCIAL_MAX_VALUE = 10_000_000   # bigger is institutional: refer it, don't work it
+LAND_MIN_VALUE = 3000
+
+_LAND_RE = re.compile(r"VACANT|FARM|AGRIC|FOREST|GREENBELT|TIMBER|PASTURE|ACREAGE|UNDEVELOPED|\bAGRI\b|"
+                      r"OPEN SPACE|HOMEBELT", re.I)
+_RES_RE = re.compile(
+    r"SINGLE FAMILY|DUPLEX|TRIPLEX|QUAD|CONDO|ZERO LOT|TOWNHOUSE|TOWNHOME|TOWNHOUSE/CO|MOBILE HOME|"
+    r"MANUFACTURED|RESIDENTIAL|^RS$|RURAL COMBO|HOUSEHOLD UNIT|FAMILY UNIT", re.I)
+_COM_RE = re.compile(
+    r"COMMERCIAL|INDUSTRIAL|OFFICE|RETAIL|STORE|SHOPPING|SHOP\b|WAREHOUSE|RESTAURANT|RESTURANT|AUTO|"
+    r"APARTMENT|CHURCH|RELIGIOUS|MANUFACTURING|TERMINAL|MEDICAL|HOTEL|MOTEL|SERVICE STATION|GAS STATION|"
+    r"CONVENIENCE|BANK|MORTUARY|FUNERAL|DAY CARE|NURSING|PARKING|STORAGE|THEATER|BOWLING|MARINA|CLUB|"
+    r"LODGE|GARAGE|HOSPITAL|CLINIC|SCHOOL|"
+    # Hamilton's Standard Land Use descriptions
+    r"SERVICE|TRADE|LODGING|DENTIST|MOTOR VEHICLE|DINER|LUNCHEONETTE|\bBARS?\b|TAVERN|GROCER|LIQUOR|"
+    r"LUMBER|PRINTING|GOLF|LEGAL|FINANCE|BROKER|COMMUNICATIONS|TRANSPORTATION|ENTERTAINMENT|RECREATION|"
+    r"BAKER|ANTIQUE|SPORTING|PAINT|ACCOUNTING|MOTORCYCLE|AMUSEMENT|EQUIPMENT|SUPPLIES|ENGINEERING|"
+    r"ARCHITECT|INSTRUMENT|FRUITS|MARINE CRAFT|GROUP QUARTERS", re.I)
+# Public and institutional uses: never a seller we can work.
+_INSTITUTIONAL_RE = re.compile(
+    r"GOVERNMENT|UTILIT|UTILTIES|CEMETER|\bPARKS?\b|PLAYGROUND|COMMUNITY LOTS|UNIVERSIT|COLLEGE|"
+    r"EDUCATIONAL|RAIL TRANSPORT|SEWAGE|FRATERNAL|LABOR UNION|AIRPORT|POSTAL|PROTECTIVE FUNCTIONS|"
+    r"RIGHT OF WAY|VOCATIONAL|PUBLIC ASSEMBLY|CULTURAL ACTIVITIES", re.I)
+_EXEMPT_RE = re.compile(r"EXEMPT|\bCITY\b|\bCOUNTY\b|\bSTATE\b", re.I)
+
+_GOV_OWNER_RE = re.compile(
+    r"\b(CITY OF|COUNTY OF|STATE OF|UNITED STATES|SECRETARY OF HOUSING|HOUSING AND URBAN|HOUSING AUTHORITY|"
+    r"METRO(POLITAN)? GOV\w*|GOVERNMENT|BOARD OF EDUCATION|DEPARTMENT OF|FEDERAL NATIONAL MORTGAGE|FEDERAL HOME LOAN|"
+    r"FANNIE MAE|FREDDIE MAC|LAND BANK|DEVELOPMENT AUTHORITY|UTILITY DISTRICT)\b|\bCOUNTY$|\bHUD\b", re.I)
+_RELIGIOUS_OWNER_RE = re.compile(
+    r"CHURCH|MINISTR|BAPTIST|METHODIST|PRESBYTERIAN|LUTHERAN|EPISCOPAL|CATHOLIC|DIOCESE|PENTECOSTAL|"
+    r"TABERNACLE|TEMPLE|MOSQUE|SYNAGOGUE|CONGREGATION|FELLOWSHIP|ASSEMBLY OF GOD|CHURCH OF CHRIST", re.I)
+
+# Distress that means the owner may have to sell. DEMOLITION is left out on
+# purpose: a demolition permit means the owner is already redeveloping, and
+# the name and phone on it are usually the contractor's.
+STRONG_DISTRESS = {"PRE_FORECLOSURE", "FORECLOSURE", "LIS_PENDENS", "TAX_LIEN", "TAX_DELINQUENT", "PROBATE",
+                   "BANKRUPTCY", "BUSINESS_CLOSURE", "REO", "COURT_SALE", "TAX_SALE", "TRUSTEE_NOTICE",
+                   "SOT", "NOD"}
+WEAK_DISTRESS = {"CODE_VIOLATION", "FIRE_DAMAGE", "VACANT"}
+LIVE_DISTRESS = STRONG_DISTRESS | WEAK_DISTRESS
+# State + ZIP at the end of a mailing line; Hamilton writes "HIXSON TN37343".
+_STATE_ZIP_RE = re.compile(r"(?:^|[\s,])([A-Z]{2})[\s,]*\d{5}(?:-\d{4})?\s*$")
+
+
+def _d(v: Any) -> Dict[str, Any]:
+    return v if isinstance(v, dict) else {}
+
+
+def _num(v: Any) -> Optional[float]:
+    if v in (None, ""):
+        return None
+    try:
+        n = float(str(v).replace(",", "").replace("$", "").strip())
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+# ── land use ────────────────────────────────────────────────────────────────
+
+def _classify_text(text: str) -> Optional[str]:
+    """Lane for a free-text land-use description, or 'exempt', or None."""
+    t = text.strip().upper()
+    if not t:
+        return None
+    if re.match(r"^E\d+\s*-", t):           # Davidson exempt codes: state, park, church
+        return "exempt"
+    if _LAND_RE.search(t):
+        return "land"
+    if "MOBILE HOME PARK" in t:              # income property, not a home
+        return "commercial"
+    if _INSTITUTIONAL_RE.search(t):
+        return "exempt"
+    if _RES_RE.search(t):
+        return "residential"
+    if _COM_RE.search(t):
+        return "commercial"
+    m = re.match(r"^([A-Z])\d", t)           # Davidson code with no keyword, e.g. "C77"
+    if m:
+        return {"R": "residential", "C": "commercial", "I": "commercial", "E": "exempt",
+                "F": "residential", "A": "land"}.get(m.group(1))
+    if _EXEMPT_RE.search(t):
+        return "exempt"
+    return None
+
+
+def _classify_hamilton(code: str) -> Optional[str]:
+    c = code.strip()
+    if not c.isdigit() or len(c) != 3:
+        return None
+    first = c[0]
+    if first == "1":
+        return "residential"
+    if first in "234567":
+        return "commercial"
+    if first in "89":
+        return "land"
+    return None
+
+
+def _classify_shelby(cls: str) -> Optional[str]:
+    return {"R": "residential", "C": "commercial", "I": "commercial", "A": "land",
+            "E": "exempt"}.get(cls.strip().upper())
+
+
+def land_use_signals(raw: Dict[str, Any], bot_source: str = "") -> List[Tuple[str, str]]:
+    """(source, land-use text) pairs, most trusted first."""
+    out: List[Tuple[str, str]] = []
+
+    def add(src: str, v: Any) -> None:
+        if v not in (None, "") and str(v).strip():
+            out.append((src, str(v).strip()))
+
+    add("padctn", _d(raw.get("padctn")).get("land_use"))
+    add("metro", _d(raw.get("metro_parcel")).get("land_use"))
+    add("hamilton_assessor", _d(raw.get("hamilton_assessor")).get("land_use"))
+    comp = _d(raw.get("comptroller_parcel"))
+    add("comptroller", comp.get("land_use"))
+    add("comptroller_class", comp.get("class"))
+    tpad = _d(raw.get("tpad"))
+    add("tpad", tpad.get("class"))
+    shel = _d(raw.get("shelby_arcgis"))
+    add("shelby", shel.get("class") or shel.get("asmt_class"))
+    add("williamson", _d(raw.get("williamson_inigo")).get("property_class"))
+    add("rutherford", _d(raw.get("rutherford_arcgis")).get("building_type"))
+    if bot_source == "hamilton_tax_delinquent" or str(raw.get("county") or "").lower() == "hamilton":
+        add("hamilton", raw.get("land_use"))
+    add("padctn_owner_match", _d(raw.get("padctn_owner_match")).get("land_use"))
+    om = _d(raw.get("owner_match"))
+    if om.get("status") == "matched":
+        for p in om.get("parcels") or []:
+            add("owner_match", _d(p).get("class"))
+    return out
+
+
+_SLUCM_EXEMPT = {"41", "48", "49", "67", "68", "71", "76"}   # rail, utilities, government, schools, culture, parks
+_SLUCM_COMMERCIAL_RES = {"13", "14", "15"}                  # residential hotels, mobile home parks
+_SLUCM_AMENITY = {"74", "75"}                               # recreation on a home or farm: not a business
+
+
+def _slucm_one(code: str) -> Optional[str]:
+    if len(code) != 2 or not code.isdigit():
+        return None
+    if code in _SLUCM_EXEMPT:
+        return "exempt"
+    if code in _SLUCM_COMMERCIAL_RES:
+        return "commercial"
+    return {"1": "residential", "2": "commercial", "3": "commercial", "4": "commercial", "5": "commercial",
+            "6": "commercial", "7": "commercial", "8": "land", "9": "land"}.get(code[0])
+
+
+def _classify_slucm(text: str) -> Optional[str]:
+    """Comptroller LANDUSE, Standard Land Use codes: '53 - RETAIL TRADE - GENERAL',
+    '11:81 - MULTIPLE LAND USES' (house + agriculture), '62:65 - ...'."""
+    m = re.match(r"^\s*([\d:]+)\s*-", text or "")
+    if not m:
+        return None
+    codes = [c for c in m.group(1).split(":") if c]
+    lanes = {c: _slucm_one(c) for c in codes}
+    business = [c for c, l in lanes.items() if l == "commercial" and c not in _SLUCM_AMENITY]
+    if business:
+        return "commercial"
+    vals = {l for l in lanes.values() if l}
+    if vals and vals <= {"land"}:
+        return "land"
+    if "residential" in vals:
+        return "residential"        # a house with farm or timber; big acreage still becomes land
+    if vals == {"exempt"}:
+        return "exempt"
+    return None
+
+
+def _classify_comptroller_class(text: str) -> Optional[str]:
+    """Comptroller CLASS, e.g. '08 COMMERCIAL', '11 AGRICULTURAL', '05 RELIGIOUS', '02 CITY'."""
+    t = re.sub(r"^\d+\s*", "", text.strip().upper())
+    if not t:
+        return None
+    if "RELIGIOUS" in t:                     # exempt; becomes a church lead only for a religious owner
+        return "exempt"
+    return _classify_text(t)
+
+
+def _classify_signal(src: str, text: str) -> Optional[str]:
+    if src == "comptroller_class":
+        return _classify_comptroller_class(text)
+    if src == "comptroller":
+        return _classify_slucm(text) or _classify_text(re.sub(r"^[\d:\s]+-\s*", "", text))
+    if src == "hamilton":
+        return _classify_hamilton(text)
+    if src == "shelby" and len(text.strip()) == 1:
+        return _classify_shelby(text)
+    return _classify_text(text)
+
+
+def _acres(raw: Dict[str, Any]) -> Optional[float]:
+    for v in (_d(raw.get("padctn")).get("land_acres"), _d(raw.get("metro_parcel")).get("acres"),
+              _d(raw.get("hamilton_assessor")).get("calc_acres"), _d(raw.get("comptroller_parcel")).get("acres"),
+              _d(raw.get("tpad")).get("acres"),
+              _d(raw.get("williamson_inigo")).get("acreage"), _d(raw.get("padctn_owner_match")).get("acres"),
+              _d(raw.get("asset_profile")).get("total_acres")):
+        n = _num(v)
+        if n is not None:
+            return n
+    return None
+
+
+def _value(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[float]:
+    for v in (row.get("property_value"), _d(raw.get("padctn")).get("appraised"),
+              _d(raw.get("metro_parcel")).get("total_appraisal"),
+              _d(raw.get("hamilton_assessor")).get("appraised"), _d(raw.get("comptroller_parcel")).get("appraisal"),
+              _d(raw.get("tpad")).get("appraised_value_num"), _d(raw.get("shelby_arcgis")).get("appraised"),
+              _d(raw.get("rutherford_arcgis")).get("appraised"), _d(raw.get("williamson_inigo")).get("appraised"),
+              _d(raw.get("padctn_owner_match")).get("appraised")):
+        n = _num(v)
+        if n is not None:
+            return n
+    return None
+
+
+# ── owner + contact ─────────────────────────────────────────────────────────
+
+def owner_type(owner: Optional[str], owner_class: Optional[str] = None) -> str:
+    name = (owner or "").strip()
+    if owner_class == "government" or (name and _GOV_OWNER_RE.search(name)):
+        return "government"
+    if owner_class == "religious_or_education" or (name and _RELIGIOUS_OWNER_RE.search(name)):
+        return "religious"
+    if not name:
+        return "unknown"
+    return "person" if is_natural_person(name) else "entity"
+
+
+def _mailing(raw: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+    """Best owner mailing address and its state, from any assessor record."""
+    cands: List[Tuple[Optional[str], Optional[str]]] = []
+    for key in ("hamilton_assessor", "comptroller_parcel"):   # already "street, CITY ST ZIP"
+        rec = _d(raw.get(key))
+        if rec.get("owner_mailing"):
+            cands.append((rec["owner_mailing"], (rec.get("owner_state") or "").strip().upper() or None))
+    for key in ("shelby_arcgis", "rutherford_arcgis"):
+        r = _d(raw.get(key))
+        if r.get("owner_mailing"):
+            line = ", ".join(str(x) for x in (r.get("owner_mailing"), r.get("owner_city"),
+                                               " ".join(str(y) for y in (r.get("owner_state"), r.get("owner_zip")) if y))
+                             if x)
+            cands.append((line, (r.get("owner_state") or "").strip().upper() or None))
+    for v in (_d(raw.get("padctn")).get("mailing_address"), _d(raw.get("metro_parcel")).get("owner_mailing"),
+              _d(raw.get("tpad")).get("mailing_address"),
+              _d(raw.get("williamson_inigo")).get("owner_address"), raw.get("mailing_address"),
+              _d(raw.get("padctn_owner_match")).get("mailing_address")):
+        if v:
+            cands.append((str(v), None))
+    for line, state in cands:
+        line = re.sub(r"\s+", " ", (line or "")).strip(" ,")
+        if len(line) < 8 or not (re.search(r"\d", line) or "BOX" in line.upper()):
+            continue
+        if not state:
+            m = _STATE_ZIP_RE.search(line.upper())
+            state = m.group(1) if m else None
+        return line, state
+    return None, None
+
+
+def _phones(row: Dict[str, Any]) -> List[str]:
+    out = []
+    for p in [row.get("phone")] + list(row.get("alternate_phones") or []):
+        p = p.get("number") if isinstance(p, dict) else p
+        digits = re.sub(r"\D", "", str(p or ""))
+        if len(digits) == 11 and digits.startswith("1"):
+            digits = digits[1:]
+        if len(digits) == 10 and digits not in out:
+            out.append(digits)
+    return out
+
+
+def contact_path(row: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Ways to reach the owner. A phone counts only when phone_trust says it
+    belongs to the owner (skip trace or resolver at 0.75+); notice-body and
+    unattributed phones are usually trustees, attorneys or contractors."""
+    phones = _phones(row) if phone_trust(row).trusted_for_hard_gate else []
+    unverified_phone = bool(row.get("phone")) and not phones
+    email = (row.get("email") or "").strip() or None
+    if email and "@" not in email:
+        email = None
+    mailing, state = _mailing(raw)
+    tier = "phone" if phones else "email" if email else "mail" if mailing else None
+    return {"tier": tier, "phones": phones, "email": email, "mailing": mailing, "mailing_state": state,
+            "out_of_state": bool(state and state != "TN"), "unverified_phone": unverified_phone}
+
+
+# ── lane ────────────────────────────────────────────────────────────────────
+
+_NAME_STOP = {"LLC", "INC", "CORP", "CO", "LP", "LLP", "LTD", "TRUST", "TR", "TRS", "THE", "AND", "OF", "ETUX",
+              "ETAL", "ETVIR", "JR", "SR", "II", "III", "ATTN", "C/O", "TN", "LIVING", "REVOCABLE", "FAMILY",
+              # generic business words: sharing one is not sharing a name
+              "TRUCK", "TRAILER", "WASH", "PROFESSIONAL", "CENTER", "CENTERS", "SERVICE", "SERVICES", "AUTO",
+              "HOMES", "HOME", "PROPERTIES", "PROPERTY", "GROUP", "HOLDINGS", "COMPANY", "ENTERPRISES",
+              "INVESTMENTS", "REALTY", "DEVELOPMENT", "MANAGEMENT", "PARTNERS", "CHURCH", "MINISTRIES",
+              "NASHVILLE", "CHATTANOOGA", "MEMPHIS", "KNOXVILLE", "TENNESSEE", "AMERICA", "AMERICAN", "NATIONAL"}
+
+
+def _name_set(name: Optional[str]) -> set:
+    return {t for t in re.sub(r"[^A-Z ]", " ", str(name or "").upper()).split()
+            if len(t) >= 3 and t not in _NAME_STOP}
+
+
+def parcel_owner(raw: Dict[str, Any]) -> Optional[str]:
+    """Owner on the matched parcel record, from whichever assessor source is present."""
+    for key in ("metro_parcel", "hamilton_assessor", "comptroller_parcel", "padctn", "williamson_inigo",
+                "rutherford_arcgis", "shelby_arcgis", "tpad"):
+        v = _d(raw.get(key)).get("owner")
+        if v:
+            return str(v)
+    return None
+
+
+def owner_mismatch(lead_owner: Optional[str], raw: Dict[str, Any]) -> bool:
+    """True when the parcel record's owner shares no name with the lead: the lead
+    is a tenant, contractor or business at the address, not the owner (e.g. a
+    business personal-property tax account matched to its landlord's building)."""
+    po = parcel_owner(raw)
+    a, b = _name_set(lead_owner), _name_set(po)
+    return bool(a and b and not (a & b))
+
+
+def _sale_passed(row: Dict[str, Any]) -> bool:
+    s = row.get("trustee_sale_date")
+    if not s:
+        return False
+    try:
+        return datetime.fromisoformat(str(s)[:10]).date() < date.today()
+    except ValueError:
+        return False
+
+
+def stacked_distress(raw: Dict[str, Any]) -> List[str]:
+    """Distress found by cross-checking other sources, on top of the lead's own
+    distress_type. Only forcing signals count: a parcel still unpaid when its
+    tax sale was held (one-year redemption clock running)."""
+    out = []
+    ts = _d(raw.get("davidson_tax_sale"))
+    if ts.get("status") == "unpaid_at_sale":
+        out.append("davidson_tax_sale_unpaid")
+    return out
+
+
+def _land_flip(row: Dict[str, Any], contact: Dict[str, Any], acres: Optional[float],
+               value: Optional[float]) -> Dict[str, Any]:
+    """Signals that a private TN landowner would sell vacant land cheap."""
+    signals: List[str] = []
+    score = 0
+    dt = (row.get("distress_type") or "").upper()
+    if contact["out_of_state"]:
+        signals.append("out_of_state_owner"); score += 3
+    if dt in ("TAX_LIEN", "TAX_DELINQUENT", "TAX_SALE") or stacked_distress(_d(row.get("raw_payload"))):
+        signals.append("tax_delinquent"); score += 2
+    if dt == "PROBATE":
+        signals.append("probate"); score += 2
+    if dt in ("PRE_FORECLOSURE", "FORECLOSURE", "LIS_PENDENS", "COURT_SALE", "BANKRUPTCY",
+              "TRUSTEE_NOTICE", "SOT", "NOD"):
+        signals.append(dt.lower()); score += 1
+    if acres is not None and acres >= 5:
+        signals.append("5_plus_acres"); score += 1
+    if value is not None and 10000 <= value <= 250000:
+        signals.append("flip_price_band"); score += 1
+    return {"score": score, "signals": signals}
+
+
+def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw = _d(row.get("raw_payload"))
+    pm = _d(row.get("phone_metadata"))
+    oc = pm.get("owner_class")
+    oc = (oc.get("class") or oc.get("value")) if isinstance(oc, dict) else oc
+    owner = row.get("owner_name_records") or row.get("full_name")
+    otype = owner_type(owner, oc)
+
+    lane, basis = "unknown", None
+    for src, text in land_use_signals(raw, row.get("bot_source") or ""):
+        got = _classify_signal(src, text)
+        if got:
+            lane, basis = got, f"{src}:{text}"
+            break
+    subtype = None
+    if lane == "exempt":
+        lane, subtype = ("commercial", "church") if otype == "religious" else ("unknown", "exempt")
+    elif lane == "land" and basis and "COMMERCIAL" in basis.upper():
+        subtype = "commercial_land"
+    elif lane == "commercial" and basis and re.search(r"APARTMENT", basis, re.I):
+        subtype = "multifamily"
+
+    # Comptroller records carry building count and improvement value: a
+    # residential or commercial parcel with neither is a vacant lot.
+    comp = _d(raw.get("comptroller_parcel"))
+    if (basis or "").startswith("comptroller") and lane in ("residential", "commercial") and comp \
+            and not _num(comp.get("improvement_value")) and not comp.get("buildings") \
+            and _num(comp.get("appraisal")):
+        subtype = "vacant_residential" if lane == "residential" else "commercial_land"
+        lane = "land"
+
+    acres = _acres(raw)
+    if acres is not None and acres >= ACREAGE_LAND and lane in ("residential", "unknown") and subtype != "exempt":
+        lane, subtype = "land", "acreage_with_home" if lane == "residential" else "acreage"
+        basis = basis or f"acres:{acres}"
+
+    value = _value(row, raw)
+    contact = contact_path(row, raw)
+    out: Dict[str, Any] = {
+        "lane": lane, "subtype": subtype, "basis": basis, "acres": acres, "value": value,
+        "owner_type": otype, "contact": contact, "grade": None, "exclude_reason": None,
+        "stacked_distress": stacked_distress(raw), "version": VERSION,
+    }
+    if lane not in ("commercial", "land"):
+        return out
+
+    dt = (row.get("distress_type") or "").upper()
+    floor = COMMERCIAL_MIN_VALUE if lane == "commercial" else LAND_MIN_VALUE
+    if str(raw.get("parcel") or "").upper().startswith("PER-"):
+        # Hamilton business personal-property tax: a tenant's debt at the
+        # address of the building it rents, not the owner's real estate.
+        out["exclude_reason"] = "personal_property_tax"
+    elif owner_mismatch(owner, raw):
+        out["exclude_reason"] = "owner_mismatch"
+    elif otype == "government":
+        out["exclude_reason"] = "government_owner"
+    elif dt == "DEMOLITION":
+        out["exclude_reason"] = "permit_not_distress"
+    elif not dt or dt not in LIVE_DISTRESS:
+        out["exclude_reason"] = "no_live_distress"
+    elif _sale_passed(row):
+        out["exclude_reason"] = "sale_passed"
+    elif not contact["tier"]:
+        out["exclude_reason"] = "no_contact_path"
+    elif value is not None and value < floor:
+        out["exclude_reason"] = "below_value_floor"
+    elif lane == "commercial" and value is not None and value > COMMERCIAL_MAX_VALUE:
+        out["exclude_reason"] = "institutional_size"
+    else:
+        # A: owner reachable directly, value known, distress that forces a sale.
+        # Code violations alone never reach A.
+        direct = contact["tier"] in ("phone", "email")
+        strong = dt in STRONG_DISTRESS or bool(out["stacked_distress"])
+        out["grade"] = "A" if (direct and value and strong) else "B" if (direct or (value and strong)) else "C"
+    if lane == "land":
+        out["land_flip"] = _land_flip(row, contact, acres, value)
+    return out

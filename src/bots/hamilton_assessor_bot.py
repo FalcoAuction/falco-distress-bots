@@ -172,14 +172,23 @@ class HamiltonAssessorBot(BotBase):
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} Hamilton candidates to enrich")
             for row in candidates[:self.max_leads_per_run]:
+                # Personal-property tax leads carry the address of the building a
+                # business rents in; attaching that parcel would hand a tenant
+                # the landlord's land use, value and mailing.
+                raw0 = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                if str(raw0.get("parcel") or "").upper().startswith("PER-"):
+                    skipped += 1
+                    continue
                 hit = self._lookup(row, index, addr_index)
                 if hit is None:
                     no_match += 1
                     continue
 
                 update: Dict[str, Any] = {}
-                # Authoritative — override any prior HMDA-anchored phantom.
-                if hit.get("appraised"):
+                # Value only fills a gap; leads that already carry a value
+                # are here for the parcel facts (land use, acres, mailing)
+                # the commercial / land lanes read.
+                if hit.get("appraised") and not row.get("property_value"):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "hamilton_assessor"
                 if hit.get("owner") and not row.get("owner_name_records"):
@@ -187,6 +196,9 @@ class HamiltonAssessorBot(BotBase):
                 existing_raw = row.get("raw_payload") or {}
                 if not isinstance(existing_raw, dict):
                     existing_raw = {}
+                if existing_raw.get("hamilton_assessor") == hit and "property_value" not in update:
+                    skipped += 1
+                    continue
                 existing_raw["hamilton_assessor"] = hit
                 update["raw_payload"] = existing_raw
                 if not update:
@@ -340,6 +352,9 @@ class HamiltonAssessorBot(BotBase):
         )
         PAGE_SIZE = 1000
         MAX_PAGES = 10  # 10K Hamilton leads cap (corpus is ~2K, ample)
+        # No property_value filter: valued leads still need land use for
+        # the lanes. Leads already carrying a hamilton_assessor record that
+        # matches the current export are skipped in run().
         for table in ("homeowner_requests", "homeowner_requests_staging"):
             for page in range(MAX_PAGES):
                 try:
@@ -348,7 +363,6 @@ class HamiltonAssessorBot(BotBase):
                         .select("id, property_address, county, owner_name_records, "
                                 "property_value, raw_payload")
                         .or_(OR_FILTER)
-                        .is_("property_value", "null")
                         .order("id")
                         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
                         .execute()
@@ -378,6 +392,12 @@ class HamiltonAssessorBot(BotBase):
             parcel = tax_data.get("parcel") if isinstance(tax_data, dict) else None
             if parcel and parcel in parcel_index:
                 return parcel_index[parcel]
+            # hamilton_tax_delinquent stores its MAP-GROUP-PARCEL key at the
+            # top level of raw_payload.
+            if str(raw.get("county") or "").lower() == "hamilton":
+                top = raw.get("parcel")
+                if isinstance(top, str) and top in parcel_index:
+                    return parcel_index[top]
             # Some leads come from notice_enricher with a different
             # parcel format
             tpad = raw.get("tpad") or {}
