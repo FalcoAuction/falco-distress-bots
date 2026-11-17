@@ -22,7 +22,7 @@ terms carry only an "as is" disclaimer. robots.txt disallows /imgView.php
 (document images), which this never requests. The register's main site
 asks for Crawl-delay: 30 and rate-limits faster clients, so every request
 here waits 30 seconds. Already-staged filings are skipped before any
-detail request, so a normal day is a dozen requests.
+detail request, and reads at most 6 new filings per run (about 7 minutes).
 
 Distress type: SUBSTITUTION_OF_TRUSTEE (the CRM labels it Pre-Foreclosure
 (SOT); the auto promoter applies the foreclosure mortgage gate).
@@ -100,7 +100,11 @@ class ShelbySubstituteTrusteeBot(BotBase):
     frozen_after_runs = 10_000
 
     days_back = 7               # first run and catch-up window
-    max_new_per_run = 15        # 2 detail requests each at 30s: under 15 minutes
+    # 2 detail requests each at 30s, plus the search: 6 filings is ~7 minutes,
+    # inside the runner's 10-minute per-bot cap (leads are written only when
+    # scrape() returns, so a timed-out run stages nothing). Two runs a day read
+    # 12, against ~5 new filings a business day.
+    max_new_per_run = 6
 
     def scrape(self) -> List[LeadPayload]:
         self.fetch(HOME)  # session cookie
