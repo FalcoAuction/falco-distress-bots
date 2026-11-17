@@ -64,6 +64,7 @@ from . import mackie_wolf_trustee_bot
 from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
 from . import court_rss_bot
+from . import bankruptcy_events_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import court_notices_bot
@@ -165,6 +166,9 @@ NEW_BOTS = [
     # + TN district courts, and FL bankruptcies that hold an aircraft or a
     # marine/aviation business. Feeds cover ~24h, so this must run daily.
     ("court_rss", court_rss_bot.run),
+    # Same free TN bankruptcy feeds, later docket entries: chapter 13
+    # dismissals, lender stay relief, trustee abandonments.
+    ("bankruptcy_events", bankruptcy_events_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
     # Full-text court notices from the Ledger and Memphis Daily News: probate

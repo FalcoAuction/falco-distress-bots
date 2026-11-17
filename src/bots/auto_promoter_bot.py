@@ -62,6 +62,8 @@ MORTGAGE_REQUIRED_DISTRESS = {
     "PRE_FORECLOSURE", "PREFORECLOSURE", "TRUSTEE_NOTICE", "LIS_PENDENS",
     "FORECLOSURE", "NOD", "SOT", "SUBSTITUTION_OF_TRUSTEE",
     "NOTICE_OF_DEFAULT", "BANKRUPTCY",
+    # Bankruptcy events that free the lender to foreclose (bankruptcy_events_bot).
+    "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF", "BK_ABANDONED",
 }
 
 # For non-foreclosure distress (DEMOLITION, CODE_VIOLATION, TAX_LIEN,
