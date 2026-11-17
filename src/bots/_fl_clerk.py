@@ -37,6 +37,10 @@ NOT_OWNER = re.compile(
     re.I)
 
 
+_COMPANY = re.compile(r"\b(INC|LLC|L L C|CORP|CORPORATION|COMPANY|CO|LP|LLP|LTD|PA|PLLC|ASSN|ASSOCIATION|TRUST|"
+                      r"PARTNERS|PARTNERSHIP|HOLDINGS|ENTERPRISES|GROUP)\b\.?", re.I)
+
+
 def read_rows(text: str) -> List[Dict[str, str]]:
     return list(csv.DictReader(io.StringIO(text.lstrip("﻿"))))
 
@@ -89,6 +93,10 @@ def civil_case(case_number: str, rows: List[Dict[str, str]]) -> Optional[Dict[st
     owners = [(n, a) for n, a in owners if n and not NOT_OWNER.search(n)]
     if not owners:
         return None
+    # Company defendants in a home foreclosure are usually lienholders (condo
+    # associations, contractors), not the borrower: list people first and keep
+    # companies only as a fallback (an LLC can own the property).
+    owners = sorted(owners, key=lambda o: bool(_COMPANY.search(o[0])))
     tier = TIER.search(ctype)
     fl_addr = next((a for _, a in owners if re.search(r"\bFL\b", a)), None)
     return {

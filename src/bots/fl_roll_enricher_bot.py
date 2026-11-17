@@ -36,7 +36,7 @@ from ._fl_roll import RESIDENTIAL_UC, county_key, open_roll, parcel_tag, tpp_tag
 MAX_NAME_PARCELS = 3
 # Bots that stage FL leads (court_rss stages both states; the state filter
 # below keeps only its FL rows).
-FL_BOT_SOURCES = ("fl_hillsborough_clerk", "fl_code_enforcement", "fl_sunbiz", "court_rss")
+FL_BOT_SOURCES = ("fl_hillsborough_clerk", "fl_pinellas_clerk", "fl_code_enforcement", "fl_sunbiz", "court_rss")
 TPP_MIN_VALUE = 25_000
 _SELECT = "id, distress_type, full_name, owner_name_records, property_address, county, property_value"
 
