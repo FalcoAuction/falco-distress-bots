@@ -33,6 +33,11 @@ jobs:
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
 
+      # ===== CourtListener (free account token) =====
+      # Bankruptcy search, Schedule D reader and debtor-attorney lookup. Without
+      # it CourtListener returns 401 and those bots record a failed run.
+      FALCO_COURTLISTENER_TOKEN: ${{ secrets.FALCO_COURTLISTENER_TOKEN }}
+
       # ===== Runner budget =====
       # Global wall clock for src.bots._run_new. Non-critical bots are
       # skipped once less than the reserve remains; critical bots
