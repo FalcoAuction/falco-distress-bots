@@ -30,3 +30,5 @@ data/hmda_cache/
 # Comptroller county parcel + assessment files (owner PII, ~2GB, refreshed weekly)
 data/comptroller/
 data/davidson_tax_sale/
+# Florida DOR parcel roll cache (rebuilt from the free DOR portal)
+data/fl_dor/

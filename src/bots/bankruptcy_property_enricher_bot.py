@@ -218,7 +218,8 @@ class BankruptcyPropertyEnricherBot(BotBase):
             q = (
                 client.table("homeowner_requests_staging")
                 .select("id, full_name, owner_name_records, county, property_address, property_value, raw_payload")
-                .eq("distress_type", "BANKRUPTCY")
+                .in_("distress_type", ["BANKRUPTCY", "BK_DISMISSED", "BK_DISMISSAL_MOTION",
+                                       "BK_STAY_RELIEF", "BK_ABANDONED"])
                 .is_("property_address", "null")
                 .limit(500)
                 .execute()

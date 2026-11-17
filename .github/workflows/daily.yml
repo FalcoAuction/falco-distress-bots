@@ -98,6 +98,10 @@ jobs:
           # installed" and we silently lose a lis pendens lead source.
           python -m playwright install --with-deps chromium
 
+      - name: Month key for caches
+        id: month
+        run: echo "ym=$(date -u +%Y-%m)" >> "$GITHUB_OUTPUT"
+
       - name: Preflight (secrets, imports, Supabase reachable)
         # Fails the job only when Supabase is unreachable. Everything
         # else is reported and the run continues with that feature off.
@@ -106,6 +110,22 @@ jobs:
       - name: Run Falco pipeline (legacy bot scrapers -> Supabase)
         run: python -m src.run_all
         continue-on-error: true   # legacy stage; ~30s; must not block the new one
+
+      - name: Restore Florida roll cache (DOR parcels + Sunbiz index)
+        uses: actions/cache@v4
+        with:
+          path: data/fl_dor
+          # Monthly key: a warm month never re-saves the ~1.5 GB index;
+          # the refresh step below only re-downloads files DOR changed.
+          key: fl-dor-${{ steps.month.outputs.ym }}
+          restore-keys: fl-dor-
+
+      - name: Refresh Florida roll cache
+        # Cold build ~15 min, warm ~10 s. Kept out of _run_new so it never
+        # eats a bot's time cap; FL bots skip cleanly if the cache is empty.
+        run: python -m src.bots.fl_roll_refresh
+        timeout-minutes: 30
+        continue-on-error: true
 
       - name: Run staging scrapers (-> homeowner_requests_staging)
         # Exits non-zero only when a critical bot (auto_promoter and the

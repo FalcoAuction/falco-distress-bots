@@ -343,6 +343,12 @@ class DecisionEngineBot(BotBase):
 
         try:
             candidates = self._candidates(client)
+            # Florida leads are not graded here: the LLM pass costs money and
+            # its Tennessee thresholds (focus counties, TN outreach rules) do
+            # not apply. FL leads are ranked by the personal-property lane and
+            # the DOR roll tags instead.
+            candidates = [c for c in candidates
+                          if not (isinstance(c.get("raw_payload"), dict) and c["raw_payload"].get("state") == "FL")]
             self.logger.info(f"{len(candidates)} leads to grade")
 
             # Pass 1: apply fast rules sequentially. Cheap, no LLM.
@@ -538,6 +544,7 @@ class DecisionEngineBot(BotBase):
             return self._mk_decision("HOLD_FOR_DATA", 0, "Missing distress_type", "none", 1.0)
         if not row.get("property_address") and row.get("distress_type") not in (
             "BANKRUPTCY", "PROBATE",
+            "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF", "BK_ABANDONED",
         ):
             return self._mk_decision("HOLD_FOR_DATA", 0,
                                        "Missing property_address (non-court lead)", "none", 1.0)
@@ -707,7 +714,8 @@ class DecisionEngineBot(BotBase):
                 and eq_trust["hard_gate_allowed"]
                 and phone_ok
                 and owner_class == "homeowner"
-                and row.get("distress_type") in ("PRE_FORECLOSURE", "BANKRUPTCY", "PROBATE", "TAX_LIEN")):
+                and row.get("distress_type") in ("PRE_FORECLOSURE", "BANKRUPTCY", "PROBATE", "TAX_LIEN",
+                                                 "BK_DISMISSED", "BK_STAY_RELIEF")):
             score = self._compute_priority(row)
             if score >= 80:
                 return self._mk_decision(
@@ -818,6 +826,9 @@ class DecisionEngineBot(BotBase):
         dt = row.get("distress_type")
         score += {
             "BANKRUPTCY": 18, "PRE_FORECLOSURE": 16, "TAX_LIEN": 12,
+            # A dismissed chapter 13 or a lifted stay means the foreclosure the
+            # filing paused can restart now: the most time-sensitive signal.
+            "BK_DISMISSED": 20, "BK_STAY_RELIEF": 20, "BK_DISMISSAL_MOTION": 16, "BK_ABANDONED": 14,
             "PROBATE": 12, "FSBO": 8, "CODE_VIOLATION": 6, "REO": 4,
         }.get(dt, 0)
 
