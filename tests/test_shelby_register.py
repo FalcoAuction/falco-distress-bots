@@ -148,6 +148,15 @@ class LeadTests(unittest.TestCase):
         self.assertIn("No address yet", lead.admin_notes)
         self.assertEqual(lead.pipeline_lead_key, bot.make_lead_key(bot.name, "shelby|26000002"))
 
+    def test_all_lender_grantors_still_staged(self):
+        bot = ShelbySubstituteTrusteeBot()
+        row = {"instrument": "26000003", "code": "APPT", "grantors": ["ACME BANK", "ACME MORTGAGE LLC"],
+               "grantees": ["SMITH LAW PLLC S TR"], "recorded": "2026-11-16", "detail_url": None}
+        lead = build_lead(bot, row, None, None)
+        self.assertEqual(lead.full_name, "ACME MORTGAGE LLC")
+        self.assertEqual(lead.raw_payload["party_basis"], "unidentified")
+        self.assertIn("Borrower not identified", lead.admin_notes)
+
 
 if __name__ == "__main__":
     unittest.main()
