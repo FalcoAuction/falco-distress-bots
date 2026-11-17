@@ -24,6 +24,7 @@ Distress type: N/A (enricher).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import time
 import traceback as tb
@@ -33,6 +34,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ._base import BotBase, _supabase
+from ._bk_match import district_counties, match_debtors
 from ._comptroller import ParcelIndex, build_index
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,9 +42,39 @@ DATA_DIR = ROOT / "data" / "comptroller"
 DB_PATH = DATA_DIR / "index.sqlite"
 PAGE = 1000
 OWNER_MATCH_TYPES = {"PROBATE", "BANKRUPTCY"}
+# Bankruptcy leads never carry a county or address; the court's district and
+# the debtor names (spouses filing jointly confirm each other) find the home.
+BK_TYPES = {"BANKRUPTCY", "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF", "BK_ABANDONED"}
+# Debtor matches strong enough to set the lead's address and county.
+BK_TRUSTED = {"joint", "middle_initial"}
+# Debtor searches per run (~0.07s each, more for common surnames), so a
+# backlog of thousands clears over a few runs inside the 600s bot cap.
+MAX_DEBTOR_SEARCHES = 2500
+# Leads already searched against this build of the index; cached with the
+# index and cleared when the index changes, so new deeds get another look.
+TRIED_PATH = DATA_DIR / "debtor_tried.json"
+
+
+def _load_tried() -> set:
+    try:
+        d = json.loads(TRIED_PATH.read_text(encoding="utf-8"))
+        if DB_PATH.exists() and d.get("index_mtime") == DB_PATH.stat().st_mtime:
+            return set(d.get("ids") or [])
+    except (OSError, ValueError):
+        pass
+    return set()
+
+
+def _save_tried(ids: set) -> None:
+    if not DB_PATH.exists():
+        return
+    tmp = TRIED_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"index_mtime": DB_PATH.stat().st_mtime, "ids": sorted(ids)}), encoding="utf-8")
+    os.replace(tmp, TRIED_PATH)
 VERSION = "comptroller-parcels-2026-11-05"
 FIELDS = ("id,county,property_address,owner_name_records,full_name,distress_type,property_value,"
-          "done:raw_payload->comptroller_parcel->>parcelid")
+          "done:raw_payload->comptroller_parcel->>parcelid,court:raw_payload->>court_id,"
+          "state:raw_payload->>state")
 
 
 def _index_stale() -> bool:
@@ -88,6 +120,8 @@ class ComptrollerParcelsBot(BotBase):
     def match_all(self, client, idx: ParcelIndex) -> Dict[str, Any]:
         stats: Counter = Counter()
         updates: List[Dict[str, Any]] = []
+        tried = set() if self.refresh else _load_tried()
+        searches = 0
         for row in _rows(client):
             stats["scanned"] += 1
             if row.get("done") and not self.refresh:
@@ -99,6 +133,22 @@ class ComptrollerParcelsBot(BotBase):
                 if idx.resolve_county(row.get("county"), addr):
                     stats["in_coverage_with_address"] += 1
                     hit = idx.match_address(addr, row.get("county"))
+            elif ((row.get("distress_type") or "").upper() in BK_TYPES and not row.get("county")
+                  and row.get("court") and (row.get("state") or "TN") == "TN"):
+                counties = district_counties(row["court"], idx.counties)
+                names = [n.strip() for n in (row.get("owner_name_records") or row.get("full_name") or "").split(";")]
+                if row["id"] in tried:
+                    stats["bk_already_tried"] += 1
+                elif searches >= MAX_DEBTOR_SEARCHES:
+                    stats["bk_deferred"] += 1
+                elif counties and names:
+                    searches += 1
+                    stats["bk_debtor_search"] += 1
+                    hit = match_debtors(idx.con, [n for n in names if n], counties)
+                    if hit:
+                        stats[f"bk_{hit['confidence']}"] += 1
+                    else:
+                        tried.add(row["id"])
             elif (row.get("distress_type") or "").upper() in OWNER_MATCH_TYPES and row.get("county"):
                 if idx.resolve_county(row.get("county"), None):
                     stats["in_coverage_owner_only"] += 1
@@ -108,9 +158,14 @@ class ComptrollerParcelsBot(BotBase):
             hit["version"] = VERSION
             stats[f"matched_{hit['method']}"] += 1
             stats[f"class_{(hit.get('class') or '?')[:2]}"] += 1
+            trusted_bk = hit["method"] == "debtor_name" and hit.get("confidence") in BK_TRUSTED
             updates.append({"id": row["id"], "hit": hit,
-                            "value": hit.get("appraisal") if hit["method"] == "address" and not row.get("property_value")
-                            and (hit.get("appraisal") or 0) > 0 else None})
+                            "value": hit.get("appraisal") if (hit["method"] == "address" or trusted_bk)
+                            and not row.get("property_value") and (hit.get("appraisal") or 0) > 0 else None,
+                            "address": hit.get("situs_address") if trusted_bk else None,
+                            "county": hit["county"].title() if trusted_bk else None})
+        if self.write:
+            _save_tried(tried)
         return {"stats": stats, "updates": updates}
 
     def apply(self, client, updates: List[Dict[str, Any]]) -> int:
@@ -119,7 +174,7 @@ class ComptrollerParcelsBot(BotBase):
         written = 0
         for u in updates:
             try:
-                cur = (client.table("homeowner_requests_staging").select("raw_payload,property_value")
+                cur = (client.table("homeowner_requests_staging").select("raw_payload,property_value,property_address")
                        .eq("id", u["id"]).limit(1).execute().data) or []
                 if not cur:
                     continue
@@ -128,6 +183,9 @@ class ComptrollerParcelsBot(BotBase):
                     raw = {}
                 raw["comptroller_parcel"] = u["hit"]
                 upd: Dict[str, Any] = {"raw_payload": raw}
+                if u.get("address") and not cur[0].get("property_address"):
+                    upd["property_address"] = u["address"]
+                    upd["county"] = u["county"]
                 if u["value"] and not cur[0].get("property_value"):
                     upd["property_value"] = int(round(u["value"]))
                     upd["property_value_source"] = "comptroller"
@@ -142,7 +200,7 @@ class ComptrollerParcelsBot(BotBase):
         started = datetime.now(timezone.utc)
         self._report_health(status="running", started_at=started, finished_at=None,
                             fetched_count=0, parsed_count=0, staged_count=0, duplicate_count=0)
-        if not any(DATA_DIR.glob("*/ASSESSMENT_DATA_*.dbf")):
+        if not DB_PATH.exists() and not any(DATA_DIR.glob("*/ASSESSMENT_DATA_*.dbf")):
             self._report_health(status="zero_yield", started_at=started, finished_at=datetime.now(timezone.utc),
                                 fetched_count=0, parsed_count=0, staged_count=0, duplicate_count=0,
                                 error_message="no_data: download county files to data/comptroller/")
@@ -157,7 +215,7 @@ class ComptrollerParcelsBot(BotBase):
         result: Dict[str, Any] = {"stats": Counter(), "updates": []}
         written = 0
         try:
-            if _index_stale():
+            if any(DATA_DIR.glob("*/ASSESSMENT_DATA_*.dbf")) and _index_stale():
                 self.logger.info("building Comptroller index")
                 build_index(str(DATA_DIR), str(DB_PATH))
             idx = ParcelIndex(str(DB_PATH))
