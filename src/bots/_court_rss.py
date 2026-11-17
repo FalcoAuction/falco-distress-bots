@@ -113,3 +113,60 @@ def debtors(caption: str) -> List[str]:
     """'Jane Q Doe and John R Doe' -> ['Jane Q Doe', 'John R Doe']."""
     parts = re.split(r"\s+and\s+|\s*&\s*", caption or "", flags=re.I)
     return [p.strip(" ,") for p in parts if p.strip(" ,")]
+
+
+# ── Bankruptcy events (TN) ─────────────────────────────────────────────────
+#
+# Later docket entries that put a debtor's house back in play. Labels differ
+# by court; these patterns were checked against a day of tnmb/tneb/tnwb feeds
+# (2026-11-16). The feed gives only the entry's name, never its outcome, so
+# anything that might be a motion or an order whose result is unknown is
+# staged as the weaker signal, never as the final one.
+
+BK_DISMISSED = "BK_DISMISSED"                  # chapter 13 case dismissed: stay gone, foreclosure can resume
+BK_DISMISSAL_MOTION = "BK_DISMISSAL_MOTION"    # trustee/creditor asked to dismiss, or an order whose result the feed hides
+BK_STAY_RELIEF = "BK_STAY_RELIEF"              # order on a creditor's request to lift the automatic stay
+BK_ABANDONED = "BK_ABANDONED"                  # trustee notice, motion or order to abandon property
+BK_EVENT_TYPES = (BK_DISMISSED, BK_DISMISSAL_MOTION, BK_STAY_RELIEF, BK_ABANDONED)
+
+# Entries that mention these words but undo or argue about the event.
+_BK_NOISE = re.compile(r"adversary|set aside|vacat|withdraw|objection|response|reinstat|\bden(y|ied|ying)\b|reconsider",
+                       re.I)
+_BK_ORDER = re.compile(r"\border\b|bk order|\bdismissing\b|\(\s*dismissed\s+13\s*\)", re.I)
+_BK_FINAL_DISMISSAL = re.compile(r"\bdismissing\b|\(\s*dismissed\s+13\s*\)|\bbk order\b", re.I)
+_BK_MOTION = re.compile(r"\bmotion\b", re.I)
+_STAY_RELIEF = re.compile(r"relief from (the )?(automatic )?stay", re.I)
+_CO_DEBTOR = re.compile(r"co-?\s?debtor", re.I)
+
+
+def bk_event(item: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Classify one bankruptcy docket entry, or None if it is not one of the
+    events above. Returns {'type', 'status', 'entry'} where status is
+    'order', 'motion', 'notice' or 'order_on_motion' (an order was entered on
+    a motion, but the feed does not say whether it was granted)."""
+    entry = (item.get("entry_type") or "").strip()
+    if not entry or _BK_NOISE.search(entry):
+        return None
+    chapter = (item.get("chapter") or "").strip()
+
+    if re.search(r"abandon", entry, re.I):
+        status = "order" if _BK_ORDER.search(entry) and not _BK_MOTION.search(entry) else \
+                 "order_on_motion" if _BK_ORDER.search(entry) else \
+                 "notice" if re.search(r"\bnotice\b", entry, re.I) else "motion"
+        return {"type": BK_ABANDONED, "status": status, "entry": entry}
+
+    if _STAY_RELIEF.search(entry) and not _CO_DEBTOR.search(entry):
+        # Only orders: a motion for relief is a request the court may refuse.
+        if not _BK_ORDER.search(entry):
+            return None
+        status = "order_on_motion" if _BK_MOTION.search(entry) else "order"
+        return {"type": BK_STAY_RELIEF, "status": status, "entry": entry}
+
+    if re.search(r"dismiss", entry, re.I):
+        if chapter != "13":
+            return None
+        if _BK_FINAL_DISMISSAL.search(entry) and not _BK_MOTION.search(entry):
+            return {"type": BK_DISMISSED, "status": "order", "entry": entry}
+        status = "order_on_motion" if _BK_ORDER.search(entry) else "motion"
+        return {"type": BK_DISMISSAL_MOTION, "status": status, "entry": entry}
+    return None
