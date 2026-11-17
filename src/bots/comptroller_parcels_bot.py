@@ -47,9 +47,9 @@ OWNER_MATCH_TYPES = {"PROBATE", "BANKRUPTCY"}
 BK_TYPES = {"BANKRUPTCY", "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF", "BK_ABANDONED"}
 # Debtor matches strong enough to set the lead's address and county.
 BK_TRUSTED = {"joint", "middle_initial"}
-# Debtor searches per run (~0.07s each, more for common surnames), so a
-# backlog of thousands clears over a few runs inside the 600s bot cap.
-MAX_DEBTOR_SEARCHES = 2500
+# Debtor searches per run (~0.1s each live, more for common surnames), so
+# the ~12k backlog clears over a few runs inside the bot's time cap.
+MAX_DEBTOR_SEARCHES = 1500
 # Leads already searched against this build of the index; cached with the
 # index and cleared when the index changes, so new deeds get another look.
 TRIED_PATH = DATA_DIR / "debtor_tried.json"

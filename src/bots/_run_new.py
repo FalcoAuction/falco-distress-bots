@@ -328,6 +328,7 @@ BOT_TIMEOUTS = {
     "hmda_enricher": 900,          # median 5.4m, max 12.6m; 954 leads/14d
     "hamilton_tax_delinquent": 1200,  # weekly only; 2,000-lead CSV
     "davidson_assessor": 480,      # 150 x 1.5s throttle + fetches
+    "comptroller_parcels": 900,    # 54k-row scan + up to 1500 debtor searches (~0.1s)
 }
 
 # Wall clock held back for the critical tail. decision_engine's worst
