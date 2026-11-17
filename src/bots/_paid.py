@@ -16,6 +16,7 @@ PAID_BOTS = frozenset({
     "middle_tn_twilio_lookup",  # Twilio Lookup line type
     "batchdata_skip_trace",     # BatchData skip trace (legacy)
     "middle_tn_dial_probe",     # Twilio
+    "boat_owner_skiptrace",     # Enformion, marina-lien boat owners
 })
 
 

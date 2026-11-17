@@ -141,6 +141,19 @@ def _contacts(raw: Dict[str, Any]) -> Dict[str, Any]:
     vc = raw.get("vessel_case")
     if isinstance(vc, dict) and vc.get("plaintiff"):
         out["plaintiff"] = vc.get("plaintiff")
+    vessel = raw.get("vessel")
+    if isinstance(vessel, dict):
+        if vessel.get("marina"):
+            out["marina"] = {"name": vessel["marina"], "address": vessel.get("marina_address")}
+        if vessel.get("owner"):
+            out["owner"] = vessel["owner"]
+    b2b = raw.get("b2b_contacts")
+    if isinstance(b2b, dict):
+        # Trustee and counsel phones (court_contacts bot): business lines, callable today.
+        if isinstance(b2b.get("trustee"), dict):
+            out["trustee"] = b2b["trustee"]
+        if isinstance(b2b.get("counsel"), list) and b2b["counsel"]:
+            out["counsel"] = b2b["counsel"][:4]
     if raw.get("source") == "hillsclerk_daily" and raw.get("kind") == "probate":
         if raw.get("attorney") and "attorney" not in out:
             out["attorney"] = {"names": [raw["attorney"]], "address": None}
@@ -185,6 +198,7 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     plane_bands = {p.get("value_band") for p in planes}
 
     tag = (_vessel_arrest(raw) if dt == "VESSEL_ARREST"
+           else _vessel_lien(raw) if dt == "MARINA_LIEN"
            else _estate(lead, raw, planes, plane_bands) if dt == "PROBATE"
            else _liquidation(lead, raw, planes, dt) if dt in ("BANKRUPTCY", "BUSINESS_CLOSURE")
            else _seizure(lead, raw) if dt == "TAX_LIEN"
@@ -217,6 +231,31 @@ def _vessel_arrest(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         caveats.append("caption does not say yacht: may be a commercial vessel, confirm it is a recreational boat")
     grade = "A" if vc.get("yacht") and vc.get("claim_kind") in ("lender", "service_lien") else "B"
     return _result("vessel_arrest", grade, ["boats"], None, signals, raw, caveats)
+
+
+def _vessel_lien(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A boat held for unpaid marina or storage charges (TN newspaper notice,
+    tn_boat_notice bot). The owner can still pay or sell before the lien sale;
+    a marina running a multi-boat lien auction is itself a consignor."""
+    v = raw.get("vessel")
+    if not isinstance(v, dict) or not v.get("grade"):
+        return None
+    if v.get("kind") == "marina_auction":
+        signals = [f"{v.get('marina')} is selling boats at a marina lien auction"]
+        caveats = ["boats and owners are listed in the full notice; call the marina to consign the auction"]
+        return _result("vessel_lien", "B", ["boats"], None, signals, raw, caveats)
+    ident = v.get("registration") or v.get("hin")
+    desc = v.get("description") or ""
+    year = v.get("year") if v.get("year") and str(v.get("year")) not in desc else None
+    boat = " ".join(str(x) for x in (year, desc) if x) or "vessel"
+    signals = [f"{boat}" + (f" ({ident})" if ident else "") + f" held by {v.get('marina') or 'a recovery party'} "
+               "for unpaid charges; lien sale after the notice period"]
+    if v.get("owner"):
+        signals.append(f"owner of record: {v['owner']}")
+    caveats = ["value is estimated from make, year and size; confirm with the owner or marina"]
+    if not v.get("owner"):
+        caveats.append("owner not named in the notice excerpt: ask the marina")
+    return _result("vessel_lien", v["grade"], ["boats"], None, signals, raw, caveats)
 
 
 def _ffl_people(raw: Dict[str, Any]) -> List[Dict[str, Any]]:

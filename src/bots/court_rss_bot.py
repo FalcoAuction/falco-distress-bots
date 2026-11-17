@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ._base import BotBase, LeadPayload
 from ._court_rss import debtors, parse_feed, vessel_case
@@ -33,6 +33,10 @@ from ._court_rss import debtors, parse_feed, vessel_case
 FEED = "https://ecf.{court}.uscourts.gov/cgi-bin/rss_outside.pl"
 DISTRICT_COURTS = (("flsd", "FL"), ("flmd", "FL"), ("flnd", "FL"), ("tnmd", "TN"), ("tned", "TN"), ("tnwd", "TN"))
 FL_BANKRUPTCY_COURTS = ("flsb", "flmb", "flnb")
+TN_BANKRUPTCY_COURTS = ("tnmb", "tneb", "tnwb")
+# "Voluntary Petition (Chapter 7)", "Chapter 13 Voluntary Petition (fee) - case
+# upload"; not "Post-Petition Mortgage Fees" or amended petitions.
+NEW_PETITION = re.compile(r"^(?!.*amended)(?:Chapter \d+ )?(?:Voluntary|Involuntary) Petition\b", re.I)
 ASSET_BUSINESS = re.compile(r"\b(YACHTS?|MARINE|BOATS?|BOATING|AVIATION|AIRCRAFT|AIR CHARTERS?|JETS?|AVIONICS|"
                             r"SEAPLANES?|HELICOPTERS?)\b", re.I)
 ENTITY = re.compile(r"\b(LLC|L\.L\.C|INC|CORP|CORPORATION|COMPANY|CO|LP|LLP|PLLC|LTD)\b\.?", re.I)
@@ -67,6 +71,8 @@ class CourtRssBot(BotBase):
                                  "docket_url": item["docket_url"], "vessel_case": vc},
                 )
         for lead in self._fl_bankruptcies():
+            leads.setdefault(lead.pipeline_lead_key, lead)
+        for lead in self._tn_bankruptcies():
             leads.setdefault(lead.pipeline_lead_key, lead)
         self.logger.info(f"staging {len(leads)} lead(s)")
         return list(leads.values())
@@ -105,6 +111,33 @@ class CourtRssBot(BotBase):
                              "trustee": item["trustee"], "docket_url": item["docket_url"],
                              "first_seen": item["published"]},
             ))
+        return out
+
+    def _tn_bankruptcies(self) -> List[LeadPayload]:
+        """New Tennessee bankruptcy petitions. CourtListener (the old source,
+        courtlistener_bankruptcy) has 401'd without a token since 2026-10-27;
+        the courts' own RSS carries the debtor, chapter and trustee for free.
+        Only petitions are staged, not every later docket entry."""
+        out = []
+        for court in TN_BANKRUPTCY_COURTS:
+            for item in self._feed(court):
+                if not NEW_PETITION.search(item.get("entry_type") or ""):
+                    continue
+                names = debtors(item["caption"])
+                if not names:
+                    continue
+                out.append(LeadPayload(
+                    bot_source=self.name, pipeline_lead_key=self.make_lead_key(self.name, f"{court}|{item['case_number']}"),
+                    distress_type="BANKRUPTCY", full_name=names[0], owner_name_records="; ".join(names),
+                    source_url=item["docket_url"],
+                    admin_notes=f"TN bankruptcy {court} {item['case_number']}, ch. {item['chapter'] or '?'}"
+                                + (f"; trustee {item['trustee']}" if item.get("trustee") else ""),
+                    raw_payload={"source": "pacer_rss", "state": "TN", "court_id": court,
+                                 "case_number": item["case_number"], "case_name": item["caption"],
+                                 "chapter": item["chapter"], "trustee": item["trustee"],
+                                 "docket_url": item["docket_url"], "first_entry": item["entry_type"],
+                                 "first_seen": item["published"]},
+                ))
         return out
 
     def _feed(self, court: str) -> List[Dict[str, Any]]:

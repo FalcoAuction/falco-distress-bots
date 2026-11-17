@@ -119,6 +119,9 @@ from . import fl_hillsborough_clerk_bot
 from . import fl_code_enforcement_bot
 from . import fl_sunbiz_bot
 from . import fl_roll_enricher_bot
+from . import tn_boat_notice_bot
+from . import court_contacts_bot
+from . import boat_owner_skiptrace_bot
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -197,6 +200,9 @@ NEW_BOTS = [
     ("fl_hillsborough_clerk", fl_hillsborough_clerk_bot.run),
     ("fl_code_enforcement", fl_code_enforcement_bot.run),
     ("fl_sunbiz", fl_sunbiz_bot.run),
+    # TN marina-lien / abandoned-vessel notices: owner, registration,
+    # hull ID and marina for houseboats and cruisers (free).
+    ("tn_boat_notice", tn_boat_notice_bot.run),
     # Enrichers (run last — replace paid API calls with free internal logic)
     ("notice_enricher", notice_enricher_bot.run),
     ("phone_classifier", phone_classifier_bot.run),
@@ -238,7 +244,13 @@ NEW_BOTS = [
     ("ffl_overlay", ffl_overlay_bot.run),
     # High-value estate / liquidation / seizure / owner-asset auctions only.
     # Reads the aircraft / ffl / obituary tags, so it runs after them.
+    # Trustee (USTP list) and counsel (CourtListener) phones for
+    # bankruptcy and vessel-arrest leads; the lane reads them.
+    ("court_contacts", court_contacts_bot.run),
     ("personal_property_lane", personal_property_lane_bot.run),
+    # Owner phones for marina-lien boats. PAID: parked with the rest of
+    # paid data until FALCO_PAID_DATA_ENABLED=1.
+    ("boat_owner_skiptrace", boat_owner_skiptrace_bot.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
     # HMDA's mortgage_signal); skip-trace before Twilio lookup (validates
