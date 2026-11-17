@@ -135,7 +135,10 @@ class FlSunbizBot(BotBase):
                     bot_source=self.name,
                     pipeline_lead_key=self.make_lead_key(self.name, f"ev|{ev['doc_number']}|{ev['code']}"),
                     distress_type="BUSINESS_CLOSURE", full_name=ev["name"], owner_name_records=ev["name"],
-                    county=top["county"].title(), property_address=top["situs"] + ", FL" if top["situs"] else None,
+                    # The equipment's location is usually leased space; it stays
+                    # in fl_tpp, not property_address, so no landlord parcel
+                    # gets attached by address.
+                    county=top["county"].title(), property_address=None,
                     source_url="https://search.sunbiz.org/Inquiry/CorporationSearch/ByDocumentNumber",
                     admin_notes=f"{ev['description'].title()} filed {ev['filed']}: {ev['name']} "
                                 f"(doc {ev['doc_number']}); ${total:,.0f} business equipment on the FL roll",
@@ -198,7 +201,10 @@ class FlSunbizBot(BotBase):
             bot_source=self.name, pipeline_lead_key=self.make_lead_key(self.name, f"flr|{d['doc_number']}|{d['name']}"),
             distress_type="TAX_LIEN", full_name=d["name"], owner_name_records=(ptag or {}).get("owner") or d["name"],
             county=county.title() if county else None,
-            property_address=(ptag["situs"] + ", FL") if ptag else addr,
+            # No owned parcel: leave the property empty (the debtor's address
+            # stays in raw_payload.debtor_address). Using it here let the roll
+            # enricher attach the landlord's building by address.
+            property_address=(ptag["situs"] + ", FL") if ptag else None,
             property_value=ptag["just_value"] if ptag else None,
             source_url="https://search.sunbiz.org/Inquiry/FederalTaxLienSearch",
             admin_notes=(f"Federal tax lien {d['doc_number']} filed {filed or '?'} against {d['name']}"
