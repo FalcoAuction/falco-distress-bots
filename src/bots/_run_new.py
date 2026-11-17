@@ -118,6 +118,7 @@ from . import middle_tn_twilio_lookup_bot
 from . import auto_promoter_bot
 from . import tn_lis_pendens_bot
 from . import fl_hillsborough_clerk_bot
+from . import fl_pinellas_clerk_bot
 from . import fl_code_enforcement_bot
 from . import fl_sunbiz_bot
 from . import fl_roll_enricher_bot
@@ -207,6 +208,8 @@ NEW_BOTS = [
     # probate. Miami-Dade + Orlando code enforcement open data. Sunbiz
     # dissolutions and federal tax liens joined to the DOR roll.
     ("fl_hillsborough_clerk", fl_hillsborough_clerk_bot.run),
+    # Pinellas Clerk daily files; automated download OK'd in writing 2026-11-17.
+    ("fl_pinellas_clerk", fl_pinellas_clerk_bot.run),
     ("fl_code_enforcement", fl_code_enforcement_bot.run),
     ("fl_sunbiz", fl_sunbiz_bot.run),
     # TN marina-lien / abandoned-vessel notices: owner, registration,

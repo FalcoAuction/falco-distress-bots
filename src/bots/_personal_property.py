@@ -154,12 +154,14 @@ def _contacts(raw: Dict[str, Any]) -> Dict[str, Any]:
             out["trustee"] = b2b["trustee"]
         if isinstance(b2b.get("counsel"), list) and b2b["counsel"]:
             out["counsel"] = b2b["counsel"][:4]
-    if raw.get("source") == "hillsclerk_daily" and raw.get("kind") == "probate":
+    if raw.get("source") in ("hillsclerk_daily", "pinellas_clerk_daily") and raw.get("kind") == "probate":
         if raw.get("attorney") and "attorney" not in out:
-            out["attorney"] = {"names": [raw["attorney"]], "address": None}
+            # Pinellas gives the firm and office address in one field.
+            out["attorney"] = {"names": [raw["attorney"]], "address": raw.get("attorney_firm")}
         if raw.get("petitioner") and "representatives" not in out:
             out["representatives"] = [{"name": raw["petitioner"], "address": raw.get("petitioner_address")}]
-        out.setdefault("probate_docket", f"Hillsborough {raw.get('case_number')}")
+        county = "Pinellas" if raw.get("source") == "pinellas_clerk_daily" else "Hillsborough"
+        out.setdefault("probate_docket", f"{county} {raw.get('case_number')}")
     return out
 
 
