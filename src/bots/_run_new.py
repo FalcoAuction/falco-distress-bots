@@ -65,6 +65,7 @@ from . import tn_probate_bot
 from . import courtlistener_bankruptcy_bot
 from . import court_rss_bot
 from . import bankruptcy_events_bot
+from . import shelby_substitute_trustee_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import court_notices_bot
@@ -169,6 +170,10 @@ NEW_BOTS = [
     # Same free TN bankruptcy feeds, later docket entries: chapter 13
     # dismissals, lender stay relief, trustee abandonments.
     ("bankruptcy_events", bankruptcy_events_bot.run),
+    # Shelby Register of Deeds: Appointments of Substitute Trustee, the
+    # earliest foreclosure signal. 30s between requests (the register asks
+    # for it), so a normal run is ~5 minutes and the first one ~15.
+    ("shelby_substitute_trustee", shelby_substitute_trustee_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
     # Full-text court notices from the Ledger and Memphis Daily News: probate

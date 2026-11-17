@@ -45,6 +45,8 @@ EXPECTED_BOTS = {
     # Dozens of TN dismissals a week; a silent week means the feed or the
     # entry labels changed.
     "bankruptcy_events":         {"max_silent_days": 7,  "min_total": 0},
+    # About five a business day; a silent week means the index changed.
+    "shelby_substitute_trustee": {"max_silent_days": 7,  "min_total": 0},
     "bankruptcy_schedule_d":     {"max_silent_days": 30, "min_total": 0},
     "tn_public_notice":          {"max_silent_days": 30, "min_total": 0},
     "hamilton_county_herald":    {"max_silent_days": 30, "min_total": 0},
