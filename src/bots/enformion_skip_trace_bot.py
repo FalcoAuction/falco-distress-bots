@@ -173,7 +173,7 @@ class EnformionSkipTraceBot(BotBase):
 
                 owner = row.get("owner_name_records") or row.get("full_name") or ""
                 name_parts = _split_name(owner)
-                addr_parts = _split_address(row.get("property_address") or "")
+                addr_parts = self._address_parts(row)
                 if not addr_parts or not name_parts:
                     continue
 
@@ -255,6 +255,12 @@ class EnformionSkipTraceBot(BotBase):
             "error": error_message,
             "staged": produced, "duplicates": 0, "fetched": attempted,
         }
+
+    @staticmethod
+    def _address_parts(row: Dict[str, Any]) -> Dict[str, str]:
+        """Address sent with the name. Subclasses without a street address
+        (boat owners) send only the area."""
+        return _split_address(row.get("property_address") or "")
 
     # ── Candidates: BatchData's misses + unverified primaries ────────────
     def _candidates(self, client, max_per_run: int) -> List[Dict[str, Any]]:
@@ -428,6 +434,8 @@ class EnformionSkipTraceBot(BotBase):
             "source": "enformion_contact_enrich",
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         }
+        if getattr(self, "match_basis", None):
+            pm["enformion_skip_trace"]["match_basis"] = self.match_basis
         update: Dict[str, Any] = {
             "phone": phones[0],
             "phone_metadata": pm,

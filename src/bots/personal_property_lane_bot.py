@@ -31,7 +31,7 @@ _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "c
              "court_id", "docket_number", "courtlistener_docket_url", "case_number", "docket_url", "state",
              "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor")
 _RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
-             "fl_tpp", "sunbiz_event")
+             "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts")
 _BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value"
 
 
