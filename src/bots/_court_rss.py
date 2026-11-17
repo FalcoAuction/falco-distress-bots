@@ -24,7 +24,7 @@ from __future__ import annotations
 import email.utils
 import html
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 _ITEM = re.compile(r"<item>(.*?)</item>", re.S)
 _TAG = re.compile(r"<[^>]+>")
@@ -64,6 +64,25 @@ def parse_feed(xml: str) -> List[Dict[str, Any]]:
             "docket_url": _field(raw, "link") or None,
             "published": pub_iso,
         })
+    return out
+
+
+_CASE = re.compile(r"(\d+):(\d{2})-bk-(\d+)", re.I)
+
+
+def case_key(case: Optional[str]) -> Optional[str]:
+    """'3:26-bk-04209-CW' and '3:26-bk-4209' both -> '3:26-bk-04209'."""
+    m = _CASE.search(case or "")
+    return f"{int(m.group(1))}:{m.group(2)}-bk-{int(m.group(3)):05d}" if m else None
+
+
+def chapter7_trustees(court: str, items: List[Dict[str, Any]]) -> Dict[Tuple[str, str], str]:
+    """(court, case) -> trustee for every chapter 7 entry that names one."""
+    out: Dict[Tuple[str, str], str] = {}
+    for item in items:
+        key = case_key(item.get("case_number"))
+        if key and str(item.get("chapter") or "").strip() == "7" and item.get("trustee"):
+            out[(court, key)] = item["trustee"]
     return out
 
 
