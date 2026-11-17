@@ -172,7 +172,7 @@ NEW_BOTS = [
     ("bankruptcy_events", bankruptcy_events_bot.run),
     # Shelby Register of Deeds: Appointments of Substitute Trustee, the
     # earliest foreclosure signal. 30s between requests (the register asks
-    # for it), so a normal run is ~5 minutes and the first one ~15.
+    # for it), at most 6 new filings per run: about 7 minutes.
     ("shelby_substitute_trustee", shelby_substitute_trustee_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
