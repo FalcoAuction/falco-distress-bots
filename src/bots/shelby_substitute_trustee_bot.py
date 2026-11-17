@@ -47,8 +47,13 @@ CODE = "APPT"
 def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Optional[Dict[str, Any]],
                dot: Optional[Dict[str, Any]], today: Optional[date] = None) -> Optional[LeadPayload]:
     parties = split_parties(row["grantors"], (dot or {}).get("grantors") or None)
-    if not parties["borrowers"]:
-        return None
+    borrower_found = bool(parties["borrowers"])
+    if not borrower_found:
+        # Every grantor read as a lender. Stage it anyway: an unstaged filing is
+        # re-read on every run and would eat the per-run budget forever.
+        if not row["grantors"]:
+            return None
+        parties = {**parties, "borrowers": [row["grantors"][-1]], "basis": "unidentified"}
     lender = parties["lenders"][0] if parties["lenders"] else None
     loan: Dict[str, Any] = {}
     balance = None
@@ -67,6 +72,8 @@ def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Opt
         note += f" by {lender}"
     if sub_trustees:
         note += f"; trustee {', '.join(sub_trustees)}"
+    if not borrower_found:
+        note += ". Borrower not identified; check the filing."
     if not address:
         note += ". No address yet: deed of trust not linked or has no street."
     return LeadPayload(
