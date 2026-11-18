@@ -50,6 +50,10 @@ BK_TRUSTED = {"joint", "middle_initial"}
 # Debtor searches per run (~0.1s each live, more for common surnames), so
 # the ~12k backlog clears over a few runs inside the bot's time cap.
 MAX_DEBTOR_SEARCHES = 1500
+# Bankruptcy events (dismissals, stay relief, abandonment) free the house
+# and are the ones the CRM ranks; new filings are not ranked at all. Events
+# are searched first so the filing backlog never crowds them out.
+BK_FILING = "BANKRUPTCY"
 # Leads already searched against this build of the index; cached with the
 # index and cleared when the index changes, so new deeds get another look.
 TRIED_PATH = DATA_DIR / "debtor_tried.json"
@@ -121,7 +125,20 @@ class ComptrollerParcelsBot(BotBase):
         stats: Counter = Counter()
         updates: List[Dict[str, Any]] = []
         tried = set() if self.refresh else _load_tried()
-        searches = 0
+        # Debtor searches wait until the scan is done, then run events first.
+        bk_queue: List[tuple] = []
+
+        def record(row: Dict[str, Any], hit: Dict[str, Any]) -> None:
+            hit["version"] = VERSION
+            stats[f"matched_{hit['method']}"] += 1
+            stats[f"class_{(hit.get('class') or '?')[:2]}"] += 1
+            trusted_bk = hit["method"] == "debtor_name" and hit.get("confidence") in BK_TRUSTED
+            updates.append({"id": row["id"], "hit": hit,
+                            "value": hit.get("appraisal") if (hit["method"] == "address" or trusted_bk)
+                            and not row.get("property_value") and (hit.get("appraisal") or 0) > 0 else None,
+                            "address": hit.get("situs_address") if trusted_bk else None,
+                            "county": hit["county"].title() if trusted_bk else None})
+
         for row in _rows(client):
             stats["scanned"] += 1
             if row.get("done") and not self.refresh:
@@ -139,31 +156,34 @@ class ComptrollerParcelsBot(BotBase):
                 names = [n.strip() for n in (row.get("owner_name_records") or row.get("full_name") or "").split(";")]
                 if row["id"] in tried:
                     stats["bk_already_tried"] += 1
-                elif searches >= MAX_DEBTOR_SEARCHES:
-                    stats["bk_deferred"] += 1
                 elif counties and names:
-                    searches += 1
-                    stats["bk_debtor_search"] += 1
-                    hit = match_debtors(idx.con, [n for n in names if n], counties)
-                    if hit:
-                        stats[f"bk_{hit['confidence']}"] += 1
-                    else:
-                        tried.add(row["id"])
+                    is_filing = (row.get("distress_type") or "").upper() == BK_FILING
+                    bk_queue.append((1 if is_filing else 0, row, counties, [n for n in names if n]))
             elif (row.get("distress_type") or "").upper() in OWNER_MATCH_TYPES and row.get("county"):
                 if idx.resolve_county(row.get("county"), None):
                     stats["in_coverage_owner_only"] += 1
                     hit = idx.match_owner(row.get("owner_name_records") or row.get("full_name"), row.get("county"))
-            if not hit:
-                continue
-            hit["version"] = VERSION
-            stats[f"matched_{hit['method']}"] += 1
-            stats[f"class_{(hit.get('class') or '?')[:2]}"] += 1
-            trusted_bk = hit["method"] == "debtor_name" and hit.get("confidence") in BK_TRUSTED
-            updates.append({"id": row["id"], "hit": hit,
-                            "value": hit.get("appraisal") if (hit["method"] == "address" or trusted_bk)
-                            and not row.get("property_value") and (hit.get("appraisal") or 0) > 0 else None,
-                            "address": hit.get("situs_address") if trusted_bk else None,
-                            "county": hit["county"].title() if trusted_bk else None})
+            if hit:
+                record(row, hit)
+
+        # Events first (priority 0), then filings; stable sort keeps scan order.
+        bk_queue.sort(key=lambda q: q[0])
+        for n, (prio, row, counties, names) in enumerate(bk_queue):
+            if n >= MAX_DEBTOR_SEARCHES:
+                stats["bk_deferred"] += len(bk_queue) - n
+                stats["bk_events_deferred"] += sum(1 for q in bk_queue[n:] if q[0] == 0)
+                break
+            stats["bk_debtor_search"] += 1
+            if prio == 0:
+                stats["bk_event_search"] += 1
+            hit = match_debtors(idx.con, names, counties)
+            if hit:
+                stats[f"bk_{hit['confidence']}"] += 1
+                if prio == 0:
+                    stats["bk_event_matched"] += 1
+                record(row, hit)
+            else:
+                tried.add(row["id"])
         if self.write:
             _save_tried(tried)
         return {"stats": stats, "updates": updates}
