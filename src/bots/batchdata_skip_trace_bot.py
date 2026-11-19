@@ -224,6 +224,7 @@ class BatchDataSkipTraceBot(BotBase):
         matched = 0
         no_phones = 0
         all_dnc = 0
+        unverified = 0
         api_errors = 0
         cost_estimate = 0.0  # rough $0.10 per attempted lookup
         error_message: Optional[str] = None
@@ -299,6 +300,15 @@ class BatchDataSkipTraceBot(BotBase):
 
                 primary = non_dnc[0]
                 secondary = non_dnc[1] if len(non_dnc) > 1 else None
+                # A phone only becomes the lead's phone when the person the
+                # vendor matched is the owner of record. Otherwise keep the
+                # numbers as unverified candidates for manual review.
+                if not primary.get("person_match") and not _env_on("FALCO_SKIPTRACE_ALLOW_UNVERIFIED"):
+                    unverified += 1
+                    self.logger.info(f"  owner not matched · {addr[:50]} · {owner[:30]}")
+                    if not sample_mode:
+                        self._write_unverified(client, row, ranked)
+                    continue
                 matched += 1
 
                 if sample_mode:
@@ -338,13 +348,13 @@ class BatchDataSkipTraceBot(BotBase):
         )
         self.logger.info(
             f"attempted={attempted} matched={matched} no_phones={no_phones} "
-            f"all_dnc={all_dnc} api_errors={api_errors} "
+            f"all_dnc={all_dnc} owner_not_matched={unverified} api_errors={api_errors} "
             f"est_cost=${cost_estimate:.2f}"
         )
         return {
             "name": self.name, "status": status,
             "attempted": attempted, "matched": matched,
-            "no_phones": no_phones, "all_dnc": all_dnc,
+            "no_phones": no_phones, "all_dnc": all_dnc, "owner_not_matched": unverified,
             "api_errors": api_errors,
             "estimated_cost_usd": round(cost_estimate, 2),
             "sample_mode": sample_mode,
@@ -447,7 +457,9 @@ class BatchDataSkipTraceBot(BotBase):
                 0.85 if person_match else 0.60,
                 person_match,
             )
-        if owner_name:
+        # An address-only retry is a second paid call that returns whoever
+        # lives there, not the owner. Off unless explicitly enabled.
+        if owner_name and _env_on("FALCO_SKIPTRACE_ADDRESS_FALLBACK"):
             phones, person = self._post(api_key, address, None)
             if phones:
                 return self._annotate_phones(phones, "address_only", 0.45, False)
@@ -575,6 +587,24 @@ class BatchDataSkipTraceBot(BotBase):
         except Exception as e:
             self.logger.warning(f"  update failed id={row['id']}: {e}")
 
+    def _write_unverified(self, client, row: Dict[str, Any], all_phones: List[Dict[str, Any]]) -> None:
+        """Record the candidates (so the lead is not traced and paid for again)
+        without setting phone."""
+        table = row["__table__"]
+        existing_meta = row.get("phone_metadata") or {}
+        if not isinstance(existing_meta, dict):
+            existing_meta = {}
+        existing_meta["batchdata_skip_trace"] = {
+            "primary_phone": None,
+            "owner_not_matched": True,
+            "all_phones": all_phones,
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            client.table(table).update({"phone_metadata": existing_meta}).eq("id", row["id"]).execute()
+        except Exception as e:
+            self.logger.warning(f"  update failed id={row['id']}: {e}")
+
     def _write_dnc_only(
         self, client, row: Dict[str, Any], all_phones: List[Dict[str, Any]]
     ) -> None:
@@ -594,6 +624,10 @@ class BatchDataSkipTraceBot(BotBase):
             ).eq("id", row["id"]).execute()
         except Exception as e:
             self.logger.warning(f"  update failed id={row['id']}: {e}")
+
+
+def _env_on(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def run() -> dict:

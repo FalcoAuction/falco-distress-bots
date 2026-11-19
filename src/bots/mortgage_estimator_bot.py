@@ -58,18 +58,8 @@ from ._provenance import record_field
 # Average annual TN 30-year fixed mortgage rates (Freddie Mac PMMS
 # / Federal Reserve H.15). Used to compute amortization; older years
 # matter for old purchases. Kept as a constant so changes are explicit.
-TN_AVG_30Y_RATES = {
-    1995: 7.93, 1996: 7.81, 1997: 7.60, 1998: 6.94, 1999: 7.44,
-    2000: 8.05, 2001: 6.97, 2002: 6.54, 2003: 5.83, 2004: 5.84,
-    2005: 5.87, 2006: 6.41, 2007: 6.34, 2008: 6.03, 2009: 5.04,
-    2010: 4.69, 2011: 4.45, 2012: 3.66, 2013: 3.98, 2014: 4.17,
-    2015: 3.85, 2016: 3.65, 2017: 3.99, 2018: 4.54, 2019: 3.94,
-    2020: 3.11, 2021: 2.96, 2022: 5.34, 2023: 6.81, 2024: 6.74,
-    2025: 6.85, 2026: 6.50,
-}
-
-# Default fallback for years not in the table (e.g., very old)
-DEFAULT_RATE = 6.50
+# One rate table for every balance estimate (shared with the lien stack).
+from ..enrichment.lien_stack import DEFAULT_RATE, TN_AVG_30Y_RATES  # noqa: E402
 
 # Standard assumptions
 DEFAULT_LTV = 0.80
@@ -318,6 +308,15 @@ class MortgageEstimatorBot(BotBase):
                         no_signals += 1
                         continue
 
+                    # Already estimated at this confidence or better: nothing
+                    # to write (the estimate no longer fills mortgage_balance,
+                    # so that column can't be the "done" marker).
+                    prior = (row.get("phone_metadata") or {})
+                    prior = prior.get("mortgage_estimate") if isinstance(prior, dict) else None
+                    if isinstance(prior, dict) and prior.get("confidence", 0) >= estimate["confidence"]:
+                        skipped += 1
+                        continue
+
                     # Skip if we already have a higher-confidence value
                     # (foreclosure notices give actual delinquent amounts;
                     # don't overwrite those with an estimate).
@@ -338,12 +337,12 @@ class MortgageEstimatorBot(BotBase):
                             skipped += 1
                             continue
 
+                    # The estimate stays in phone_metadata as a hint for the
+                    # math sheet. It never fills mortgage_balance: that column
+                    # drives the no_equity rule, and a guess from a sale price
+                    # (confidence 0.1 to 0.7) is not a recorded loan. An
+                    # unknown balance is better than a wrong one.
                     update: Dict[str, Any] = {}
-                    # Only fill mortgage_balance if it's currently null —
-                    # don't override foreclosure-notice-derived values.
-                    # Column is INTEGER, so round before write.
-                    if not row.get("mortgage_balance"):
-                        update["mortgage_balance"] = int(round(estimate["estimated_current_balance"]))
 
                     existing_meta = row.get("phone_metadata") or {}
                     if not isinstance(existing_meta, dict):
@@ -357,7 +356,7 @@ class MortgageEstimatorBot(BotBase):
                         # Record provenance for live table
                         if table == "homeowner_requests":
                             record_field(
-                                client, row["id"], "mortgage_balance",
+                                client, row["id"], "mortgage_estimate",
                                 int(round(estimate["estimated_current_balance"])),
                                 "mortgage_estimator",
                                 confidence=estimate["confidence"],
