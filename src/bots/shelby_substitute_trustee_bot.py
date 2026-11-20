@@ -162,7 +162,7 @@ class ShelbySubstituteTrusteeBot(BotBase):
                     .select("id,source_url,raw_payload").eq("bot_source", self.name)
                     .is_("property_address", "null").not_.is_("raw_payload->deed_of_trust", "null")
                     .is_("raw_payload->dot_checked_at", "null")
-                    .order("created_at", desc=True).limit(limit).execute().data) or []
+                    .order("staged_at", desc=True).limit(limit).execute().data) or []
         except Exception as e:  # noqa: BLE001
             self.logger.warning(f"backfill query failed: {e}")
             return 0
