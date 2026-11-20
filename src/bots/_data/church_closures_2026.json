@@ -1,0 +1,124 @@
+{
+ "source": "https://twkumc.org/wp-content/uploads/2026/06/2026-Charge-Line-Changes-and-Closures-1.pdf",
+ "retrieved": "2026-11-20",
+ "note": "Saved from the conference's public PDF; its server refuses automated requests.",
+ "closures": [
+  {
+   "church": "Cummingsville United Methodist Church",
+   "address": "360 Cummings Chapel Road",
+   "county": "van buren",
+   "state": "TN",
+   "district": "Caney Fork River District",
+   "final_service": "June 28, 2026",
+   "action": "close"
+  },
+  {
+   "church": "Donelson Heights United Methodist Church",
+   "address": "84 Fairway Dr. Nashville, TN 37214",
+   "county": "davidson",
+   "state": "TN",
+   "district": "Cumberland River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Port Royal United Methodist Church",
+   "address": "2947 Highway 76 Adams, 37010",
+   "county": "montgomery",
+   "state": "TN",
+   "district": "Cumberland River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Mason United Methodist Church",
+   "address": "230 TN-59, Mason",
+   "county": "tipton",
+   "state": "TN",
+   "district": "Metro District",
+   "final_service": "June 26, 2025",
+   "action": "close"
+  },
+  {
+   "church": "Temple United Methodist Church",
+   "address": "4404 Sykes Rd, Millington",
+   "county": "shelby",
+   "state": "TN",
+   "district": "Metro District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Sycamore United Methodist Church",
+   "address": "502 Sycamore Rd, Dickson TN. 37055",
+   "county": "dickson",
+   "state": "TN",
+   "district": "Red River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Tennessee City United Methodist Church",
+   "address": "420 Lane Road, Dickson TN. 37055",
+   "county": "dickson",
+   "state": "TN",
+   "district": "Red River District",
+   "final_service": "December 28, 2025",
+   "action": "close"
+  },
+  {
+   "church": "Berlin United Methodist Church",
+   "address": "1660 Old Berlin Road",
+   "county": "marshall",
+   "state": "TN",
+   "district": "Stones River District",
+   "final_service": "June 28, 2026",
+   "action": "close"
+  },
+  {
+   "church": "Clay Hill United Methodist Church",
+   "address": "3164 Warner Road",
+   "county": "marshall",
+   "state": "TN",
+   "district": "Stones River District",
+   "final_service": "April 5, 2026",
+   "action": "close"
+  },
+  {
+   "church": "Hickory Flat United Methodist Church",
+   "address": "4020 Highway 70 E, Cedar Grove 38321",
+   "county": "carroll",
+   "state": "TN",
+   "district": "Tennessee River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Lebanon United Methodist Church",
+   "address": "631 Tige Hopper Rd, Jackson 38305",
+   "county": "madison",
+   "state": "TN",
+   "district": "Tennessee River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "McKenzie United Methodist Church",
+   "address": "16 N. McTyeire Street, McKenzie",
+   "county": "carroll",
+   "state": "TN",
+   "district": "Tennessee River District",
+   "final_service": null,
+   "action": "close"
+  },
+  {
+   "church": "Oak Hill United Methodist Church",
+   "address": "2120 Highway 69 N, Paris TN 38242",
+   "county": "henry",
+   "state": "TN",
+   "district": "Tennessee River District",
+   "final_service": "June 28, 2026",
+   "action": "close"
+  }
+ ]
+}
