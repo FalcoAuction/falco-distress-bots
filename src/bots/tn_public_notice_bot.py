@@ -54,6 +54,7 @@ from typing import Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload
+from . import _trustee_notice as trustee_notice
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -309,9 +310,20 @@ class TnPublicNoticeBot(BotBase):
         city = row.get("city") or ""
         county = (row.get("county") or "").strip().lower() or None
 
+        # The notice text decides the type, not the newspaper's category:
+        # Sumner and Montgomery trustee sales arrive filed as "Delinquent
+        # Taxes", and county-wide "taxes are due" notices name no property.
+        kind = trustee_notice.classify(excerpt)
+        if kind == "general_tax":
+            return None
+        filed_as = None
+        if kind == "foreclosure" and distress != "PROBATE" and distress != "PRE_FORECLOSURE":
+            filed_as, distress = distress, "PRE_FORECLOSURE"
         property_address = self._extract_address(excerpt, city)
         parcel = self._extract_parcel(excerpt)
-        full_name = self._extract_subject(excerpt, distress)
+        names = trustee_notice.borrowers(excerpt) if distress == "PRE_FORECLOSURE" else []
+        full_name = names[0] if names else self._extract_subject(excerpt, distress)
+        sale_date = trustee_notice.sale_date(excerpt) if distress == "PRE_FORECLOSURE" else None
 
         admin_parts = [
             f"TN Public Notice {row['notice_id']}",
@@ -328,8 +340,9 @@ class TnPublicNoticeBot(BotBase):
             property_address=property_address,
             county=county,
             full_name=full_name,
-            owner_name_records=full_name,
+            owner_name_records="; ".join(names) if names else full_name,
             distress_type=distress,
+            trustee_sale_date=sale_date,
             admin_notes=" · ".join(p for p in admin_parts if p),
             source_url=f"{TNPN_BASE}/Details.aspx?ID={row['notice_id']}",
             raw_payload={
@@ -343,6 +356,9 @@ class TnPublicNoticeBot(BotBase):
                 "parcel": parcel,
                 "subject": full_name,
                 "excerpt": excerpt,
+                **({"borrowers": names} if names else {}),
+                **({"deed_of_trust": trustee_notice.deed_ref(excerpt)} if distress == "PRE_FORECLOSURE" else {}),
+                **({"filed_as": filed_as} if filed_as else {}),
             },
         )
 
