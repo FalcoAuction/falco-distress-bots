@@ -52,7 +52,7 @@ from ._twilio_lookup import (
 
 
 # All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
-from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
+from ._regions import TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402  (statewide since 2026-11-20)
 
 # Distress types where mortgage data IS the pitch (we walk through equity
 # math, payoff scenarios, etc.). These keep the strict defensible-mortgage

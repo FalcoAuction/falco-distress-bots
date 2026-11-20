@@ -55,10 +55,10 @@ from . import _ffiec_panel
 
 
 # All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
-from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
+from ._regions import TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402  (statewide since 2026-11-20)
 
 # TN county FIPS codes — only counties we operate in
-from ._regions import MIDDLE_TN_FIPS as TN_COUNTY_FIPS  # noqa: E402
+from ._regions import TN_FIPS as TN_COUNTY_FIPS  # noqa: E402
 
 # HMDA + Census + GLEIF endpoints
 CENSUS_GEOCODER = (

@@ -1,8 +1,8 @@
-"""Land lane: Middle Tennessee farm and timber tracts with a reason to sell.
+"""Land lane: Tennessee farm and timber tracts with a reason to sell (statewide).
 
 Reads the Comptroller parcel index (data/comptroller/index.sqlite, refreshed
 weekly by comptroller_refresh, free and cleared for commercial use) and stages
-every Middle Tennessee tract of 20+ acres whose owner of record is an estate
+every Tennessee tract of 20+ acres whose owner of record is an estate
 or heirs, a long-held family group (ETAL), or an out-of-state owner holding
 25+ years. Rules in _land.py.
 
@@ -10,9 +10,9 @@ Distress types:
   HEIRS_PROPERTY  heirs or family_etal
   ABSENTEE_LAND   absentee only
 
-The Comptroller roll covers 37 of the 41 Middle TN counties; Rutherford and
-Davidson come from their county parcel map services (_land_gis). Williamson
-and Montgomery have no bulk parcel service and are not in this lane.
+The Comptroller roll covers 86 of the 95 counties; Rutherford and
+Davidson come from their county parcel map services (_land_gis). Williamson,
+Montgomery, Hamilton, Knox, Shelby, Chester and Hickman are not in this lane yet.
 
     python -m src.bots.land_lane_bot
 """
@@ -30,7 +30,7 @@ from ._base import BotBase, LeadPayload
 from ._comptroller import _record, county_key
 from ._land import lane_record, person_name, signals, street_address
 from ._land_gis import SOURCES as GIS_COUNTIES, county_rows
-from ._regions import MIDDLE_TN_COUNTIES
+from ._regions import TN_COUNTIES
 
 ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "comptroller" / "index.sqlite"
@@ -42,7 +42,7 @@ def tract_leads(con: Optional[sqlite3.Connection], bot: "LandLaneBot", today: da
     rows: List[Any] = []
     if con is not None:
         con.row_factory = sqlite3.Row
-        counties = sorted({county_key(c) for c in MIDDLE_TN_COUNTIES})   # the index keys counties as "VANBUREN"
+        counties = sorted({county_key(c) for c in TN_COUNTIES})   # the index keys counties as "VANBUREN"
         marks = ",".join("?" * len(counties))
         rows = con.execute(f"SELECT * FROM parcels WHERE county IN ({marks}) AND calcac >= 20 AND appraisal >= 150000",
                            counties).fetchall()

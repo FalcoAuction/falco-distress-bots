@@ -24,7 +24,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
 from ._base import BotBase, _supabase
-from ..enrichment.shortlist import MIDDLE_TN, county_key, screen
+from ..enrichment.shortlist import IN_SCOPE, county_key, screen
 
 QUEUE_CAP = int(os.environ.get("FALCO_LIEN_QUEUE_CAP", "600") or 600)
 ID_BATCH = 200
@@ -66,7 +66,7 @@ class LienShortlistBot(BotBase):
                 opps = (client.table("lead_opportunities")
                         .select("staging_id,county,sale_date,expected_fee,property_value")
                         .eq("captured_on", day[0]["captured_on"]).limit(5000).execute().data) or []
-            opps = [o for o in opps if county_key(o.get("county")) in MIDDLE_TN]
+            opps = [o for o in opps if county_key(o.get("county")) in IN_SCOPE]
             raw_by_id: Dict[str, Dict[str, Any]] = {}
             ids = [o["staging_id"] for o in opps if o.get("staging_id")]
             for i in range(0, len(ids), ID_BATCH):

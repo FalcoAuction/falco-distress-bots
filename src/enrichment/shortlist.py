@@ -5,7 +5,7 @@ distress notice. Tier 2 is a Register of Deeds search for every open loan and
 lien, which costs a subscription and minutes per lead, so only leads that
 could become an auction listing get it:
 
-  - in a Middle Tennessee county
+  - in Tennessee (statewide since 2026-11-20)
   - on today's ranked list (lead_opportunities already applies the value
     floor, the no_equity rule and the auctionable-lead rules)
   - not about to sell: a foreclosure sale fewer than MIN_DAYS_TO_SALE days out
@@ -28,6 +28,8 @@ MIDDLE_TN = {
     "putnam", "robertson", "rutherford", "sequatchie", "smith", "stewart", "sumner", "trousdale",
     "van buren", "warren", "wayne", "white", "williamson", "wilson",
 }
+# Statewide since 2026-11-20: the ranked list decides which leads are in play.
+from ..bots._regions import TN_COUNTIES as IN_SCOPE  # noqa: E402
 
 # Register of Deeds access per county (2026-11 research; prices in the
 # pilot budget). Counties not listed default to TitleSearcher, which carries
@@ -72,8 +74,8 @@ def screen(opportunity: Dict[str, Any], raw_payload: Optional[Dict[str, Any]], t
     """(eligible, detail). `opportunity` is a lead_opportunities row; the
     detail says why a lead was left out, or how urgent it is."""
     county = county_key(opportunity.get("county"))
-    if county not in MIDDLE_TN:
-        return False, {"reason": "outside_middle_tn"}
+    if county not in IN_SCOPE:
+        return False, {"reason": "outside_tennessee"}
     sale = _as_date(opportunity.get("sale_date"))
     days = (sale - today).days if sale else None
     if days is not None and 0 <= days < MIN_DAYS_TO_SALE:
