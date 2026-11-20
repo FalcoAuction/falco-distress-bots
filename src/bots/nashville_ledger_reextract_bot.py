@@ -40,7 +40,7 @@ from .nashville_ledger_bot import (
 
 
 # All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
-from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
+from ._regions import TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
 
 DETAIL_URL = "https://www.tnledger.com/Search/Details/ViewNotice.aspx"
 

@@ -116,8 +116,9 @@ class ShortlistTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(d["register_system"], "davidson_portal")
 
-    def test_outside_middle_tn_is_left_out(self):
-        self.assertEqual(screen(self.opp(county="Shelby"), {}, TODAY), (False, {"reason": "outside_middle_tn"}))
+    def test_outside_tennessee_is_left_out(self):
+        self.assertEqual(screen(self.opp(county="Fulton"), {}, TODAY), (False, {"reason": "outside_tennessee"}))
+        self.assertTrue(screen(self.opp(county="Shelby"), {}, TODAY)[0])
 
     def test_sale_too_soon_is_left_out_but_past_dates_are_not(self):
         ok, d = screen(self.opp(sale_date="2026-12-01"), {}, TODAY)
