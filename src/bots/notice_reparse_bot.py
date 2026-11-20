@@ -1,6 +1,6 @@
 """Re-read stored public-notice excerpts with the trustee's sale parser.
 
-tn_public_notice trusted the newspaper's category, so trustee's sales filed
+tn_public_notice (and tn_lis_pendens, which reuses it) trusted the newspaper's category, so trustee's sales filed
 under "Delinquent Taxes" (most of Sumner and Montgomery) were staged as
 TAX_LIEN, and only one borrower pattern was read, so most foreclosures were
 staged with no name and could never be matched to a house. The bot now
@@ -58,12 +58,23 @@ def reparse(row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             raw["filed_as"] = distress
             upd["distress_type"] = "PRE_FORECLOSURE"
         names = tn.borrowers(excerpt)
+        # The old single pattern stored stretches of legal wording as names
+        # ("Jason Swaw And Kelly Swaw Con- Veying Certain Real Property ...").
+        # Replace those; clear them when nothing better is found.
+        bad_name = bool(row.get("full_name")) and not tn.plausible_name(row["full_name"])
+        bad_owner = bool(row.get("owner_name_records")) and not all(
+            tn.plausible_name(n) for n in str(row["owner_name_records"]).split(";") if n.strip())
         if names:
             raw["borrowers"] = names
-            if not row.get("full_name"):
+            if not row.get("full_name") or bad_name:
                 upd["full_name"] = names[0]
-            if not row.get("owner_name_records"):
+            if not row.get("owner_name_records") or bad_owner:
                 upd["owner_name_records"] = "; ".join(names)
+        else:
+            if bad_name:
+                upd["full_name"] = None
+            if bad_owner:
+                upd["owner_name_records"] = None
         date = tn.sale_date(excerpt)
         if date and not row.get("trustee_sale_date"):
             upd["trustee_sale_date"] = date
@@ -105,7 +116,7 @@ class NoticeReparseBot(BotBase):
             while True:
                 page = (client.table("homeowner_requests_staging")
                         .select("id,distress_type,full_name,owner_name_records,trustee_sale_date,raw_payload")
-                        .eq("bot_source", "tn_public_notice").gte("staged_at", since).gt("id", after)
+                        .in_("bot_source", ["tn_public_notice", "tn_lis_pendens"]).gte("staged_at", since).gt("id", after)
                         .order("id").limit(PAGE).execute().data) or []
                 if not page:
                     break

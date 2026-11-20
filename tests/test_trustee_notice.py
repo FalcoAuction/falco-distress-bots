@@ -80,7 +80,29 @@ class TrusteeNoticeTests(unittest.TestCase):
         self.assertEqual(borrowers(TAX), [])
 
 
+class LisPendensFormTests(unittest.TestCase):
+    def test_hyphen_broken_conveying_and_comma_by(self):
+        x = ("NOTICE OF SUBSTITUTE TRUSTEE'S SALE WHEREAS, default has occurred in the performance of the covenants, "
+             "terms and conditions of a Deed of Trust dated April 7, 2022, executed by JASON SWAW and KELLY SWAW con- "
+             "veying certain real property therein described to WILBURN J. EVANS, as Trustee")
+        self.assertEqual(borrowers(x), ["JASON SWAW", "KELLY SWAW"])
+        y = ('NOTICE OF FORECLOSURE SALE WHEREAS, CYNTHIA PARTON, by Deed of Trust (the "Deed of Trust") dated May 3, '
+             '2024 of record in Book 6516, Page(s) 195-203')
+        self.assertEqual(borrowers(y), ["CYNTHIA PARTON"])
+
+
 class ReparseTests(unittest.TestCase):
+    def test_garbage_name_replaced(self):
+        from src.bots.notice_reparse_bot import reparse
+        bad = "Jason Swaw And Kelly Swaw Con- Veying Certain Real Property Therein Described To Wilburn J. Evans"
+        x = ("NOTICE OF SUBSTITUTE TRUSTEE'S SALE WHEREAS, default has occurred in the performance of the covenants, "
+             "terms and conditions of a Deed of Trust dated April 7, 2022, executed by JASON SWAW and KELLY SWAW con- "
+             "veying certain real property")
+        u = reparse({"distress_type": "PRE_FORECLOSURE", "full_name": bad, "owner_name_records": bad,
+                     "raw_payload": {"excerpt": x}})
+        self.assertEqual(u["full_name"], "JASON SWAW")
+        self.assertEqual(u["owner_name_records"], "JASON SWAW; KELLY SWAW")
+
     def test_tax_filed_trustee_sale_becomes_foreclosure(self):
         from src.bots.notice_reparse_bot import reparse
         u = reparse({"distress_type": "TAX_LIEN", "full_name": None, "owner_name_records": None,

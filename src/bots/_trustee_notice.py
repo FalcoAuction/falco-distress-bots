@@ -33,7 +33,7 @@ GENERAL_TAX_RE = re.compile(
 
 _NAME_END = (r"(?=,?\s+(?:an?\s+)?(?:unmarried|married|single|widow|divorced|husband|wife|"
              r"tenants?\s+by|joint\s+tenants|individually|a\s+tennessee|an?\s+\w+\s+limited|an?\s+individual)\b"
-             r"|\s*\(\s*(?:the\s+)?[\"“]?(?:grantor|borrower)|\s+by\s+deed\s+of\s+trust|,\s*executed|,\s*conveying"
+             r"|\s*\(\s*(?:the\s+)?[\"“]?(?:grantor|borrower)|,?\s+by\s+deed\s+of\s+trust|,\s*executed|,?\s+con-?\s?veying"
              r"|,\s*(?:his|her|their)\s+heirs|,\s+to\s+[A-Z])")
 WHEREAS_RE = re.compile(
     r"\bwhereas,?\s+(?:on\s+[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4},?\s+)?(?:default\b.*?)?([A-Za-z][A-Za-z0-9.,'&\- ]{2,120}?)" + _NAME_END,
@@ -82,6 +82,10 @@ def _plausible(name: str) -> bool:
     if re.search(r"\d", name) and not ENTITY_RE.search(name):
         return False
     return len(name.split()) <= 14
+
+
+def plausible_name(name: str) -> bool:
+    return _plausible(_clean(name or ""))
 
 
 def borrowers(text: str) -> List[str]:
