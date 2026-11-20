@@ -10,9 +10,9 @@ Distress types:
   HEIRS_PROPERTY  heirs or family_etal
   ABSENTEE_LAND   absentee only
 
-The Comptroller roll covers 37 of the 41 Middle TN counties; Davidson,
-Williamson, Rutherford and Montgomery run their own assessors and are not in
-this lane yet.
+The Comptroller roll covers 37 of the 41 Middle TN counties; Rutherford and
+Davidson come from their county parcel map services (_land_gis). Williamson
+and Montgomery have no bulk parcel service and are not in this lane.
 
     python -m src.bots.land_lane_bot
 """
@@ -24,11 +24,12 @@ import sqlite3
 import sys
 from datetime import date
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ._base import BotBase, LeadPayload
 from ._comptroller import _record, county_key
 from ._land import lane_record, person_name, signals, street_address
+from ._land_gis import SOURCES as GIS_COUNTIES, county_rows
 from ._regions import MIDDLE_TN_COUNTIES
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,14 +37,17 @@ DB_PATH = ROOT / "data" / "comptroller" / "index.sqlite"
 MAX_LEADS = int(os.environ.get("FALCO_LAND_MAX_LEADS", "4000") or 4000)
 
 
-def tract_leads(con: sqlite3.Connection, bot: "LandLaneBot", today: date) -> List[LeadPayload]:
-    con.row_factory = sqlite3.Row
-    counties = sorted({county_key(c) for c in MIDDLE_TN_COUNTIES})   # the index keys counties as "VANBUREN"
-    marks = ",".join("?" * len(counties))
-    rows = con.execute(
-        f"SELECT * FROM parcels WHERE county IN ({marks}) AND calcac >= 20 AND appraisal >= 150000", counties).fetchall()
+def tract_leads(con: Optional[sqlite3.Connection], bot: "LandLaneBot", today: date,
+                extra_rows: Iterable[Mapping[str, Any]] = ()) -> List[LeadPayload]:
+    rows: List[Any] = []
+    if con is not None:
+        con.row_factory = sqlite3.Row
+        counties = sorted({county_key(c) for c in MIDDLE_TN_COUNTIES})   # the index keys counties as "VANBUREN"
+        marks = ",".join("?" * len(counties))
+        rows = con.execute(f"SELECT * FROM parcels WHERE county IN ({marks}) AND calcac >= 20 AND appraisal >= 150000",
+                           counties).fetchall()
     out: List[LeadPayload] = []
-    for row in rows:
+    for row in list(rows) + list(extra_rows):
         sigs = signals(row, today)
         if not sigs:
             continue
@@ -63,7 +67,7 @@ def tract_leads(con: sqlite3.Connection, bot: "LandLaneBot", today: date) -> Lis
             property_value=float(row["appraisal"] or 0) or None,
             distress_type="HEIRS_PROPERTY" if ("heirs" in sigs or "family_etal" in sigs) else "ABSENTEE_LAND",
             admin_notes=f"{rec['acres']:.0f} acres, {', '.join(sigs)}; owner {owner}",
-            raw_payload={"source": "comptroller_roll", "state": "TN", "property_lane": "land",
+            raw_payload={"source": "comptroller_roll" if isinstance(row, sqlite3.Row) else "county_gis", "state": "TN", "property_lane": "land",
                          "land": lane_record(row, sigs, row["county"].lower()), "comptroller_parcel": rec},
         ))
     out.sort(key=lambda l: (0 if l.distress_type == "HEIRS_PROPERTY" else 1, -(l.property_value or 0)))
@@ -77,14 +81,22 @@ class LandLaneBot(BotBase):
     expected_min_yield = 0
 
     def scrape(self) -> List[LeadPayload]:
-        if not DB_PATH.exists():
-            self.logger.warning("no Comptroller index; comptroller_refresh has not run")
-            return []
-        con = sqlite3.connect(DB_PATH)
+        gis: List[Dict[str, Any]] = []
+        for county in GIS_COUNTIES:
+            try:
+                rows = list(county_rows(county, lambda url, **kw: self.fetch(url, timeout=120, **kw)))
+                self.logger.info(f"{county}: {len(rows)} large parcels from the county map service")
+                gis += rows
+            except Exception as e:  # one county's service down must not cost the rest
+                self.logger.warning(f"{county}: parcel service failed: {e}")
+        con = sqlite3.connect(DB_PATH) if DB_PATH.exists() else None
+        if con is None:
+            self.logger.warning("no Comptroller index; comptroller_refresh has not run (county GIS only)")
         try:
-            leads = tract_leads(con, self, date.today())
+            leads = tract_leads(con, self, date.today(), gis)
         finally:
-            con.close()
+            if con is not None:
+                con.close()
         counts: Dict[str, int] = {}
         for l in leads:
             counts[l.distress_type] = counts.get(l.distress_type, 0) + 1

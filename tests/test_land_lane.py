@@ -65,6 +65,20 @@ class LandSignalTests(unittest.TestCase):
         self.assertEqual(person_name("TAGG WILLIAM T JR"), "William T Tagg Jr")
         self.assertEqual(person_name("SMITH JOHN A ESTATE"), "Smith John A Estate")
         self.assertEqual(person_name("EAKIN JAMES D III ET AL"), "James D Eakin III")
+        self.assertEqual(person_name("TANG, TIANLAI & DONG, CHRISTINE"), "Tianlai Tang")
+
+    def test_county_gis_rows_use_the_same_rules(self):
+        from src.bots._land_gis import davidson_row, rutherford_row
+        r = rutherford_row({"Owner1": "WOODSON LINDY ARCHER ESTATE OF", "CALCACRES": 122.1, "TotalValue": 395200,
+                            "SaleDate": 671864400000, "MailingState": "TN", "AccountType": "11 - Agricultural",
+                            "ParcelID": "1", "CITY": "BELL BUCKLE"})
+        self.assertEqual(signals(r, TODAY), ["heirs"])
+        d = davidson_row({"Owner": "SMITH, JOHN ET AL", "Acres": 40, "TotlAppr": 600000, "OwnDate": 600000000000,
+                          "OwnState": "TN", "LUDesc": "VACANT RURAL LAND", "PropAddr": "100 LONG RD"})
+        self.assertEqual(signals(d, TODAY), ["family_etal"])
+        store = davidson_row({"Owner": "SMITH, JOHN ET AL", "Acres": 40, "TotlAppr": 600000, "OwnDate": 600000000000,
+                              "OwnState": "TN", "LUDesc": "ONE STORY GENERAL RETAIL STORE"})
+        self.assertEqual(signals(store, TODAY), [])
 
 
 if __name__ == "__main__":

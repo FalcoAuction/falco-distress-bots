@@ -95,8 +95,12 @@ def person_name(owner: str) -> str:
     o = re.sub(r"\s+", " ", o).strip(" ,&()")
     if not o:
         return ""
-    if HEIRS_RE.search(o) or "," in o or "&" in o:
+    if HEIRS_RE.search(o):
         return o.title()
+    if "," in o:   # Metro style "TANG, TIANLAI" / "WALLER, ROBIN DEWAYNE REVOCABLE TRUST"
+        last, _, rest = o.partition(",")
+        rest = rest.strip()
+        return f"{rest} {last.strip()}".title() if rest and len(last.split()) == 1 else o.title()
     parts = o.split(" ")
     if len(parts) < 2:
         return o.title()
