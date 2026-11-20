@@ -18,6 +18,7 @@ Distress type: CODE_VIOLATION
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import List, Optional
 
@@ -161,8 +162,23 @@ class NashvilleCodesBot(BotBase):
             distress_type="CODE_VIOLATION",
             admin_notes=admin_notes,
             source_url=f"https://www.nashville.gov/departments/codes/property-standards/code-enforcement/codes-violation-history-search",
-            raw_payload={"nashville_codes": attrs},
+            raw_payload={"nashville_codes": attrs, **({"condition": cond} if (cond := property_condition(attrs)) else {})},
         )
+
+
+_CONDITION_RES = {
+    # A burned house the owner has not rebuilt: insurance money in hand and
+    # no will to start over is a common reason to sell.
+    "fire_damage": re.compile(r"\bfire[\s-]*damage|\bburn(?:ed|t)\b|\b(?:house|structure|kitchen)\s+fire\b|\bfire\s+(?:at|in)\s+(?:the\s+)?(?:house|home|property|structure)", re.I),
+    "dilapidated": re.compile(r"dilapidated|falling\s+apart|roof\s+(?:is\s+)?caving|collaps", re.I),
+    "vacant_open": re.compile(r"\bvacant\b|\babandoned\b|open\s+(?:and|&)\s+unsecured|unsecured\s+(?:structure|building|house)|boarded", re.I),
+}
+
+
+def property_condition(attrs: dict) -> List[str]:
+    """Condition tags read from the complaint text and violations noted."""
+    text = " ".join(str(attrs.get(k) or "") for k in ("Reported_Problem", "Violations_Noted"))
+    return [tag for tag, rx in _CONDITION_RES.items() if rx.search(text)]
 
 
 def run() -> dict:

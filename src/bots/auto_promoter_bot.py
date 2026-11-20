@@ -51,9 +51,8 @@ from ._twilio_lookup import (
 )
 
 
-CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery", "cheatham", "robertson", "dickson"}
-FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
+# All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
+from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
 
 # Distress types where mortgage data IS the pitch (we walk through equity
 # math, payoff scenarios, etc.). These keep the strict defensible-mortgage

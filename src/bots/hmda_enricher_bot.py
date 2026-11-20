@@ -54,20 +54,11 @@ from . import _assessor_sale_data
 from . import _ffiec_panel
 
 
-CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery"}
-FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
+# All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
+from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
 
 # TN county FIPS codes — only counties we operate in
-TN_COUNTY_FIPS = {
-    "davidson": "47037",
-    "williamson": "47187",
-    "sumner": "47165",
-    "rutherford": "47149",
-    "wilson": "47189",
-    "maury": "47119",
-    "montgomery": "47125",
-}
+from ._regions import MIDDLE_TN_FIPS as TN_COUNTY_FIPS  # noqa: E402
 
 # HMDA + Census + GLEIF endpoints
 CENSUS_GEOCODER = (

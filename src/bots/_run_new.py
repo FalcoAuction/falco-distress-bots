@@ -68,6 +68,7 @@ from . import bankruptcy_events_bot
 from . import shelby_substitute_trustee_bot
 from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
+from . import notice_reparse_bot
 from . import court_notices_bot
 from . import main_street_media_bot
 from . import warn_notices_bot
@@ -88,6 +89,9 @@ from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
+from . import land_lane_bot
+from . import church_closure_bot
+from . import stalled_build_bot
 from . import probate_property_enricher_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
@@ -181,6 +185,9 @@ NEW_BOTS = [
     ("shelby_substitute_trustee", shelby_substitute_trustee_bot.run),
     ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
     ("tn_public_notice", tn_public_notice_bot.run),
+    # Re-reads stored notice excerpts: trustee sales filed as tax notices,
+    # borrower names, sale dates. Before the owner-to-address enricher.
+    ("notice_reparse", notice_reparse_bot.run),
     # Full-text court notices from the Ledger and Memphis Daily News: probate
     # notices with executor and attorney, plus partition / court-ordered
     # sales. tnpublicnotice.com truncates these and gates the full text
@@ -233,6 +240,15 @@ NEW_BOTS = [
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
     ("comptroller_parcels", comptroller_parcels_bot.run),
+    # Free: Middle TN farm/timber tracts owned by heirs, family groups or
+    # long-held absentees, from the same Comptroller index.
+    ("land_lane", land_lane_bot.run),
+    # Free: closed United Methodist churches; property vested in the
+    # Conference Trustees (one seller for every building).
+    ("church_closure", church_closure_bot.run),
+    # Free: Davidson new builds with a mid-project contractor change,
+    # still held by the owner who started them (Metro permits + parcels).
+    ("stalled_build", stalled_build_bot.run),
     # Florida counterpart of TPAD + the county assessors: DOR statewide
     # roll (value, homestead, mailing, business equipment) for FL leads.
     ("fl_roll_enricher", fl_roll_enricher_bot.run),

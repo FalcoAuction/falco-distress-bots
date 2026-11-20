@@ -164,7 +164,7 @@ class ProbatePropertyEnricherBot(BotBase):
         try:
             candidates = self._candidates(client)
             self.logger.info(
-                f"{len(candidates)} probate leads lacking property_address"
+                f"{len(candidates)} probate and foreclosure leads lacking property_address"
             )
 
             for row in candidates[:self.max_leads_per_run]:
@@ -403,12 +403,23 @@ class ProbatePropertyEnricherBot(BotBase):
         return out
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
+        """Probate decedents and foreclosure borrowers with a name but no
+        property address. Foreclosures come first: a trustee sale is weeks
+        away, an estate is months. The trustee-sale notice names the borrower,
+        and the borrower owns the house, so the same strict owner match
+        applies."""
+        out: List[Dict[str, Any]] = []
+        for distress in ("PRE_FORECLOSURE", "COURT_SALE", "PARTITION", "DIVORCE", "CONSERVATORSHIP", "PROBATE"):
+            out.extend(self._candidates_of(client, distress))
+        return out
+
+    def _candidates_of(self, client, distress: str) -> List[Dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retry_after_days)).isoformat()
         try:
             q = (
                 client.table("homeowner_requests_staging")
                 .select("id, full_name, owner_name_records, county, property_address, property_value, raw_payload")
-                .eq("distress_type", "PROBATE")
+                .eq("distress_type", distress)
                 # Davidson-only was a v1 guard while the PADCTN pattern was
                 # being validated. It is why Knox (822 leads) and Shelby (599)
                 # have zero addresses: a probate notice names a decedent, not
@@ -423,13 +434,13 @@ class ProbatePropertyEnricherBot(BotBase):
                     "raw_payload->probate_match_attempt.is.null,"
                     f"raw_payload->probate_match_attempt->>at.lt.{cutoff}"
                 )
-                .order("staged_at", desc=True)
-                .limit(2000)
-                .execute()
             )
+            if distress != "PROBATE":
+                q = q.not_.is_("full_name", "null")
+            q = q.order("staged_at", desc=True).limit(2000).execute()
             return getattr(q, "data", None) or []
         except Exception as e:
-            self.logger.warning(f"candidate query failed: {e}")
+            self.logger.warning(f"candidate query failed ({distress}): {e}")
             return []
 
     def _lookup_owner(self, query: str) -> Optional[List[Dict[str, Any]]]:
