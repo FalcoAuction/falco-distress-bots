@@ -89,6 +89,7 @@ from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
+from . import land_lane_bot
 from . import probate_property_enricher_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
@@ -236,6 +237,9 @@ NEW_BOTS = [
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
     ("comptroller_parcels", comptroller_parcels_bot.run),
+    # Free: Middle TN farm/timber tracts owned by heirs, family groups or
+    # long-held absentees, from the same Comptroller index.
+    ("land_lane", land_lane_bot.run),
     # Florida counterpart of TPAD + the county assessors: DOR statewide
     # roll (value, homestead, mailing, business equipment) for FL leads.
     ("fl_roll_enricher", fl_roll_enricher_bot.run),
