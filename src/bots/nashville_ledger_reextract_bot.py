@@ -178,7 +178,7 @@ class NashvilleLedgerReextractBot(BotBase):
         )
 
         sess = requests.Session()
-        sess.headers.update({"User-Agent": "FALCO-Lead-Research/1.0 (+ops@falco.llc)"})
+        sess.headers.update({"User-Agent": "Mozilla/5.0"})
 
         attempted = 0
         new_principal = 0

@@ -139,11 +139,15 @@ def _iso_date(value: Any) -> Optional[str]:
 
 def _build_session() -> "requests.Session":
     s = requests.Session()
-    # TPAD's gateway may 403 non-browser user agents. FALCO identifies its
-    # bots and does not pose as a browser; the Comptroller weekly files
-    # (comptroller_parcels) cover the same 86 counties if TPAD blocks us.
+    # TPAD sits behind an Azure Application Gateway that 403s non-browser
+    # user agents. The old descriptive UA was blocked on every request,
+    # which is why this enricher never returned anything. These headers
+    # are what the site's own search form sends.
     s.headers.update({
-        "User-Agent": "FALCO-Lead-Research/1.0 (+ops@falco.llc)",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        ),
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
         "Referer": f"{TPAD_BASE}/Search",
