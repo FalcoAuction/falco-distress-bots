@@ -125,9 +125,26 @@ class GradeTests(unittest.TestCase):
         self.assertEqual(r["contact"]["tier"], "mail")
         self.assertTrue(r["contact"]["unverified_phone"])
 
-    def test_code_violation_never_A(self):
+    def test_code_violation_alone_excluded_failing_structure_never_A(self):
         r = self.office(distress_type="CODE_VIOLATION", phone="615-555-0101", phone_metadata=TRUSTED_PHONE_META)
+        self.assertEqual(r["exclude_reason"], "weak_signal_only")
+        self.assertIsNone(r["grade"])
+        raw = {"padctn": {"land_use": "C25 - ONE STORY GENERAL RETAIL STORE", "appraised": 300000,
+                          "mailing_address": "9 Elm St, Nashville, TN 37206"}, "condition": ["dilapidated"]}
+        r = property_lane(row(raw_payload=raw, distress_type="CODE_VIOLATION", phone="615-555-0101",
+                              phone_metadata=TRUSTED_PHONE_META))
         self.assertEqual(r["grade"], "B")
+
+    def test_readiness_names_what_is_missing(self):
+        r = self.office(phone="615-555-0101", phone_metadata=TRUSTED_PHONE_META)
+        self.assertIn("parcel_id", r["readiness"]["missing"])
+        self.assertFalse(r["readiness"]["ready"])
+        raw = {"padctn": {"land_use": "C25 - ONE STORY GENERAL RETAIL STORE", "appraised": 300000, "parcel": "093-04",
+                          "mailing_address": "9 Elm St, Nashville, TN 37206"}}
+        r = property_lane(row(raw_payload=raw, phone="615-555-0101", phone_metadata=TRUSTED_PHONE_META,
+                              source_url="https://example.org/notice", county="davidson"))
+        self.assertEqual(r["readiness"]["missing"], [], r["readiness"])
+        self.assertTrue(r["readiness"]["ready"])
 
     def test_demolition_permit_excluded(self):
         r = self.office(distress_type="DEMOLITION")

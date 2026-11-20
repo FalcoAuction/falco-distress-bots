@@ -134,6 +134,15 @@ class ShortlistTests(unittest.TestCase):
         self.assertTrue(screen(self.opp(), {"lien_check": {"checked_at": "2026-09-01"}}, TODAY)[0])
         self.assertFalse(screen(self.opp(), {"lien_check": {"status": "queued"}}, TODAY)[0])
 
+    def test_commercial_and_land_need_readiness(self):
+        not_ready = {"property_lane": {"lane": "land", "readiness": {"ready": False, "missing": ["parcel_id"]}}}
+        ok, d = screen(self.opp(), not_ready, TODAY)
+        self.assertFalse(ok)
+        self.assertEqual(d["missing"], ["parcel_id"])
+        ready = {"property_lane": {"lane": "land", "readiness": {"ready": True, "missing": []}}}
+        self.assertTrue(screen(self.opp(), ready, TODAY)[0])
+        self.assertTrue(screen(self.opp(), {"property_lane": {"lane": "residential"}}, TODAY)[0])
+
     def test_outer_counties_default_to_titlesearcher(self):
         self.assertEqual(register_system("Robertson County"), "titlesearcher")
         self.assertEqual(register_system("sumner"), "ustitlesearch")
