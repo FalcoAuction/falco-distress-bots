@@ -39,13 +39,11 @@ from ._provenance import record_field
 
 
 # TN-average 30Y fixed mortgage rates by origination year (Freddie Mac PMMS)
-TN_AVG_30Y_RATES = {
-    2007: 6.34, 2008: 6.04, 2009: 5.04, 2010: 4.69, 2011: 4.45,
-    2012: 3.66, 2013: 3.98, 2014: 4.17, 2015: 3.85, 2016: 3.65,
-    2017: 3.99, 2018: 4.54, 2019: 3.94, 2020: 3.11, 2021: 2.96,
-    2022: 5.34, 2023: 6.81, 2024: 6.74, 2025: 6.85, 2026: 6.50,
-}
-DEFAULT_RATE = 6.50
+# One rate table for every balance estimate (shared with the lien stack).
+from ..enrichment.lien_stack import DEFAULT_RATE, TN_AVG_30Y_RATES  # noqa: E402
+# Only balances built from a recorded loan document reach mortgage_balance,
+# the column the lead quality rules read for equity.
+PROMOTE_SOURCES = {"ustitlesearch_rod", "nashville_ledger_extracted"}
 DEFAULT_TERM_YEARS = 30
 
 
@@ -99,11 +97,48 @@ def _years_elapsed(origination_iso: str) -> Optional[float]:
 
 def _resolve_origination(pm: Dict[str, Any]) -> Dict[str, Any]:
     """Return the best available (principal, year, rate, term, source)
-    triple from the lead's phone_metadata. Priority: HMDA > ROD > NL."""
+    from the lead's phone_metadata. Recorded documents first: ROD > notice >
+    HMDA. HMDA is a statistical match, kept only as a fallback hint."""
     out: Dict[str, Any] = {}
 
-    # Priority 1: HMDA (has rate + term)
     sig = pm.get("mortgage_signal") or {}
+
+    # First: the recorded deed of trust (principal + document date)
+    rod = pm.get("rod_lookup") or {}
+    if isinstance(rod, dict) and rod.get("original_principal") and rod.get("document_date"):
+        principal = _to_float(rod["original_principal"])
+        try:
+            doc_date = rod["document_date"][:10]
+            year_int = int(doc_date[:4])
+        except Exception:
+            year_int = None
+        if principal and year_int:
+            return {
+                "original_principal": principal,
+                "origination_year": year_int,
+                "rate_pct": rod.get("rate_pct") or TN_AVG_30Y_RATES.get(year_int, DEFAULT_RATE),
+                "term_years": DEFAULT_TERM_YEARS,
+                "method": "rod+tn_avg_rate",
+                "source": "ustitlesearch_rod",
+                "confidence": 0.85,
+            }
+
+    # Second: the foreclosure notice's recorded loan amount
+    if isinstance(sig, dict) and sig.get("source") == "nashville_ledger_extracted":
+        principal = _to_float(sig.get("amount"))
+        # trust_date from raw_payload.structured (need to fetch from lead)
+        # We'll handle this in the bot's loop by passing raw_payload.
+        if principal:
+            out = {
+                "original_principal": principal,
+                "method": "nashville_ledger+tn_avg_rate",
+                "source": "nashville_ledger_extracted",
+                "confidence": 0.85,
+            }
+            return out
+
+    # Last: HMDA. A probable loan matched by census tract, year and amount band,
+    # not a recorded document, so it never becomes mortgage_balance on its own
     if isinstance(sig, dict) and sig.get("source") == "hmda_match":
         principal = _to_float(sig.get("amount"))
         match_year = sig.get("match_year")
@@ -126,40 +161,6 @@ def _resolve_origination(pm: Dict[str, Any]) -> Dict[str, Any]:
                     "confidence": sig.get("confidence", 0.65),
                 }
                 return out
-
-    # Priority 2: ROD (has principal + doc date, no rate)
-    rod = pm.get("rod_lookup") or {}
-    if isinstance(rod, dict) and rod.get("original_principal") and rod.get("document_date"):
-        principal = _to_float(rod["original_principal"])
-        try:
-            doc_date = rod["document_date"][:10]
-            year_int = int(doc_date[:4])
-        except Exception:
-            year_int = None
-        if principal and year_int:
-            return {
-                "original_principal": principal,
-                "origination_year": year_int,
-                "rate_pct": rod.get("rate_pct") or TN_AVG_30Y_RATES.get(year_int, DEFAULT_RATE),
-                "term_years": DEFAULT_TERM_YEARS,
-                "method": "rod+tn_avg_rate",
-                "source": "ustitlesearch_rod",
-                "confidence": 0.85,
-            }
-
-    # Priority 3: nashville_ledger extracted
-    if isinstance(sig, dict) and sig.get("source") == "nashville_ledger_extracted":
-        principal = _to_float(sig.get("amount"))
-        # trust_date from raw_payload.structured (need to fetch from lead)
-        # We'll handle this in the bot's loop by passing raw_payload.
-        if principal:
-            out = {
-                "original_principal": principal,
-                "method": "nashville_ledger+tn_avg_rate",
-                "source": "nashville_ledger_extracted",
-                "confidence": 0.85,
-            }
-            return out
 
     return out
 
@@ -298,7 +299,7 @@ class MortgageAmortizerBot(BotBase):
                         update: Dict[str, Any] = {"phone_metadata": pm}
                         # Promote amortized current_balance to mortgage_balance
                         # for high-confidence leads
-                        if amort_record["confidence"] >= 0.65:
+                        if amort_record["confidence"] >= 0.65 and origination["source"] in PROMOTE_SOURCES:
                             update["mortgage_balance"] = int(round(current_balance))
                             promoted += 1
                         try:
