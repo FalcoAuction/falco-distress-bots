@@ -93,12 +93,9 @@ class MackieWolfTrusteeBot(BotBase):
 
     # How far back to walk looking for the most recent PDF
     max_days_lookback = 21
-    # This firm sits behind a WAF that drops our honest bot UA when the
-    # request comes from a CI datacenter IP, so the scraper silently found
-    # nothing in production while working fine locally.
-    user_agent = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    # This firm's WAF may drop the honest bot UA from CI datacenter IPs.
+    # FALCO does not pose as a browser to get past it; if the site blocks
+    # us, this source yields nothing until the firm allows it.
 
     def scrape(self) -> List[LeadPayload]:
         if pdfplumber is None:

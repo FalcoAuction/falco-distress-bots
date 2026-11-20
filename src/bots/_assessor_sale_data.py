@@ -230,7 +230,7 @@ def _resolve_davidson(
 # Rutherford ArcGIS — direct service query for sale data
 RUTHERFORD_ARCGIS = (
     "https://services5.arcgis.com/A5C0MR9xfkxVRwat/arcgis/rest/services/"
-    "Parcel_Data/FeatureServer/0/query"
+    "Parcel_Data/FeatureServer/1/query"
 )
 
 

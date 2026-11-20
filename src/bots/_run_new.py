@@ -85,6 +85,7 @@ from . import landlord_portfolio_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import rutherford_assessor_bot
+from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
 from . import land_lane_bot
@@ -236,6 +237,9 @@ NEW_BOTS = [
     ("williamson_assessor", williamson_assessor_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
+    # Free: Clarksville open parcel layer (owner, mailing, last sale; the
+    # layer blanks appraisals, so value = recent arm's-length sale only).
+    ("montgomery_assessor", montgomery_assessor_bot.run),
     ("hamilton_assessor", hamilton_assessor_bot.run),
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
