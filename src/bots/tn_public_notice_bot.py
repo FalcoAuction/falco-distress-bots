@@ -55,6 +55,7 @@ from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload
 from . import _trustee_notice as trustee_notice
+from . import _court_order as court_order
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -65,6 +66,11 @@ CATEGORY_TO_DISTRESS = {
     "22": ("TAX_LIEN", "Delinquent Taxes"),
     "23": ("PROBATE", "Probate Notices"),
     "26": ("TAX_LIEN", "Tax Sales"),
+    # Court orders and public sales: sorted by text in _build_lead
+    # (_court_order.kind). Newspapers also file trustee's sales here.
+    "28": ("COURT_ORDER", "Orders"),
+    "27": ("COURT_ORDER", "Public sales"),
+    "25": ("COURT_ORDER", "Forfeitures/Seizure"),
 }
 
 VIEWSTATE_RE = re.compile(r'name="__VIEWSTATE" id="__VIEWSTATE" value="([^"]*)"')
@@ -92,7 +98,7 @@ BORROWER_HINT_RE = re.compile(r"executed by\s+([A-Z][A-Za-z. ,'\-]+?),", re.IGNO
 
 class TnPublicNoticeBot(BotBase):
     name = "tn_public_notice"
-    description = "TN Public Notice statewide aggregator (4 categories, all 95 counties)"
+    description = "TN Public Notice statewide aggregator (foreclosure, tax, probate, court order and public sale categories)"
     throttle_seconds = 1.5
     expected_min_yield = 10
 
@@ -317,11 +323,23 @@ class TnPublicNoticeBot(BotBase):
         if kind == "general_tax":
             return None
         filed_as = None
+        court_names: List[str] = []
+        court_address: Optional[str] = None
+        if distress == "COURT_ORDER":
+            ck = court_order.kind(excerpt)
+            if ck:
+                distress = ck
+                court_names = court_order.parties(excerpt)
+                court_address = court_order.tenants_address(excerpt)
+            elif kind == "foreclosure":
+                distress = "PRE_FORECLOSURE"
+            else:
+                return None   # bids, storage and towing sales, other auctioneers' ads
         if kind == "foreclosure" and distress != "PROBATE" and distress != "PRE_FORECLOSURE":
             filed_as, distress = distress, "PRE_FORECLOSURE"
-        property_address = self._extract_address(excerpt, city)
+        property_address = court_address or self._extract_address(excerpt, city)
         parcel = self._extract_parcel(excerpt)
-        names = trustee_notice.borrowers(excerpt) if distress == "PRE_FORECLOSURE" else []
+        names = court_names or (trustee_notice.borrowers(excerpt) if distress == "PRE_FORECLOSURE" else [])
         full_name = names[0] if names else self._extract_subject(excerpt, distress)
         sale_date = trustee_notice.sale_date(excerpt) if distress == "PRE_FORECLOSURE" else None
 

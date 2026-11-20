@@ -409,7 +409,7 @@ class ProbatePropertyEnricherBot(BotBase):
         and the borrower owns the house, so the same strict owner match
         applies."""
         out: List[Dict[str, Any]] = []
-        for distress in ("PRE_FORECLOSURE", "PROBATE"):
+        for distress in ("PRE_FORECLOSURE", "COURT_SALE", "PARTITION", "DIVORCE", "CONSERVATORSHIP", "PROBATE"):
             out.extend(self._candidates_of(client, distress))
         return out
 
@@ -435,7 +435,7 @@ class ProbatePropertyEnricherBot(BotBase):
                     f"raw_payload->probate_match_attempt->>at.lt.{cutoff}"
                 )
             )
-            if distress == "PRE_FORECLOSURE":
+            if distress != "PROBATE":
                 q = q.not_.is_("full_name", "null")
             q = q.order("staged_at", desc=True).limit(2000).execute()
             return getattr(q, "data", None) or []
