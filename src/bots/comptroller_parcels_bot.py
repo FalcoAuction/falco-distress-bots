@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import traceback as tb
 from collections import Counter
@@ -54,6 +55,14 @@ MAX_DEBTOR_SEARCHES = 1500
 # and are the ones the CRM ranks; new filings are not ranked at all. Events
 # are searched first so the filing backlog never crowds them out.
 BK_FILING = "BANKRUPTCY"
+# Foreclosure notices that name the borrowers but not the property (the
+# tnpublicnotice excerpt cuts off before the address; the full text sits
+# behind a captcha we do not get past). The notice names the county, so
+# the same debtor matcher finds the home: both spouses on one deed
+# ("joint") or a confirmed middle initial set the address and value; a
+# bare name match is kept for review only.
+NOTICE_TYPES = {"PRE_FORECLOSURE", "FORECLOSURE", "TRUSTEE_NOTICE"}
+MAX_NOTICE_SEARCHES = 3000
 # Leads already searched against this build of the index; cached with the
 # index and cleared when the index changes, so new deeds get another look.
 TRIED_PATH = DATA_DIR / "debtor_tried.json"
@@ -78,7 +87,18 @@ def _save_tried(ids: set) -> None:
 VERSION = "comptroller-parcels-2026-11-05"
 FIELDS = ("id,county,property_address,owner_name_records,full_name,distress_type,property_value,"
           "done:raw_payload->comptroller_parcel->>parcelid,court:raw_payload->>court_id,"
-          "state:raw_payload->>state")
+          "state:raw_payload->>state,borrowers:raw_payload->borrowers")
+
+
+def notice_names(row: Dict[str, Any]) -> List[str]:
+    """Borrower names from a foreclosure notice row, spouses first-listed."""
+    b = row.get("borrowers")
+    if isinstance(b, list) and b:
+        names = [str(x) for x in b]
+    else:
+        raw = row.get("owner_name_records") or row.get("full_name") or ""
+        names = re.split(r";|\s+and\s+|\s*&\s*", raw, flags=re.IGNORECASE)
+    return [n.strip() for n in names if n and n.strip()][:2]
 
 
 def _index_stale() -> bool:
@@ -127,6 +147,7 @@ class ComptrollerParcelsBot(BotBase):
         tried = set() if self.refresh else _load_tried()
         # Debtor searches wait until the scan is done, then run events first.
         bk_queue: List[tuple] = []
+        notice_queue: List[tuple] = []
 
         def record(row: Dict[str, Any], hit: Dict[str, Any]) -> None:
             hit["version"] = VERSION
@@ -159,6 +180,14 @@ class ComptrollerParcelsBot(BotBase):
                 elif counties and names:
                     is_filing = (row.get("distress_type") or "").upper() == BK_FILING
                     bk_queue.append((1 if is_filing else 0, row, counties, [n for n in names if n]))
+            elif ((row.get("distress_type") or "").upper() in NOTICE_TYPES and row.get("county")
+                  and (row.get("state") or "TN") == "TN"):
+                ck = idx.resolve_county(row.get("county"), None)
+                names = notice_names(row)
+                if row["id"] in tried:
+                    stats["notice_already_tried"] += 1
+                elif ck and names:
+                    notice_queue.append((row, [ck], names))
             elif (row.get("distress_type") or "").upper() in OWNER_MATCH_TYPES and row.get("county"):
                 if idx.resolve_county(row.get("county"), None):
                     stats["in_coverage_owner_only"] += 1
@@ -182,6 +211,23 @@ class ComptrollerParcelsBot(BotBase):
                 if prio == 0:
                     stats["bk_event_matched"] += 1
                 record(row, hit)
+            else:
+                tried.add(row["id"])
+        # Many rows are the same notice published three times: search each
+        # borrower set once per county.
+        seen: Dict[tuple, Optional[Dict[str, Any]]] = {}
+        for n, (row, counties, names) in enumerate(notice_queue):
+            key = (counties[0], tuple(sorted(x.upper() for x in names)))
+            if key not in seen:
+                if len(seen) >= MAX_NOTICE_SEARCHES:
+                    stats["notice_deferred"] += len(notice_queue) - n
+                    break
+                stats["notice_search"] += 1
+                seen[key] = match_debtors(idx.con, names, counties)
+            hit = seen[key]
+            if hit:
+                stats[f"notice_{hit['confidence']}"] += 1
+                record(row, dict(hit))
             else:
                 tried.add(row["id"])
         if self.write:

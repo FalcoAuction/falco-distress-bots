@@ -201,6 +201,7 @@ class RutherfordAssessorBot(BotBase):
                     .or_("county.eq.rutherford,property_address.ilike.%murfreesboro%,property_address.ilike.%smyrna%,property_address.ilike.%la vergne%,property_address.ilike.%lavergne%,property_address.ilike.%eagleville%")
                     .is_("property_value", "null")
                     .is_("raw_payload->rutherford_arcgis", "null")
+                    .not_.is_("property_address", "null")
                     # Live sale dates first; unordered, the cap filled
                     # with whatever Postgres returned and upcoming sales
                     # could wait indefinitely.
