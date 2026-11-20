@@ -62,6 +62,27 @@ PARCEL_RE = re.compile(
 PRINCIPAL_RE = re.compile(r"original principal (?:amount|sum) of \$?([\d,]+(?:\.\d{2})?)", re.IGNORECASE)
 DELINQUENT_AMOUNT_RE = re.compile(r"entire amount delinquent[^$]*\$([\d,]+(?:\.\d{2})?)", re.IGNORECASE)
 COMMONLY_KNOWN_RE = re.compile(r"Commonly known as[:\s]+([^<\n]+?)(?:\.|<|\n|$)", re.IGNORECASE)
+# Notices often run legal boilerplate after the address ("... TN 37404
+# Street Address: The street address ... is believed to be ..."). Keep the
+# address through the first ZIP so the assessor match can find it.
+_ADDR_THROUGH_ZIP = re.compile(r"^(.*?\bTN\.?,?\s*\d{5}(?:-\d{4})?)", re.IGNORECASE)
+_PARCEL_ID = re.compile(r"^\d{3}[A-Z]?(?:[ \-][A-Z])?[ \-]\d{3}(?:\.\d+)?")
+
+
+def clean_address(a: Optional[str]) -> Optional[str]:
+    if not a:
+        return a
+    m = _ADDR_THROUGH_ZIP.match(a.strip())
+    return (m.group(1) if m else a).strip(" ,;")
+
+
+def clean_parcel(p: Optional[str]) -> Optional[str]:
+    if not p:
+        return p
+    m = _PARCEL_ID.match(p.strip().upper())
+    return m.group(0).strip() if m else p.strip()
+
+
 BORROWER_RE = re.compile(r"executed by\s+([A-Z][A-Za-z. ,'\-]+?),", re.IGNORECASE)
 
 # Probate body extraction
@@ -194,12 +215,12 @@ class HamiltonCountyHeraldBot(BotBase):
         borrower = m.group(1).strip() if m else None
         # Address ("Commonly known as: 7711 E. Village Lane, Hixson, TN 37343")
         m = COMMONLY_KNOWN_RE.search(body)
-        property_address = m.group(1).strip() if m else None
+        property_address = clean_address(m.group(1)) if m else None
         if not property_address:
             return None
         # Parcel
         m = PARCEL_RE.search(body)
-        parcel = m.group(1).strip() if m else None
+        parcel = clean_parcel(m.group(1)) if m else None
         # Lender
         m = LENDER_RE.search(body) or LENDER_ALT_RE.search(body)
         lender = m.group(1).strip() if m else None

@@ -7,7 +7,7 @@ exposes the FULL parcel + appraisal + sales database publicly.
 
 Endpoint:
   https://services5.arcgis.com/A5C0MR9xfkxVRwat/arcgis/rest/services/
-  Parcel_Data/FeatureServer/0
+  Parcel_Data/FeatureServer/1
 
 Available fields (the richest of all 5 EXTERNAL TPAD county sources):
   ParcelID, Grantee (current owner), Grantor (prior owner),
@@ -45,7 +45,7 @@ from ._provenance import record_field
 
 RUTHERFORD_BASE = (
     "https://services5.arcgis.com/A5C0MR9xfkxVRwat/arcgis/rest/services/"
-    "Parcel_Data/FeatureServer/0/query"
+    "Parcel_Data/FeatureServer/1/query"
 )
 
 # Rutherford-county cities (LocationCity values we filter candidates by)
@@ -116,6 +116,15 @@ class RutherfordAssessorBot(BotBase):
                 hit = self._lookup(addr)
                 if hit is None:
                     not_found += 1
+                    # Remember the miss so it never crowds the cap again.
+                    raw = self._raw_payload(client, row["__table__"], row["id"])
+                    if raw is not None:
+                        raw["rutherford_arcgis"] = {"status": "not_found",
+                                                    "checked_at": started.isoformat()}
+                        try:
+                            client.table(row["__table__"]).update({"raw_payload": raw}).eq("id", row["id"]).execute()
+                        except Exception as e:
+                            self.logger.warning(f"  miss marker failed id={row['id']}: {e}")
                     continue
 
                 update: Dict[str, Any] = {}
@@ -126,9 +135,10 @@ class RutherfordAssessorBot(BotBase):
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
 
-                existing_raw = row.get("raw_payload") or {}
-                if not isinstance(existing_raw, dict):
-                    existing_raw = {}
+                existing_raw = self._raw_payload(client, row["__table__"], row["id"])
+                if existing_raw is None:
+                    skipped += 1
+                    continue  # raw_payload holds a non-object; never clobber it
                 existing_raw["rutherford_arcgis"] = hit
                 update["raw_payload"] = existing_raw
 
@@ -185,9 +195,13 @@ class RutherfordAssessorBot(BotBase):
             try:
                 q = (
                     client.table(table)
-                    .select("id, property_address, county, owner_name_records, property_value, raw_payload")
+                    # Lean columns: pulling raw_payload for 500 rows hit the
+                    # 8s statement timeout and left the run with ~15 leads.
+                    .select("id, property_address, county, owner_name_records, property_value")
                     .or_("county.eq.rutherford,property_address.ilike.%murfreesboro%,property_address.ilike.%smyrna%,property_address.ilike.%la vergne%,property_address.ilike.%lavergne%,property_address.ilike.%eagleville%")
                     .is_("property_value", "null")
+                    .is_("raw_payload->rutherford_arcgis", "null")
+                    .not_.is_("property_address", "null")
                     # Live sale dates first; unordered, the cap filled
                     # with whatever Postgres returned and upcoming sales
                     # could wait indefinitely.
@@ -202,6 +216,14 @@ class RutherfordAssessorBot(BotBase):
             except Exception as e:
                 self.logger.warning(f"candidates query on {table} failed: {e}")
         return out
+
+    @staticmethod
+    def _raw_payload(client, table: str, row_id: str) -> Optional[Dict[str, Any]]:
+        rows = (client.table(table).select("raw_payload").eq("id", row_id).limit(1).execute().data) or []
+        raw = rows[0].get("raw_payload") if rows else None
+        if raw is None:
+            return {}
+        return dict(raw) if isinstance(raw, dict) else None
 
     def _lookup(self, address: str) -> Optional[Dict[str, Any]]:
         parts = _street_keywords(address)
@@ -241,17 +263,13 @@ class RutherfordAssessorBot(BotBase):
         if not features:
             return None
 
-        # Pick best match: starts with the street number
-        target_prefix = f"{number} "
-        best = None
-        for feat in features:
-            attrs = feat.get("attributes") or {}
-            loc = (attrs.get("FormattedLocation") or "").upper()
-            if loc.startswith(target_prefix):
-                best = attrs
-                break
-        if best is None:
-            best = features[0].get("attributes") or {}
+        # Exact number + street word, one parcel only: "201 VALLEY" must not
+        # take the value of 201 VALLEYDALE ST. Ambiguous means no match.
+        exact = [f.get("attributes") or {} for f in features]
+        exact = [a for a in exact if (a.get("FormattedLocation") or "").upper().split()[:2] == [str(number), street]]
+        if len({a.get("ParcelID") for a in exact}) != 1:
+            return None
+        best = exact[0]
 
         sale_date_iso = None
         if best.get("SaleDate"):
