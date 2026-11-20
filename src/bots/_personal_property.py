@@ -154,6 +154,10 @@ def _contacts(raw: Dict[str, Any]) -> Dict[str, Any]:
             out["trustee"] = b2b["trustee"]
         if isinstance(b2b.get("counsel"), list) and b2b["counsel"]:
             out["counsel"] = b2b["counsel"][:4]
+    if raw.get("trustee") and "trustee" not in out:
+        # Chapter 7 petitions from the court RSS name the panel trustee.
+        last, _, first = str(raw["trustee"]).partition(",")
+        out["trustee"] = {"name": f"{first.strip()} {last.strip()}".strip().title(), "source": "court_rss"}
     if raw.get("source") in ("hillsclerk_daily", "pinellas_clerk_daily") and raw.get("kind") == "probate":
         if raw.get("attorney") and "attorney" not in out:
             # Pinellas gives the firm and office address in one field.
@@ -206,15 +210,82 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
            else _seizure(lead, raw) if dt == "TAX_LIEN"
            else None)
     if tag:
-        return tag
+        return routing(tag, lead, raw, dt)
     # Any distressed owner (an individual bankruptcy, a small tax account, a
     # foreclosure) who holds a TN aircraft: sell the plane, not the house.
     if planes:
         grade = "A" if "A" in plane_bands else "B"
-        return _result("owner_asset", grade, ["aircraft"], 300_000 if grade == "A" else 100_000,
-                       ["owner's aircraft: " + _aircraft_signal(planes)], raw,
-                       ["owner-direct: pitch selling the plane to cure the distress"])
+        return routing(_result("owner_asset", grade, ["aircraft"], 300_000 if grade == "A" else 100_000,
+                               ["owner's aircraft: " + _aircraft_signal(planes)], raw,
+                               ["owner-direct: pitch selling the plane to cure the distress"]), lead, raw, dt)
     return None
+
+
+ROUTE_TO = "McLemore Auction Company"
+_VALUE_BASIS = {
+    "estate": "home value used as a proxy for the contents (no inventory yet)",
+    "owner_asset": "FAA registry value band for the aircraft",
+    "vessel_arrest": "unknown until the docket or listing is checked",
+    "vessel_lien": "estimated from make, year and size",
+}
+
+
+def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: str) -> Dict[str, Any]:
+    """Who controls the sale, whether FALCO can route it (and to whom), the
+    value's basis, the deadline and the one contact to start with."""
+    lane = tag["lane"]
+    region = "FL" if str(raw.get("state") or "").upper() == "FL" else "TN"
+    c = tag.get("contacts") or {}
+    if lane == "business_liquidation" and dt == "BANKRUPTCY":
+        controller = "chapter 7 trustee"
+    else:
+        controller = {"estate": "estate representative (through the estate attorney)",
+                      "business_liquidation": "the business owner",
+                      "seizure": "the business owner (a tax lien holder may force a sale)",
+                      "owner_asset": "the owner",
+                      "vessel_arrest": "federal court (the US Marshal sells)",
+                      "vessel_lien": "the marina"}.get(lane, "unknown")
+    routable, why_not = True, None
+    if region == "FL":
+        routable, why_not = False, "Florida: no auction partner there yet"
+    elif lane == "vessel_arrest":
+        routable, why_not = False, "the court sells it; the plaintiff's counsel is a relationship, not a seller"
+    elif lane == "vessel_lien" and not c.get("owner"):
+        routable, why_not = False, "the marina runs the sale; call the marina as a consignor relationship"
+    if c.get("trustee"):
+        t = c["trustee"]
+        primary = f"Trustee {t.get('name')}" + (f", {t.get('phone')}" if t.get("phone") else "")
+    elif c.get("attorney") and c["attorney"].get("names"):
+        primary = f"Attorney {c['attorney']['names'][0]}"
+    elif c.get("representatives"):
+        primary = f"Representative {c['representatives'][0].get('name')}"
+    elif c.get("owner"):
+        primary = f"Owner {c['owner']}"
+    elif c.get("marina"):
+        primary = f"Marina {c['marina'].get('name')}"
+    elif c.get("plaintiff"):
+        primary = f"Plaintiff {c['plaintiff']}"
+    else:
+        primary = "Owner of record (mail): " + str(lead.get("owner_name_records") or lead.get("full_name") or "unknown")
+    basis = _VALUE_BASIS.get(lane)
+    if tag.get("est_value_min") and lane in ("business_liquidation", "seizure"):
+        basis = "business equipment on the county tangible personal property roll"
+    if not tag.get("est_value_min") and lane not in _VALUE_BASIS:
+        basis = "unknown: confirm on the first call"
+    tag.update({
+        "region": region, "controller": controller, "routable": routable, "not_routable_reason": why_not,
+        "route_to": ROUTE_TO if routable else None, "value_basis": basis,
+        "deadline": lead.get("trustee_sale_date") or raw.get("sale_date"),
+        "primary_contact": primary, "policy": "pp-v2",
+    })
+    return tag
+
+
+def dedupe_key(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any]) -> str:
+    """Same opportunity filed twice (two newspapers, two notices)."""
+    ident = (raw.get("docket_number") or raw.get("case_number") or lead.get("owner_name_records")
+             or lead.get("full_name") or "")
+    return tag["lane"] + "|" + re.sub(r"[^A-Z0-9]", "", str(ident).upper())
 
 
 def _vessel_arrest(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -346,6 +417,10 @@ def _liquidation(lead, raw, planes, dt):
     equip, top = _fl_equipment(raw)
     big = equip >= FL_EQUIPMENT_MIN
     cat = "guns" if lic else category_of(name) or ("business_equipment" if big else None)
+    if not cat and dt == "BANKRUPTCY" and chapter == "7":
+        # A chapter 7 trustee must sell whatever the business owns and hires an
+        # auctioneer to do it; the name just does not say what the assets are.
+        cat = "business_assets"
     if not cat:
         return None   # national closures move their equipment; only hard-asset businesses qualify
     workers = _num(warn.get("workers")) if warn else None
@@ -354,6 +429,7 @@ def _liquidation(lead, raw, planes, dt):
             else "chapter " + (chapter or "?") + " business bankruptcy")
     signals = [f"{head}: {name}",
                _ffl_signal(lic) if lic else _equipment_signal(equip, top) if big
+               else "the chapter 7 trustee will sell whatever the business owns" if cat == "business_assets"
                else f"hard-asset industry ({cat.replace('_', ' ')})"]
     caveats = []
     if event and not big:
@@ -362,6 +438,8 @@ def _liquidation(lead, raw, planes, dt):
         signals.append(f"{workers:.0f} workers on the WARN notice")
     elif dt == "BANKRUPTCY":
         caveats.append("size unverified: check estimated assets on the petition (Official Form 201)")
+        if cat == "business_assets":
+            caveats.append("assets unknown: the trustee's schedules (Form 206A/B) list them")
     grade = "A" if (lic or (workers and workers >= WARN_WORKERS_MIN) or equip >= FL_EQUIPMENT_A) else "B"
     if big and top and top.get("late_filing_penalty"):
         signals.append("late filing penalty on the equipment return (business may already be winding down)")

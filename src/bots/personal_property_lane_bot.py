@@ -24,15 +24,16 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from ._base import BotBase, _supabase
-from ._personal_property import classify
+from ._personal_property import classify, dedupe_key
 
 # Only the raw_payload keys the rules read (JSON-path selects keep pages small).
 _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "chapter", "case_name",
              "court_id", "docket_number", "courtlistener_docket_url", "case_number", "docket_url", "state",
-             "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor")
+             "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor",
+             "trustee", "sale_date")
 _RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
              "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts")
-_BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value"
+_BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value, trustee_sale_date"
 
 
 class PersonalPropertyLaneBot(BotBase):
@@ -60,6 +61,7 @@ class PersonalPropertyLaneBot(BotBase):
                     "staged": 0, "duplicates": 0, "fetched": 0}
 
         scanned = tagged = cleared = unchanged = 0
+        first_seen: Dict[str, str] = {}
         lanes: Counter = Counter()
         error_message: Optional[str] = None
         try:
@@ -69,6 +71,13 @@ class PersonalPropertyLaneBot(BotBase):
                     raw = {k: row.get(k) for k in _RAW_TEXT + _RAW_JSON if row.get(k) is not None}
                     lead = {**row, "raw_payload": raw}
                     tag = classify(lead)
+                    if tag:
+                        key = dedupe_key(tag, lead, raw)
+                        if key in first_seen and first_seen[key] != row["id"]:
+                            tag = {**tag, "duplicate_of": first_seen[key], "routable": False,
+                                   "not_routable_reason": "duplicate of another lead", "route_to": None}
+                        else:
+                            first_seen[key] = row["id"]
                     if tag:
                         lanes[f"{tag['lane']}:{tag['grade']}"] += 1
                     if tag == row.get("_pp"):
