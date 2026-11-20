@@ -91,6 +91,7 @@ from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
 from . import land_lane_bot
 from . import church_closure_bot
+from . import stalled_build_bot
 from . import probate_property_enricher_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
@@ -244,6 +245,9 @@ NEW_BOTS = [
     # Free: closed United Methodist churches; property vested in the
     # Conference Trustees (one seller for every building).
     ("church_closure", church_closure_bot.run),
+    # Free: Davidson new builds with a mid-project contractor change,
+    # still held by the owner who started them (Metro permits + parcels).
+    ("stalled_build", stalled_build_bot.run),
     # Florida counterpart of TPAD + the county assessors: DOR statewide
     # roll (value, homestead, mailing, business equipment) for FL leads.
     ("fl_roll_enricher", fl_roll_enricher_bot.run),
