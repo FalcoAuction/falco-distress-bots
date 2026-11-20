@@ -30,6 +30,7 @@ Distress type: SUBSTITUTION_OF_TRUSTEE (the CRM labels it Pre-Foreclosure
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Set
@@ -42,6 +43,9 @@ from .ustitlesearch_rod_bot import DEFAULT_RATE, TN_AVG_30Y_RATES, _amortize
 SEARCH = BASE + "/p2.php"
 HOME = BASE + "/index.php"
 CODE = "APPT"
+# The register files most deeds of trust under doc type "MORTGAGE"; checking
+# for "TRUST" alone threw away the page with the address and loan.
+LOAN_DOC = re.compile(r"TRUST|MORTGAGE", re.I)
 
 
 def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Optional[Dict[str, Any]],
@@ -112,6 +116,9 @@ class ShelbySubstituteTrusteeBot(BotBase):
     # scrape() returns, so a timed-out run stages nothing). Two runs a day read
     # 12, against ~5 new filings a business day.
     max_new_per_run = 6
+    # Staged filings whose deed of trust was never read (an old run, a
+    # failed request): re-read a few per run, newest first, at 1 request each.
+    max_backfill_per_run = 3
 
     def scrape(self) -> List[LeadPayload]:
         self.fetch(HOME)  # session cookie
@@ -135,13 +142,61 @@ class ShelbySubstituteTrusteeBot(BotBase):
             appt = self._detail(row["detail_url"]) if row.get("detail_url") else None
             ref = deed_of_trust_ref(appt) if appt else None
             dot = self._detail(detail_url(ref["instrument"], ref["year"])) if ref else None
-            if dot and "TRUST" not in (dot.get("doc_type") or "").upper():
+            if dot and not LOAN_DOC.search(dot.get("doc_type") or ""):
                 dot = None  # cross reference points at something other than a deed of trust
             lead = build_lead(self, row, appt, dot)
             if lead:
                 leads.append(lead)
         self.logger.info(f"staging {len(leads)} lead(s), {sum(1 for l in leads if l.property_address)} with an address")
+        self.backfill(self.max_backfill_per_run)
         return leads
+
+    def backfill(self, limit: int) -> int:
+        """Read the deed of trust for staged filings that have its reference
+        but no address, and fill address, borrowers, loan and parcel."""
+        client = _supabase()
+        if client is None or limit <= 0:
+            return 0
+        try:
+            rows = (client.table("homeowner_requests_staging")
+                    .select("id,source_url,raw_payload").eq("bot_source", self.name)
+                    .is_("property_address", "null").not_.is_("raw_payload->deed_of_trust", "null")
+                    .is_("raw_payload->dot_checked_at", "null")
+                    .order("created_at", desc=True).limit(limit).execute().data) or []
+        except Exception as e:  # noqa: BLE001
+            self.logger.warning(f"backfill query failed: {e}")
+            return 0
+        filled = 0
+        for r in rows:
+            raw = r.get("raw_payload") if isinstance(r.get("raw_payload"), dict) else None
+            ref = (raw or {}).get("deed_of_trust") or {}
+            if not raw or not ref.get("instrument"):
+                continue
+            dot = self._detail(detail_url(ref["instrument"], ref.get("year") or ""))
+            if dot is None:
+                continue  # request failed: try again next run
+            update: Dict[str, Any] = {}
+            if LOAN_DOC.search(dot.get("doc_type") or ""):
+                row = {"instrument": raw.get("instrument"), "code": raw.get("code") or CODE,
+                       "grantors": (raw.get("lenders") or []) + (raw.get("borrowers") or []),
+                       "grantees": raw.get("substitute_trustees") or [], "recorded": raw.get("recorded"),
+                       "detail_url": r.get("source_url")}
+                lead = build_lead(self, row, {"instrument_date": raw.get("appointment_date")}, dot)
+                if lead:
+                    d = lead.as_db_row("")
+                    for k in ("property_address", "full_name", "owner_name_records", "mortgage_balance", "admin_notes"):
+                        if d.get(k) is not None:
+                            update[k] = d[k]
+                    raw = {**raw, **{k: v for k, v in (lead.raw_payload or {}).items() if v is not None and k != "deed_of_trust"}}
+            raw["dot_checked_at"] = date.today().isoformat()
+            update["raw_payload"] = raw
+            try:
+                client.table("homeowner_requests_staging").update(update).eq("id", r["id"]).execute()
+                filled += 1 if update.get("property_address") else 0
+            except Exception as e:  # noqa: BLE001
+                self.logger.warning(f"backfill write failed id={r['id']}: {e}")
+        self.logger.info(f"backfill: {len(rows)} re-read, {filled} now have an address")
+        return filled
 
     def _detail(self, url: str) -> Optional[Dict[str, Any]]:
         res = self.fetch(url)

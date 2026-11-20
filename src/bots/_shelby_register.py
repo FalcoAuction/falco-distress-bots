@@ -168,8 +168,13 @@ def split_parties(appt_grantors: List[str], dot_grantors: Optional[List[str]]) -
     grantors are the borrowers, so use them when the deed of trust was read;
     otherwise fall back to lender words."""
     if dot_grantors:
-        borrowers = [g for g in appt_grantors if g in dot_grantors] or list(dot_grantors)
-        lenders = [g for g in appt_grantors if g not in dot_grantors]
+        # The APPT often shortens a name the deed of trust spells out
+        # ("ALI ABDUL K" vs "ALI ABDUL KAREEM"): a prefix either way is the same person.
+        def on_loan(g: str) -> bool:
+            return any(g == d or d.startswith(g) or g.startswith(d) for d in dot_grantors)
+
+        borrowers = [g for g in appt_grantors if on_loan(g)] or list(dot_grantors)
+        lenders = [g for g in appt_grantors if not on_loan(g)]
         return {"borrowers": borrowers, "lenders": lenders, "basis": "deed_of_trust"}
     lenders = [g for g in appt_grantors if _LENDERISH.search(g)]
     borrowers = [g for g in appt_grantors if g not in lenders]
