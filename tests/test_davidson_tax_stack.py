@@ -65,8 +65,10 @@ class StackTests(unittest.TestCase):
         self.assertEqual((r["stacked_distress"], r["grade"]), (["davidson_tax_sale_unpaid"], "B"))
 
     def test_paid_listing_does_not_count(self):
+        # A paid listing adds nothing, and a code ticket alone no longer
+        # qualifies a commercial lead (weak_signal_only).
         r = self.lead("paid_before_sale")
-        self.assertEqual((r["stacked_distress"], r["grade"]), ([], "C"))
+        self.assertEqual((r["stacked_distress"], r["grade"], r["exclude_reason"]), ([], None, "weak_signal_only"))
 
 
 if __name__ == "__main__":
