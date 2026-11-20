@@ -84,6 +84,7 @@ from . import davidson_parcels_bot
 from . import landlord_portfolio_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
+from . import shelby_loan_value_bot
 from . import rutherford_assessor_bot
 from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
@@ -236,6 +237,9 @@ NEW_BOTS = [
     ("landlord_portfolio", landlord_portfolio_bot.run),
     ("williamson_assessor", williamson_assessor_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
+    # Free: Shelby pre-foreclosure stand-in value (recorded loan x Memphis
+    # FHFA index) until the Assessor's certified roll arrives.
+    ("shelby_loan_value", shelby_loan_value_bot.run),
     ("rutherford_assessor", rutherford_assessor_bot.run),
     # Free: Clarksville open parcel layer (owner, mailing, last sale; the
     # layer blanks appraisals, so value = recent arm's-length sale only).
