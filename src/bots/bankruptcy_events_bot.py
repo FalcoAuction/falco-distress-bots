@@ -24,7 +24,11 @@ The feed carries the debtor's name, chapter, trustee and docket link, never a
 property address. bankruptcy_property_enricher matches debtors to homes
 (Middle TN only today). Classification lives in _court_rss.bk_event().
 
-Distress types: BK_DISMISSED, BK_DISMISSAL_MOTION, BK_STAY_RELIEF, BK_ABANDONED
+Distress types: BK_DISMISSED, BK_DISMISSAL_MOTION, BK_STAY_RELIEF, BK_ABANDONED,
+and BANKRUPTCY for each new voluntary petition (chapter 7 or 13), with the
+debtors, chapter and trustee the feed names. Petitions replaced the
+CourtListener feed on 2026-11-20: its free API tier does not allow commercial
+use, and these are the same public court records.
 """
 
 from __future__ import annotations
@@ -60,6 +64,36 @@ _EVENT_NOTE = {
     BK_STAY_RELIEF: "Lender relief from stay",
     BK_ABANDONED: "Trustee abandoning property",
 }
+
+
+def petition_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) -> LeadPayload | None:
+    """A new voluntary petition as a BANKRUPTCY lead, in the shape the parcel
+    matcher (court_id + debtor names) and the trustee outreach signal (chapter,
+    trustee, docket_number) read."""
+    entry = (item.get("entry_type") or "")
+    if not entry.lower().startswith("voluntary petition"):
+        return None
+    names = debtors(item.get("caption") or "")
+    case = item.get("case_number") or ""
+    if not names or not case:
+        return None
+    chapter = (item.get("chapter") or "").strip() or None
+    return LeadPayload(
+        bot_source=bot.name,
+        pipeline_lead_key=bot.make_lead_key(bot.name, f"{court}|{case}|PETITION"),
+        distress_type="BANKRUPTCY",
+        full_name=names[0],
+        owner_name_records="; ".join(names),
+        source_url=item.get("docket_url"),
+        admin_notes=f"Chapter {chapter or '?'} petition ({court} {case})"
+                    + (f"; trustee {item['trustee']}" if item.get("trustee") else ""),
+        raw_payload={
+            "source": "pacer_rss", "state": "TN", "court_id": court, "court": TN_BANKRUPTCY_COURTS[court],
+            "docket_number": case, "case_number": case, "case_name": item.get("caption"), "chapter": chapter,
+            "trustee": item.get("trustee"), "date_filed": (item.get("published") or "")[:10] or None,
+            "docket_url": item.get("docket_url"), "petition": entry,
+        },
+    )
 
 
 def build_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) -> LeadPayload | None:
@@ -106,9 +140,9 @@ class BankruptcyEventsBot(BotBase):
             items = self._feed(court)
             trustees.update(chapter7_trustees(court, items))
             for item in items:
-                lead = build_lead(self, court, item)
-                if lead:
-                    leads.setdefault(lead.pipeline_lead_key, lead)
+                for lead in (build_lead(self, court, item), petition_lead(self, court, item)):
+                    if lead:
+                        leads.setdefault(lead.pipeline_lead_key, lead)
         try:
             self.fill_trustees(trustees)
         except Exception as e:  # never cost the event leads over this

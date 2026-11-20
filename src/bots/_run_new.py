@@ -62,11 +62,9 @@ from . import hamilton_county_herald_bot
 from . import brock_scott_trustee_bot
 from . import mackie_wolf_trustee_bot
 from . import tn_probate_bot
-from . import courtlistener_bankruptcy_bot
 from . import court_rss_bot
 from . import bankruptcy_events_bot
 from . import shelby_substitute_trustee_bot
-from . import bankruptcy_schedule_d_bot
 from . import tn_public_notice_bot
 from . import notice_reparse_bot
 from . import court_notices_bot
@@ -171,7 +169,9 @@ NEW_BOTS = [
     # tn_public_notice + foreclosure_tennessee_bot covers probate notices
     # via the TN Press Association aggregator in the meantime.
     # ("tn_probate", tn_probate_bot.run),
-    ("courtlistener_bankruptcy", courtlistener_bankruptcy_bot.run),
+    # courtlistener_bankruptcy retired 2026-11-20: the free CourtListener API
+    # does not allow commercial use. New petitions come from the court RSS
+    # feeds in bankruptcy_events.
     # Free court RSS (no PACER/CourtListener account): vessel arrests in FL
     # + TN district courts, and FL bankruptcies that hold an aircraft or a
     # marine/aviation business. Feeds cover ~24h, so this must run daily.
@@ -183,7 +183,7 @@ NEW_BOTS = [
     # earliest foreclosure signal. 30s between requests (the register asks
     # for it), at most 6 new filings per run: about 7 minutes.
     ("shelby_substitute_trustee", shelby_substitute_trustee_bot.run),
-    ("bankruptcy_schedule_d", bankruptcy_schedule_d_bot.run),
+    # bankruptcy_schedule_d retired with it (it reads CourtListener RECAP).
     ("tn_public_notice", tn_public_notice_bot.run),
     # Re-reads stored notice excerpts: trustee sales filed as tax notices,
     # borrower names, sale dates. Before the owner-to-address enricher.
