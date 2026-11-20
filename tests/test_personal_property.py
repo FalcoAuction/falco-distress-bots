@@ -83,8 +83,21 @@ class LiquidationTests(unittest.TestCase):
         self.assertIn("Official Form 201", t["caveats"][0])
         self.assertEqual(t["contacts"]["bankruptcy_docket"], "https://cl/1")
 
-    def test_soft_entity_not_tagged(self):
-        self.assertIsNone(classify(lead("BANKRUPTCY", {"chapter": "7"}, full_name="MyEyeris, Inc.")))
+    def test_any_chapter_7_business_goes_to_the_trustee(self):
+        t = classify(lead("BANKRUPTCY", {"chapter": "7", "trustee": "LEMEH, EVA M"}, full_name="MyEyeris, Inc."))
+        self.assertEqual(t["categories"], ["business_assets"])
+        self.assertEqual(t["controller"], "chapter 7 trustee")
+        self.assertEqual(t["primary_contact"], "Trustee Eva M Lemeh")
+        self.assertTrue(t["routable"])
+        self.assertEqual(t["route_to"], "McLemore Auction Company")
+
+    def test_chapter_11_business_not_tagged(self):
+        self.assertIsNone(classify(lead("BANKRUPTCY", {"chapter": "11"}, full_name="MyEyeris, Inc.")))
+
+    def test_florida_and_court_sales_not_routable(self):
+        fl = classify(lead("BANKRUPTCY", {"chapter": "7", "state": "FL"}, full_name="ACME TRUCKING LLC"))
+        self.assertFalse(fl["routable"])
+        self.assertIn("Florida", fl["not_routable_reason"])
 
     def test_big_warn_without_hard_assets_not_tagged(self):
         warn = {"company": "Kroger Fulfillment Network LLC", "workers": 132}
