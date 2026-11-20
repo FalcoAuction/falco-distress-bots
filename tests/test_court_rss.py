@@ -133,3 +133,20 @@ class VesselLaneTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Chapter7TrusteeTests(unittest.TestCase):
+    def test_case_key_normalizes_judge_suffix_and_padding(self):
+        from src.bots._court_rss import case_key
+        self.assertEqual(case_key("3:26-bk-04209-CW"), "3:26-bk-04209")
+        self.assertEqual(case_key("3:26-bk-4209"), "3:26-bk-04209")
+        self.assertIsNone(case_key("26P1969"))
+
+    def test_only_chapter_7_entries_with_a_trustee(self):
+        from src.bots._court_rss import chapter7_trustees
+        items = [
+            {"case_number": "3:26-bk-04209-CW", "chapter": "7", "trustee": "Weiner, Robin R"},
+            {"case_number": "3:26-bk-05000", "chapter": "13", "trustee": "Rothschild, Henry E"},
+            {"case_number": "3:26-bk-05001", "chapter": "7", "trustee": None},
+        ]
+        self.assertEqual(chapter7_trustees("tnmb", items), {("tnmb", "3:26-bk-04209"): "Weiner, Robin R"})
