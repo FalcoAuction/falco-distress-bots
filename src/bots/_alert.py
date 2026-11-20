@@ -66,8 +66,8 @@ LOOKBACK_DAYS = 30
 # Failures that are decisions, not bugs. Listed, never alerted.
 ACKNOWLEDGED: Dict[str, str] = {
     "mtn_lis_pendens_rod": "ROD subscriptions not purchased; skipped_no_creds by design",
-    "courtlistener_bankruptcy": "skipped 2026-11-05: free API tier does not allow commercial use",
-    "bankruptcy_schedule_d": "depends on courtlistener_bankruptcy (skipped 2026-11-05)",
+    "courtlistener_bankruptcy": "retired 2026-11-20: free API tier does not allow commercial use; petitions come from court RSS",
+    "bankruptcy_schedule_d": "retired 2026-11-20 with courtlistener_bankruptcy",
     "tn_probate": "disabled 2026-05-06 pending a per-bot cap; the cap exists now, re-enabling is a decision",
 }
 
