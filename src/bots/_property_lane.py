@@ -29,10 +29,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from ._address import is_natural_person
 from ._field_confidence import phone_trust
 
-VERSION = "property-lane-2026-11-05"
+VERSION = "property-lane-2026-11-20"
 ACREAGE_LAND = 10.0          # a house on 10+ acres sells as land
 COMMERCIAL_MIN_VALUE = 25000
-COMMERCIAL_MAX_VALUE = 10_000_000   # bigger is institutional: refer it, don't work it
+COMMERCIAL_MAX_VALUE = 20_000_000   # bigger is institutional: refer it, don't work it
 LAND_MIN_VALUE = 3000
 
 _LAND_RE = re.compile(r"VACANT|FARM|AGRIC|FOREST|GREENBELT|TIMBER|PASTURE|ACREAGE|UNDEVELOPED|\bAGRI\b|"
@@ -70,7 +70,11 @@ _RELIGIOUS_OWNER_RE = re.compile(
 # the name and phone on it are usually the contractor's.
 STRONG_DISTRESS = {"PRE_FORECLOSURE", "FORECLOSURE", "LIS_PENDENS", "TAX_LIEN", "TAX_DELINQUENT", "PROBATE",
                    "BANKRUPTCY", "BUSINESS_CLOSURE", "REO", "COURT_SALE", "TAX_SALE", "TRUSTEE_NOTICE",
-                   "SOT", "NOD"}
+                   "SOT", "NOD",
+                   # lanes added 2026-11-20
+                   "HEIRS_PROPERTY", "ABSENTEE_LAND", "CHURCH_CLOSURE", "STALLED_BUILD", "PARTITION",
+                   "DIVORCE", "CONSERVATORSHIP", "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF",
+                   "BK_ABANDONED"}
 WEAK_DISTRESS = {"CODE_VIOLATION", "FIRE_DAMAGE", "VACANT"}
 LIVE_DISTRESS = STRONG_DISTRESS | WEAK_DISTRESS
 # State + ZIP at the end of a mailing line; Hamilton writes "HIXSON TN37343".
@@ -461,6 +465,10 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         out["exclude_reason"] = "permit_not_distress"
     elif not dt or dt not in LIVE_DISTRESS:
         out["exclude_reason"] = "no_live_distress"
+    elif dt in WEAK_DISTRESS and not out["stacked_distress"] and not _failing_structure(raw):
+        # A code ticket on a commercial building or a lot is not a reason to
+        # sell; a failing, burned or abandoned structure can be.
+        out["exclude_reason"] = "weak_signal_only"
     elif _sale_passed(row):
         out["exclude_reason"] = "sale_passed"
     elif not contact["tier"]:
@@ -477,4 +485,86 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         out["grade"] = "A" if (direct and value and strong) else "B" if (direct or (value and strong)) else "C"
     if lane == "land":
         out["land_flip"] = _land_flip(row, contact, acres, value)
+    out["readiness"] = readiness(row, raw, out)
     return out
+
+
+# ── readiness: every data point before paid enrichment ──────────────────────
+
+COUNTY_VALUE_SOURCES = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "tpad", "shelby_arcgis",
+                        "rutherford_arcgis", "williamson_inigo", "padctn_owner_match", "davidson_assessor",
+                        "williamson_assessor", "rutherford_assessor", "comptroller", "county_gis", "metro")
+
+
+def _failing_structure(raw: Dict[str, Any]) -> bool:
+    cond = raw.get("condition") or []
+    return isinstance(cond, list) and bool({"fire_damage", "dilapidated", "vacant_open"} & set(cond))
+
+
+def parcel_id(raw: Dict[str, Any]) -> Optional[str]:
+    for key, field in (("comptroller_parcel", "parcelid"), ("metro_parcel", "apn"), ("padctn", "parcel"),
+                       ("padctn", "parcel_id"), ("hamilton_assessor", "parcel_id"), ("tpad", "parcel_id"),
+                       ("rutherford_arcgis", "parcel_id"), ("williamson_inigo", "parcel"), ("shelby_arcgis", "parcel_id"),
+                       ("padctn_owner_match", "parcel")):
+        v = _d(raw.get(key)).get(field)
+        if v:
+            return str(v)
+    v = raw.get("parcel")
+    return str(v) if v and not str(v).upper().startswith("PER-") else None
+
+
+def value_source(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[str]:
+    """Where the value came from, if it is a county record (not a vendor guess)."""
+    src = str(row.get("property_value_source") or "").lower()
+    if src and any(k in src for k in COUNTY_VALUE_SOURCES):
+        return src
+    for key in COUNTY_VALUE_SOURCES:
+        rec = _d(raw.get(key))
+        if any(_num(rec.get(f)) for f in ("appraisal", "appraised", "total_appraisal", "appraised_value_num")):
+            return key
+    return None
+
+
+def last_sale(raw: Dict[str, Any]) -> Optional[str]:
+    for key, field in (("comptroller_parcel", "last_sale_date"), ("metro_parcel", "owned_since"),
+                       ("padctn", "sale_date"), ("hamilton_assessor", "sale_date"), ("tpad", "sale_date"),
+                       ("rutherford_arcgis", "sale_date"), ("williamson_inigo", "sale_date")):
+        v = _d(raw.get(key)).get(field)
+        if v:
+            return str(v)
+    return None
+
+
+def readiness(row: Dict[str, Any], raw: Dict[str, Any], lane: Dict[str, Any]) -> Dict[str, Any]:
+    """The data a commercial or land lead must carry before anyone pays to
+    skip trace it or check its liens. Missing items are named so the free
+    enrichers (or a person) know what to fill.
+
+    Required: owner of record and a known owner type, owner mailing address,
+    property address, county, parcel ID, a county value with its source, the
+    land use it was classified from, a forcing distress signal (not a code
+    ticket alone) and a source link. Land also needs acreage; commercial needs
+    its use (subtype or the land-use basis). The last sale is recorded but not
+    required (new parcels and inherited land often have none)."""
+    dt = (row.get("distress_type") or "").upper()
+    contact = lane.get("contact") or {}
+    checks = {
+        "owner_name": bool(row.get("owner_name_records") or row.get("full_name") or parcel_owner(raw)),
+        "owner_type": lane.get("owner_type") in ("person", "entity", "religious"),
+        "owner_mailing": bool(contact.get("mailing")),
+        "property_address": bool((row.get("property_address") or "").strip()),
+        "county": bool((row.get("county") or "").strip()),
+        "parcel_id": bool(parcel_id(raw)),
+        "county_value": bool(lane.get("value")) and bool(value_source(row, raw)),
+        "land_use": bool(lane.get("basis")),
+        "forcing_distress": dt in STRONG_DISTRESS or bool(lane.get("stacked_distress")) or _failing_structure(raw),
+        "source_link": bool(row.get("source_url") or raw.get("source_url") or raw.get("docket_url") or raw.get("source")),
+    }
+    if lane.get("lane") == "land":
+        checks["acreage"] = lane.get("acres") is not None
+    elif lane.get("lane") == "commercial":
+        checks["property_use"] = bool(lane.get("subtype") or lane.get("basis"))
+    missing = [k for k, ok in checks.items() if not ok]
+    return {"ready": not missing and not lane.get("exclude_reason"), "missing": missing,
+            "excluded": lane.get("exclude_reason"), "last_sale": last_sale(raw), "parcel_id": parcel_id(raw),
+            "value_source": value_source(row, raw)}

@@ -39,15 +39,18 @@ PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
 RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "davidson_tax_sale", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address",
-            "parcel")
+            "parcel",
+            # readiness (2026-11-20): condition tags and source/link fields
+            "condition", "source", "docket_url", "source_url")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
+                "property_value_source,"
                 "phone,alternate_phones,email,trustee_sale_date,"
                 "de_action:phone_metadata->decision_engine->>action,owner_class:phone_metadata->owner_class,"
                 "pm_batch:phone_metadata->batchdata_skip_trace,pm_resolver:phone_metadata->phone_resolver,"
                 "lane_tag:raw_payload->property_lane,"
                 + ",".join(f"rp_{k}:raw_payload->{k}" for k in RAW_KEYS))
 TABLES = {
-    "homeowner_requests_staging": _BASE_FIELDS + ",bot_source,staging_status",
+    "homeowner_requests_staging": _BASE_FIELDS + ",bot_source,staging_status,source_url",
     "homeowner_requests": _BASE_FIELDS + ",bot_source:source",
 }
 
@@ -109,6 +112,8 @@ def _tag(lane: Dict[str, Any]) -> Dict[str, Any]:
     tag["email"] = c["email"]
     if "land_flip" in lane:
         tag["land_flip"] = lane["land_flip"]
+    if "readiness" in lane:
+        tag["readiness"] = lane["readiness"]
     return tag
 
 

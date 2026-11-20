@@ -385,7 +385,8 @@ class BatchDataSkipTraceBot(BotBase):
                         client.table(table)
                         .select("id, property_address, owner_name_records, "
                                 "full_name, county, priority_score, "
-                                "phone_metadata, distress_type")
+                                "phone_metadata, distress_type, "
+                                "lane_tag:raw_payload->property_lane")
                         .is_("phone", "null")
                         .not_.is_("owner_name_records", "null")
                         .not_.is_("property_address", "null")
@@ -397,6 +398,11 @@ class BatchDataSkipTraceBot(BotBase):
                     if not rows:
                         break
                     for r in rows:
+                        # Commercial and land leads are traced only once they
+                        # carry every data point (property-lane readiness).
+                        lane = r.get("lane_tag") or {}
+                        if isinstance(lane, dict) and lane.get("lane") in ("commercial", "land")                                 and not (lane.get("readiness") or {}).get("ready"):
+                            continue
                         # Filter out rows with unwanted owner_class
                         pm = r.get("phone_metadata") or {}
                         if isinstance(pm, dict):

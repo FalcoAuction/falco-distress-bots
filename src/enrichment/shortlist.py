@@ -80,6 +80,13 @@ def screen(opportunity: Dict[str, Any], raw_payload: Optional[Dict[str, Any]], t
     days = (sale - today).days if sale else None
     if days is not None and 0 <= days < MIN_DAYS_TO_SALE:
         return False, {"reason": "sale_too_soon", "days_to_sale": days}
+    # Commercial and land leads must carry every data point first (readiness
+    # from the property-lane tagger) before a paid county lookup is spent.
+    lane = (raw_payload or {}).get("property_lane") or {}
+    if isinstance(lane, dict) and lane.get("lane") in ("commercial", "land"):
+        ready = (lane.get("readiness") or {})
+        if not ready.get("ready"):
+            return False, {"reason": "not_ready", "missing": ready.get("missing") or [lane.get("exclude_reason")]}
     check = (raw_payload or {}).get("lien_check") or {}
     checked = _as_date(check.get("checked_at"))
     if checked and (today - checked).days < RECHECK_DAYS:
