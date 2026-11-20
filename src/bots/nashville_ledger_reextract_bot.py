@@ -39,9 +39,8 @@ from .nashville_ledger_bot import (
 )
 
 
-CORE_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson"}
-STRETCH_COUNTIES = {"maury", "montgomery"}
-FOCUS_COUNTIES = CORE_COUNTIES | STRETCH_COUNTIES
+# All 41 Middle TN counties (free enrichment; paid bots keep their own lists).
+from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
 
 DETAIL_URL = "https://www.tnledger.com/Search/Details/ViewNotice.aspx"
 

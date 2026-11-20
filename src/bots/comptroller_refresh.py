@@ -93,6 +93,19 @@ def _open_index() -> sqlite3.Connection:
     return con
 
 
+def assessment_members(names: List[str]) -> List[str]:
+    """The ASSESSMENT_DATA dbf inside a county zip. The state builds the zips
+    on Windows, so member names use backslash separators;
+    on the Linux runner os.path.basename would not split them and every county
+    looked empty. Normalize before taking the base name."""
+    out = []
+    for m in names:
+        base = m.replace("\\", "/").rsplit("/", 1)[-1]
+        if base.upper().startswith("ASSESSMENT_DATA") and base.lower().endswith(".dbf"):
+            out.append(m)
+    return out
+
+
 def _refresh_county(session: requests.Session, con: sqlite3.Connection, name: str) -> Optional[int]:
     """Download one county zip, replace its rows, return the row count."""
     url = BASE + name + ".zip"
@@ -109,8 +122,7 @@ def _refresh_county(session: requests.Session, con: sqlite3.Connection, name: st
                 for chunk in res.iter_content(1 << 20):   # decodes any transfer compression
                     fh.write(chunk)
         with zipfile.ZipFile(zpath) as zf:
-            members = [m for m in zf.namelist() if os.path.basename(m).upper().startswith("ASSESSMENT_DATA")
-                       and m.lower().endswith(".dbf")]
+            members = assessment_members(zf.namelist())
             if not members:
                 log.warning(f"{name}: no ASSESSMENT_DATA dbf in zip")
                 return None

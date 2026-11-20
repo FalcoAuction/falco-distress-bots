@@ -167,5 +167,14 @@ class IndexTests(unittest.TestCase):
         self.assertEqual((lane["lane"], lane["subtype"]), ("commercial", "church"))
 
 
+class RefreshZipTests(unittest.TestCase):
+    def test_assessment_dbf_found_with_windows_or_posix_separators(self):
+        from src.bots.comptroller_refresh import assessment_members
+        names = ["Anderson\ASSESSMENT_DATA_01.dbf", "Anderson\Parcels_01.dbf", "Moore/ASSESSMENT_DATA_64.dbf",
+                 "Moore/Field Dictionary.xlsx", "ASSESSMENT_DATA_99.DBF"]
+        self.assertEqual(assessment_members(names),
+                         ["Anderson\ASSESSMENT_DATA_01.dbf", "Moore/ASSESSMENT_DATA_64.dbf", "ASSESSMENT_DATA_99.DBF"])
+
+
 if __name__ == "__main__":
     unittest.main()

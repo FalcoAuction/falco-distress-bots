@@ -28,8 +28,7 @@ from bs4 import BeautifulSoup
 from ._base import BotBase, LeadPayload
 
 WARN_URL = "https://www.tn.gov/workforce/general-resources/major-publications0/major-publications-redirect/reports.html"
-FOCUS_COUNTIES = {"davidson", "williamson", "sumner", "rutherford", "wilson",
-                  "maury", "montgomery", "cheatham", "robertson", "dickson"}
+from ._regions import MIDDLE_TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
 LOOKBACK_DAYS = 365
 
 _DATE_RE = re.compile(r"(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})")
