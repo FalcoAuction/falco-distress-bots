@@ -91,15 +91,24 @@ def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
             raw_payload=raw,
             source_url=source_url,
         )
+    partition = bool(PARTITION_ACTION_RE.search(raw["text"]))
+    review = {} if partition else cn.court_sale_review(row["lines"])
+    if review.get("stage") in {"no_sale_in_notice", "trustee_sale"}:
+        return None
+    if review:
+        raw["court_sale_review"] = review
     fields = cn.extract_court_sale(row["lines"])
+    if review.get("docket"):
+        fields = {**fields, "reviewed_docket": review["docket"]}
     raw["court_notice"] = fields
     source, ident = lead_key(kind, fields["county"], fields["docket"], row["notice_id"])
     return LeadPayload(
         bot_source=bot_name,
         pipeline_lead_key=BotBase.make_lead_key(source, ident),
         county=fields["county"],
-        distress_type="PARTITION" if PARTITION_ACTION_RE.search(raw["text"]) else "COURT_SALE",
-        admin_notes=f"Court-ordered sale or partition {fields['docket'] or '?'} ({fields['county'] or '?'}): {fields['headline'][:200]}",
+        property_address=review.get("property_address"),
+        distress_type="PARTITION" if partition else "COURT_SALE",
+        admin_notes=f"{review.get('stage', 'partition')}: {review.get('docket') or fields['docket'] or '?'} ({fields['county'] or '?'}): {fields['headline'][:200]}",
         raw_payload=raw,
         source_url=source_url,
     )
