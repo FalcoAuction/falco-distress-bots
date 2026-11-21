@@ -20,6 +20,22 @@ class EmptyClient:
 
 
 class FreeDataTests(unittest.TestCase):
+    def test_shelby_request_budget_goes_to_queue_first(self):
+        class Pages(EmptyClient):
+            pages = iter([[{"id": "first", "raw_payload": {}},
+                           {"id": "priority", "raw_payload": {"lien_check": {"status": "pending_free_lookup"}}}], []])
+            def execute(self):
+                return SimpleNamespace(data=next(self.pages))
+        bot = ShelbyFreeChainBot(write=False, max_fetches=1)
+        seen = []
+        def enrich(row):
+            seen.append(row["id"])
+            bot.fetched += 1
+            return {}
+        with patch("src.bots.shelby_free_chain_bot._supabase", return_value=Pages()), patch.object(bot, "enrich", side_effect=enrich):
+            bot.run()
+        self.assertEqual(seen, ["priority"])
+
     def test_hmda_writer_never_changes_balance(self):
         class Capture(EmptyClient):
             def update(self, payload):

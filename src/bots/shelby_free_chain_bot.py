@@ -184,27 +184,31 @@ class ShelbyFreeChainBot(BotBase):
             return {"status": "no_supabase"}
         stats = Counter()
         after = "00000000-0000-0000-0000-000000000000"
-        while self.fetched < self.max_fetches:
+        candidates = []
+        while True:
             rows = (client.table("homeowner_requests_staging").select("id,raw_payload,phone_metadata,property_address,owner_name_records")
                 .ilike("county", "shelby%").gt("id", after).order("id").limit(100)
                 .or_(f"trustee_sale_date.gte.{date.today().isoformat()},trustee_sale_date.is.null").execute().data) or []
             if not rows:
                 break
-            for row in rows:
-                if self.fetched >= self.max_fetches:
-                    break
-                stats["scanned"] += 1
-                try:
-                    patch = self.enrich(row)
-                    if patch:
-                        stats["changed"] += 1
-                        if self.write:
-                            stats["written"] += apply(client, "homeowner_requests_staging", row, patch)
-                except RuntimeError as exc:
-                    stats["request_errors"] += 1
-                    # Do not hammer a blocked or changed source.
-                    return {"name": self.name, "status": "retry_needed", "error": str(exc), "fetched": self.fetched, **stats}
+            candidates.extend(rows)
             after = rows[-1]["id"]
+        # The ranked lien queue gets the finite request budget first.
+        candidates.sort(key=lambda r: ((r.get("raw_payload") or {}).get("lien_check") or {}).get("status") != "pending_free_lookup")
+        for row in candidates:
+            if self.fetched >= self.max_fetches:
+                break
+            stats["scanned"] += 1
+            try:
+                patch = self.enrich(row)
+                if patch:
+                    stats["changed"] += 1
+                    if self.write:
+                        stats["written"] += apply(client, "homeowner_requests_staging", row, patch)
+            except RuntimeError as exc:
+                stats["request_errors"] += 1
+                # Do not hammer a blocked or changed source.
+                return {"name": self.name, "status": "retry_needed", "error": str(exc), "fetched": self.fetched, **stats}
         return {"name": self.name, "status": "ok", "fetched": self.fetched,
                 "staged": stats["written"], **stats}
 
