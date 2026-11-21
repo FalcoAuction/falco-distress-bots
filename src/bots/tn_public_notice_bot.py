@@ -336,6 +336,10 @@ class TnPublicNoticeBot(BotBase):
             if re.match(r"(?:NOTICE TO THE DELINQUENT|Size:\s*2 columns by 3 inches SHELBY COUNTY TAX SALE)",
                         excerpt, re.I) and not re.search(r"\b(?:parcel|property address)\b", excerpt, re.I):
                 return None
+            if ("in its own behalf" in excerpt.lower() and re.search(
+                    r"MUNICIPALITIES OF [A-Z, ]+\s*\.{3}\s*$", excerpt, re.I)
+                    and not re.search(r"\b(?:parcel|property address)\b", excerpt, re.I)):
+                return None
         if county == "maury" and distress == "TAX_LIEN" and kind != "foreclosure":
             # The category contains county meeting announcements and citywide rate changes.
             municipal = re.match(
