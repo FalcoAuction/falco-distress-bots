@@ -178,7 +178,7 @@ class LeadBuildingTests(unittest.TestCase):
     def test_court_sale_and_ignored_kinds(self):
         sale = self.bot.build_lead("court_notices", "nashville_ledger", "https://www.tnledger.com", self.date,
                                    {"notice_id": "CL5", "lines": PARTITION})
-        self.assertEqual(sale.distress_type, "COURT_SALE")
+        self.assertEqual(sale.distress_type, "PARTITION")
         self.assertIsNone(self.bot.build_lead("court_notices", "x", "https://x", self.date, {"notice_id": "CL6", "lines": JUVENILE}))
         self.assertIsNone(self.bot.build_lead("court_notices", "x", "https://x", self.date,
                                               {"notice_id": "CL7", "lines": ["NOTICE TO CREDITORS", "estate claims"]}))

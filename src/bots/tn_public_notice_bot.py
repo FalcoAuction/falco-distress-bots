@@ -325,7 +325,9 @@ class TnPublicNoticeBot(BotBase):
         filed_as = None
         court_names: List[str] = []
         court_address: Optional[str] = None
-        if distress == "COURT_ORDER":
+        if distress in ("PRE_FORECLOSURE", "COURT_ORDER") and court_order.PARTITION_ACTION_RE.search(excerpt):
+            distress = "PARTITION"
+        elif distress == "COURT_ORDER":
             ck = court_order.kind(excerpt)
             if ck:
                 distress = ck
@@ -335,7 +337,7 @@ class TnPublicNoticeBot(BotBase):
                 distress = "PRE_FORECLOSURE"
             else:
                 return None   # bids, storage and towing sales, other auctioneers' ads
-        if kind == "foreclosure" and distress != "PROBATE" and distress != "PRE_FORECLOSURE":
+        if kind == "foreclosure" and distress not in ("PROBATE", "PRE_FORECLOSURE", "PARTITION"):
             filed_as, distress = distress, "PRE_FORECLOSURE"
         property_address = court_address or self._extract_address(excerpt, city)
         parcel = self._extract_parcel(excerpt)
