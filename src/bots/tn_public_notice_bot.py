@@ -320,6 +320,23 @@ class TnPublicNoticeBot(BotBase):
         # Sumner and Montgomery trustee sales arrive filed as "Delinquent
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
+        tax_lead = None
+        if county == "hamilton" and distress == "TAX_LIEN":
+            # Newspaper search categories also return meetings, court calendars
+            # and sales in other counties. A case number is not a street number.
+            if re.search(r"\b(?:substitute\s+)?trustee['\u2019]?s?\s+sale\b", excerpt, re.I):
+                kind = "foreclosure"
+                venue = re.search(r"state of Tennessee,?\s+([a-z]+) county", excerpt, re.I)
+                if venue and venue[1].lower() != county:
+                    county, city = venue[1].lower(), ""
+            else:
+                tax_text = re.search(r"delinquent\s+(?:property\s+|real estate\s+)?tax|tax (?:sale|cause)", excerpt, re.I)
+                parcel = re.search(r"\b(?:map(?:/group)?/parcel|parcel(?: number| no\.?| id)?)\s*[:#]\s*([0-9]{3}[A-Z]?[ -]+(?:[A-Z][ -]+)?[0-9]{3}(?:\.[0-9]+)?)\b", excerpt, re.I)
+                situs = re.search(r"\b(?:property address|street address|located at)\s*[:#]?\s*(\d{1,6}\s+[^;\n]{3,90})", excerpt, re.I)
+                if not tax_text or not (parcel or (situs and self._extract_address(situs[1], city))):
+                    return None
+                tax_lead = (parcel[1] if parcel else None, self._extract_address(situs[1], city) if situs else None)
+                kind = None
         if kind == "general_tax":
             return None
         filed_as = None
@@ -341,6 +358,8 @@ class TnPublicNoticeBot(BotBase):
             filed_as, distress = distress, "PRE_FORECLOSURE"
         property_address = court_address or self._extract_address(excerpt, city)
         parcel = self._extract_parcel(excerpt)
+        if tax_lead is not None:
+            parcel, property_address = tax_lead
         names = court_names or (trustee_notice.borrowers(excerpt) if distress == "PRE_FORECLOSURE" else [])
         full_name = names[0] if names else self._extract_subject(excerpt, distress)
         sale_date = trustee_notice.sale_date(excerpt) if distress == "PRE_FORECLOSURE" else None
