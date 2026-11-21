@@ -62,7 +62,7 @@ _EVENT_NOTE = {
     BK_DISMISSED: "Chapter 13 case dismissed",
     BK_DISMISSAL_MOTION: "Chapter 13 dismissal requested",
     BK_STAY_RELIEF: "Lender relief from stay",
-    BK_ABANDONED: "Trustee abandoning property",
+    BK_ABANDONED: "Abandonment filing",
 }
 
 
@@ -96,6 +96,14 @@ def petition_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) 
     )
 
 
+def abandonment_review(event):
+    """Court RSS identifies the filing. Asset identity and sale authority need separate evidence."""
+    stage = {"motion": "request_filed", "notice": "notice_filed",
+             "order_on_motion": "order_outcome_unverified", "order": "order_outcome_unverified"}[event["status"]]
+    return {"stage": stage, "source": "court_rss_heading", "entry": event["entry"],
+            "status": "needs_document_review"}
+
+
 def build_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) -> LeadPayload | None:
     """One staged lead for a classified docket entry, or None."""
     ev = bk_event(item)
@@ -106,6 +114,10 @@ def build_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) -> 
         return None
     case = item.get("case_number") or ""
     note = f"{_EVENT_NOTE[ev['type']]} ({court} {case}, ch. {item.get('chapter') or '?'}): {_STATUS_NOTE[ev['status']]}"
+    review = abandonment_review(ev) if ev["type"] == BK_ABANDONED else None
+    if review:
+        note = (f"Abandonment filing ({court} {case}): {ev['entry']}. "
+                "The heading does not establish the asset, outcome or authority to sell.")
     if item.get("trustee"):
         note += f"; trustee {item['trustee']}"
     return LeadPayload(
@@ -121,6 +133,7 @@ def build_lead(bot: "BankruptcyEventsBot", court: str, item: Dict[str, Any]) -> 
             "case_number": case, "case_name": item.get("caption"), "chapter": item.get("chapter"),
             "trustee": item.get("trustee"), "docket_url": item.get("docket_url"),
             "bk_event": ev, "event_seen": item.get("published"),
+            **({"abandonment_review": review} if review else {}),
         },
     )
 
