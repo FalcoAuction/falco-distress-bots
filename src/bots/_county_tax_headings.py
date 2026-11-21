@@ -49,7 +49,7 @@ def newspaper_tax_heading(county, excerpt):
     if county not in _CIVIC_OR_PRIVATE:
         return None
     text = " ".join(excerpt.split()).replace("’", "'")
-    if re.search(r"\b(?:delinquent (?:real (?:property|estate) |property )?tax|tax sale|back taxes)", text, re.I):
+    if re.search(r"\b(?:delinquent (?:.{0,35}?\btax|taxpayer)|tax (?:sale|suit)|back taxes)", text, re.I):
         return None
     if county in _FORECLOSURE and re.match(_FORECLOSURE[county], text, re.I):
         return "foreclosure"

@@ -21,6 +21,7 @@ class CountyTaxHeadings(unittest.TestCase):
                 self.assertIsNotNone(self.build("knox", text))
                 self.assertEqual(self.build(county, text, "PROBATE").distress_type, "PROBATE")
                 self.assertIsNotNone(self.build(county, text + " Delinquent real property taxes"))
+                self.assertIsNotNone(self.build(county, text + " Notice to delinquent ad valorem taxpayers"))
 
     def test_genuine_notices_survive(self):
         for county, text in {
@@ -40,4 +41,3 @@ class CountyTaxHeadings(unittest.TestCase):
         }.items():
             with self.subTest(county=county):
                 self.assertEqual(self.build(county, text).distress_type, "PRE_FORECLOSURE")
-
