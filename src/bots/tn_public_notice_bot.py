@@ -354,6 +354,22 @@ class TnPublicNoticeBot(BotBase):
                 r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE The City of Ripley)", text, re.I)
             if civic_notice and not re.search(r"\b(?:delinquent (?:real property |property )?tax|tax sale|back taxes)", text, re.I):
                 return None
+        if county == "carroll" and distress == "TAX_LIEN":
+            text = " ".join(excerpt.split())
+            tax_claim = re.search(r"\b(?:delinquent\s+(?:(?:real\s+)?property\s+|real estate\s+)?tax|"
+                                  r"tax (?:lien|sale|suit)|back taxes|unpaid (?:property )?tax)", text, re.I)
+            if not tax_claim and re.match(r"TS#:\s*[\w-]+\s+Whereas,", text, re.I) and re.search(
+                    r"\bby Deed of\s*Trust\b", text, re.I):
+                kind = "foreclosure"  # Newspaper OCR joins "ofTrust".
+            elif not tax_claim and kind != "foreclosure" and re.search(
+                    r"Trezevant Board of Mayor and Aldermen.*zoning map amendment|"
+                    r"property assessment records of Carroll County will be available for public inspection|"
+                    r"NOTICE TO CREDITORS.*PROBATE CASE NO|lease-to-own storage building has been left unattended|"
+                    r"duty of the Grand Jurors to investigate|whereabouts of the father.*unknown|"
+                    r"bid on the real property in this Estate has been raised|"
+                    r"above styled Estate.*Probate Minute Book|CLERK AND MASTER AUCTION.*Attorney for Estate",
+                    text, re.I):
+                return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
