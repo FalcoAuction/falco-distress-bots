@@ -32,6 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ._base import BotBase, LeadPayload
 from . import _court_notices as cn
+from ._court_order import PARTITION_ACTION_RE
 
 PUBLICATIONS: List[Dict[str, Any]] = [
     # The Ledger publishes notices weekly, on Fridays.
@@ -97,7 +98,7 @@ def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
         bot_source=bot_name,
         pipeline_lead_key=BotBase.make_lead_key(source, ident),
         county=fields["county"],
-        distress_type="COURT_SALE",
+        distress_type="PARTITION" if PARTITION_ACTION_RE.search(raw["text"]) else "COURT_SALE",
         admin_notes=f"Court-ordered sale or partition {fields['docket'] or '?'} ({fields['county'] or '?'}): {fields['headline'][:200]}",
         raw_payload=raw,
         source_url=source_url,

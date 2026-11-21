@@ -23,6 +23,8 @@ import re
 from typing import List, Optional
 
 PARTITION_RE = re.compile(r"\bpartition\b", re.I)
+PARTITION_ACTION_RE = re.compile(
+    r"\b(?:complaint|petition|action|suit)\s+(?:for|to)\s+partition\b|\bpartition\s+(?:action|suit|proceeding|by sale)\b", re.I)
 COURT_SALE_RE = re.compile(
     r"clerk\s*(?:and|&)\s*master'?s?\s+(?:sale|auction)|clerk\s*(?:and|&)\s*master\b.{0,80}\b(?:sell|sale|auction)"
     r"|special\s+(?:master|commissioner)|commissioner'?s\s+sale|receiver'?s?\s+(?:auction|sale)"
