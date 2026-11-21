@@ -56,6 +56,7 @@ _REVIEWED = {
         "7973ebba34be5edf9e196f3739431752218e09d378f9aa498a2187f504bb0f14": "Mortgage trustee sale",
     },
     "cumberland": {
+        "a3ecfb8fdea5ea87820742983d5077c730c07087f0833895119b05925a6c5f35": "Completed Fairfield Glade county resale, deed 1759/1353",
         "cbb28e19315404780a76af278f9303b7321982a97b05ad6ff2f3eaa2f9f08cda": "General property-tax billing or collection announcement",
         "cc8c2cc08d23d2f37490811debcc8bf9ce2a0f5331457bac9eb0e567b78f5165": "Government budget or appropriation",
     },
