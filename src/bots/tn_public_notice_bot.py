@@ -321,6 +321,21 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "shelby" and distress == "TAX_LIEN" and kind != "foreclosure":
+            # Category 22 includes environmental warrants, rate hearings and
+            # case-wide announcements. The trustee extract identifies the parcels.
+            if re.search(r"THIRTIETH JUDICIAL DISTRICT AT MEMPHIS Civil Warrant No\.|"
+                         r"CH-26-0619 Part I TOWN OF COLLIERVILLE|"
+                         r"NOTICE OF SUBSTITUE TRUSTEE.S SALE|"
+                         r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RECAPTURE RATE|"
+                         r"CITY OF MEMPHIS\s+\d{4} AD VALOREM PROPERTY TAXES|"
+                         r"Ordinance No[.: ]+59(?:81|87)\b|"
+                         r"Board of Mayor and Aldermen of the City of Germantown will hold public hearings|"
+                         r"Town of Arlington.{0,140}Ordinance 2026-06", excerpt, re.I | re.S):
+                return None
+            if re.match(r"(?:NOTICE TO THE DELINQUENT|Size:\s*2 columns by 3 inches SHELBY COUNTY TAX SALE)",
+                        excerpt, re.I) and not re.search(r"\b(?:parcel|property address)\b", excerpt, re.I):
+                return None
         if county == "maury" and distress == "TAX_LIEN" and kind != "foreclosure":
             # The category contains county meeting announcements and citywide rate changes.
             municipal = re.match(
