@@ -103,10 +103,11 @@ class LiquidationTests(unittest.TestCase):
         warn = {"company": "Kroger Fulfillment Network LLC", "workers": 132}
         self.assertIsNone(classify(lead("BUSINESS_CLOSURE", {"warn": warn})))
 
-    def test_big_hard_asset_warn_is_a(self):
+    def test_large_warn_is_research_only(self):
         warn = {"company": "Smoky Mountain Logistics, LLC", "workers": 100}
         t = classify(lead("BUSINESS_CLOSURE", {"warn": warn}))
-        self.assertEqual((t["lane"], t["grade"]), ("business_liquidation", "A"))
+        self.assertFalse(t["routable"])
+        self.assertEqual((t["lane"], t["grade"]), ("business_liquidation", "B"))
 
 
 class SeizureTests(unittest.TestCase):

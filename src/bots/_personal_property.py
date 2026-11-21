@@ -248,6 +248,9 @@ def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: 
     routable, why_not = True, None
     if region == "FL":
         routable, why_not = False, "Florida: no auction partner there yet"
+    elif dt == "BUSINESS_CLOSURE" and isinstance(raw.get("warn"), dict):
+        routable, why_not = False, "Confirm specific surplus assets and the authorized seller"
+        controller = "Asset owner or authorized disposition manager unverified"
     elif lane == "vessel_arrest":
         routable, why_not = False, "the court sells it; the plaintiff's counsel is a relationship, not a seller"
     elif lane == "vessel_lien" and not c.get("owner"):
@@ -272,6 +275,13 @@ def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: 
         basis = "business equipment on the county tangible personal property roll"
     if not tag.get("est_value_min") and lane not in _VALUE_BASIS:
         basis = "unknown: confirm on the first call"
+    if region == "TN" and dt == "BUSINESS_CLOSURE" and isinstance(raw.get("warn"), dict):
+        tag["grade"] = "B"
+        primary = "Ask the employer who handles surplus assets"
+        if not tag.get("est_value_min"):
+            basis = "No documented asset value"
+        if raw["warn"].get("asset_disposition") == "sold":
+            why_not = "Documented equipment sale completed"
     tag.update({
         "region": region, "controller": controller, "routable": routable, "not_routable_reason": why_not,
         "route_to": ROUTE_TO if routable else None, "value_basis": basis,
@@ -425,7 +435,7 @@ def _liquidation(lead, raw, planes, dt):
         return None   # national closures move their equipment; only hard-asset businesses qualify
     workers = _num(warn.get("workers")) if warn else None
     event = raw.get("sunbiz_event") if isinstance(raw.get("sunbiz_event"), dict) else None
-    head = ("WARN closure" if warn else f"{event['description'].lower()} filed {event['filed']}" if event
+    head = ("WARN employment notice" if warn else f"{event['description'].lower()} filed {event['filed']}" if event
             else "chapter " + (chapter or "?") + " business bankruptcy")
     signals = [f"{head}: {name}",
                _ffl_signal(lic) if lic else _equipment_signal(equip, top) if big

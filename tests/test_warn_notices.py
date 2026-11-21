@@ -16,6 +16,14 @@ PAGE = """<table><tr><th>Date of Posting</th><th>Company</th><th>County</th><th>
 
 
 class WarnTests(unittest.TestCase):
+    def test_letter_distinguishes_layoff_and_excludes_state_office(self):
+        facts = w.letter_review("220 French Landing Drive, Nashville TN 37243. "
+                                "Notifying the agency of a permanent layoff. "
+                                "The affected location is located at 15 Oak St, Memphis TN 38103.")
+        self.assertEqual(facts["event_type"], "layoff")
+        self.assertEqual(facts["worksite"], "15 Oak St, Memphis TN 38103")
+        self.assertEqual(facts["asset_disposition"], "unverified")
+
     def test_parse(self):
         rows = w.parse_warn(PAGE)
         self.assertEqual(len(rows), 3)
