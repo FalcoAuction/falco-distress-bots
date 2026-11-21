@@ -90,8 +90,23 @@ def parse_results(page_html: str) -> List[Dict[str, Any]]:
             "grantees": _lines(cells[4]),
             "recorded": _iso(_text(cells[5])),
             "detail_url": f"{BASE}/{_html.unescape(link['href'])}" if link else None,
+            "transfer_amount": _money(_text(cells[6])) if len(cells) > 6 else None,
+            "mortgage_amount": _money(_text(cells[7])) if len(cells) > 7 else None,
+            "street_number": _text(cells[8]) if len(cells) > 8 else None,
+            "street_name": _text(cells[9]) if len(cells) > 9 else None,
+            "city": _text(cells[10]) if len(cells) > 10 else None,
+            "state": _text(cells[11]) if len(cells) > 11 else None,
+            "zip": _text(cells[12]) if len(cells) > 12 else None,
         })
     return rows
+
+
+def _money(value: str) -> Optional[float]:
+    try:
+        amount = float(value.replace(",", "").replace("$", ""))
+        return amount if amount > 0 else None
+    except (ValueError, AttributeError):
+        return None
 
 
 def _labeled(text: str, label: str) -> Optional[str]:

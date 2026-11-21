@@ -120,6 +120,9 @@ from . import decision_engine_bot
 from . import hmda_enricher_bot
 from . import mortgage_amortizer_bot
 from . import lien_shortlist_bot
+from . import free_lien_review_bot
+from . import shelby_free_chain_bot
+from . import free_county_completion_bot
 from . import middle_tn_skiptrace_bot
 from . import enformion_skip_trace_bot
 from . import middle_tn_twilio_lookup_bot
@@ -313,6 +316,9 @@ NEW_BOTS = [
     # Free: queues today's best Middle TN leads for a county Register of
     # Deeds lien check (raw_payload.lien_check). Reads lead_opportunities.
     ("lien_shortlist", lien_shortlist_bot.run),
+    ("free_lien_review", free_lien_review_bot.run),
+    ("shelby_free_chain", shelby_free_chain_bot.run),
+    ("free_county_completion", free_county_completion_bot.run),
     ("middle_tn_skiptrace", middle_tn_skiptrace_bot.run),
     # Enformion waterfall AFTER BatchData (targets its no-phone misses +
     # cross-verifies unverified primaries). No-ops without

@@ -640,38 +640,14 @@ class HmdaEnricherBot(BotBase):
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         }
         update: Dict[str, Any] = {"phone_metadata": pm}
-        # Promote to mortgage_balance if confidence >= 0.75 (sale-anchored)
-        existing = lead.get("mortgage_balance")
-        if confidence >= 0.75 and not existing:
-            update["mortgage_balance"] = int(match["principal"])
+        # Origination principal stays in mortgage_signal, never the payoff column.
+        pm["mortgage_signal"]["kind"] = "original_principal"
 
         try:
             client.table(table).update(update).eq("id", lead["id"]).execute()
         except Exception as e:
             self.logger.warning(f"  update failed id={lead['id']}: {e}")
             return
-
-        # Provenance for live table only
-        if (
-            update.get("mortgage_balance")
-            and table == "homeowner_requests"
-        ):
-            try:
-                record_field(
-                    client, lead["id"], "mortgage_balance",
-                    int(match["principal"]),
-                    "hmda_match",
-                    confidence=confidence,
-                    metadata={
-                        "lei": match["lei"],
-                        "lender": match["lender_name"],
-                        "match_year": match["match_year"],
-                        "candidate_count": match["candidate_count"],
-                        "tract": match["tract"],
-                    },
-                )
-            except Exception as e:
-                self.logger.warning(f"  provenance fail id={lead['id']}: {e}")
 
     # ── status helpers ────────────────────────────────────────────────────
     def _fail(self, started, msg: str) -> Dict[str, Any]:

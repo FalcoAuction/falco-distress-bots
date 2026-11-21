@@ -36,6 +36,7 @@ from ..bots._regions import TN_COUNTIES as IN_SCOPE  # noqa: E402
 # most outer Middle Tennessee counties at $40 to $45 a month plus $20 for each
 # extra county.
 REGISTER_SYSTEM = {
+    "shelby": "shelby_register_free",
     "davidson": "davidson_portal",        # davidsonportal.com, $50/mo
     "williamson": "williamson_proaccess",  # ProAccess, $50/mo or $100 unlimited
     "rutherford": "ustitlesearch",         # existing account, unlimited
@@ -91,7 +92,8 @@ def screen(opportunity: Dict[str, Any], raw_payload: Optional[Dict[str, Any]], t
     checked = _as_date(check.get("checked_at"))
     if checked and (today - checked).days < RECHECK_DAYS:
         return False, {"reason": "checked_recently", "checked_at": checked.isoformat()}
-    if check.get("status") == "queued" and not checked:
+    if check.get("status") in {"queued", "pending_free_lookup", "needs_free_records_review",
+                               "partial_review_required", "pending", "needs_instrument_or_parcel", "needs_parcel_review"} and not checked:
         return False, {"reason": "already_queued"}
     return True, {
         "county": county,

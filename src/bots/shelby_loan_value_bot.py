@@ -13,8 +13,8 @@ index:
     login; the same pages shelby_substitute_trustee reads). Memphis Daily
     News notices carry the deed of trust instrument number; substitute
     trustee leads already carry the loan.
-  - LTV_ASSUMED 0.95: most Memphis purchase loans are 90 to 97%; refinances
-    run lower, which only means the true value is higher. Conservative.
+  - LTV_ASSUMED 0.95 is an unverified screening assumption. Refinances,
+    junior loans and property condition can produce errors in either direction.
   - FHFA all-transactions index for the Memphis MSA (_memphis_hpi.py).
 
 Written as property_value with property_value_source

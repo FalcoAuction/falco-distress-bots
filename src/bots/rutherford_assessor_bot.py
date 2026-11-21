@@ -191,30 +191,35 @@ class RutherfordAssessorBot(BotBase):
 
     def _candidates(self, client) -> List[Dict[str, Any]]:
         out = []
+        cities = ("murfreesboro", "smyrna", "la vergne", "lavergne", "eagleville")
         for table in ("homeowner_requests", "homeowner_requests_staging"):
-            try:
-                q = (
-                    client.table(table)
-                    # Lean columns: pulling raw_payload for 500 rows hit the
-                    # 8s statement timeout and left the run with ~15 leads.
-                    .select("id, property_address, county, owner_name_records, property_value")
-                    .or_("county.eq.rutherford,property_address.ilike.%murfreesboro%,property_address.ilike.%smyrna%,property_address.ilike.%la vergne%,property_address.ilike.%lavergne%,property_address.ilike.%eagleville%")
-                    .is_("property_value", "null")
-                    .is_("raw_payload->rutherford_arcgis", "null")
-                    .not_.is_("property_address", "null")
-                    # Live sale dates first; unordered, the cap filled
-                    # with whatever Postgres returned and upcoming sales
-                    # could wait indefinitely.
-                    .order("trustee_sale_date", desc=True, nullsfirst=False)
-                    .limit(500)
-                    .execute()
-                )
-                rows = getattr(q, "data", None) or []
-                for r in rows:
-                    r["__table__"] = table
-                    out.append(r)
-            except Exception as e:
-                self.logger.warning(f"candidates query on {table} failed: {e}")
+            after = "00000000-0000-0000-0000-000000000000"
+            eligible = []
+            while True:
+                # Index-ordered scalar reads avoid sorting a statewide JSON/
+                # substring scan under PostgREST's eight-second timeout.
+                rows = (client.table(table)
+                    .select("id,property_address,county,owner_name_records,property_value,trustee_sale_date")
+                    .gt("id", after).order("id").limit(1000).execute().data) or []
+                if not rows:
+                    break
+                selected = [r for r in rows if r.get("property_value") is None
+                    and r.get("property_address") is not None and (
+                        str(r.get("county") or "").lower().removesuffix(" county").strip() == "rutherford"
+                        or any(city in str(r.get("property_address") or "").lower() for city in cities))]
+                # Read JSON only for the small set of matching IDs. A miss
+                # marker still prevents repeated county requests.
+                for offset in range(0, len(selected), 100):
+                    chunk = selected[offset:offset + 100]
+                    marked = (client.table(table).select("id,marker:raw_payload->rutherford_arcgis")
+                        .in_("id", [r["id"] for r in chunk]).execute().data) or []
+                    unchecked = {r["id"] for r in marked if r.get("marker") is None}
+                    eligible.extend({**r, "__table__": table} for r in chunk if r["id"] in unchecked)
+                after = rows[-1]["id"]
+                if len(rows) < 1000:
+                    break
+            eligible.sort(key=lambda r: r.get("trustee_sale_date") or "", reverse=True)
+            out.extend(eligible[:500])
         return out
 
     @staticmethod
