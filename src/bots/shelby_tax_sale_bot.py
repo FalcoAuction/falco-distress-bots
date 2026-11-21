@@ -11,6 +11,7 @@ from uuid import NAMESPACE_URL, uuid5
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload, _supabase
+from ._owner_lookup import LegacyTLSAdapter
 
 SCHEDULE = "https://shelbycountytrustee.com/191/Tax-Sale-Schedule"
 EXTRACT = "https://scgpublic.s3.amazonaws.com/TaxSaleExtract.csv"
@@ -115,6 +116,12 @@ class ShelbyTaxSaleBot(BotBase):
     description = "Upcoming real property tax sales on the Shelby County Trustee parcel list"
     expected_min_yield = 0
     frozen_after_runs = 60
+
+    def __init__(self):
+        super().__init__()
+        # Only the trustee's parcel host needs the older initial TLS handshake.
+        host = "https://apps2.shelbycountytrustee.com/"
+        self.session.mount(host, LegacyTLSAdapter(max_retries=self.session.get_adapter(host).max_retries))
 
     def scrape(self):
         self.snapshot_complete = False
