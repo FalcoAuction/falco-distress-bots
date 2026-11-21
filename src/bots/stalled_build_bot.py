@@ -110,7 +110,8 @@ class StalledBuildBot(BotBase):
                 parcels.setdefault(a.get("APN"), a)
             offset = 0
             while True:
-                response = self.fetch(NASHVILLE_CODES_ENDPOINT, params={
+                # POST keeps the 100-parcel filter below proxy URL limits.
+                response = self.fetch(NASHVILLE_CODES_ENDPOINT, method="POST", data={
                     "where": f"Property_APN IN ({ids}) AND Status='OPEN'", "outFields": "*",
                     "returnGeometry": "false", "f": "json", "resultOffset": offset,
                     "resultRecordCount": 1000, "orderByFields": "ObjectId"}, timeout=120)
