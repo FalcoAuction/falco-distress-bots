@@ -1,23 +1,12 @@
-"""Montgomery County (Clarksville) delinquent tax sale list (Clerk and Master).
-
-The Clerk and Master posts one spreadsheet per yearly sale on
-montgomerytn.gov/chancery/tax-sale. After the sale it is the list of parcels
-sold: owner, map and parcel, address, tax years, base tax, deed reference,
-amount sold for, buyer. Owners keep a one-year right of redemption
-(TCA 67-5-2701), so every parcel on it is an owner with a deadline: redeem
-by repaying the buyer, or sell first and keep the equity. Many owners are
-heirs ("Etal"), which is the estate pattern we already work.
-
-Discovery: the page links the current .xlsx under
-/storage/departments/chancery/. robots.txt allows everything. The workbook
-is read with the standard library (zip + XML), no new dependency.
-Verified 2026-11-06 (2026 sale held 2026-09-17, 42 rows).
-
-Distress type TAX_LIEN; one lead per parcel, keyed by parcel number.
+"""Montgomery County Clerk and Master tax sale notices.
+Stage upcoming listings. Use completed sale results to retire matching
+listings. The county result identifies a buyer and price, but supplies
+neither current title nor a parcel-specific redemption deadline.
 """
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 import xml.etree.ElementTree as ET
@@ -25,7 +14,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, LeadPayload, _supabase
 
 PAGE = "https://montgomerytn.gov/chancery/tax-sale"
 _NS = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -121,9 +110,10 @@ def parse_rows(rows: List[List[Any]]) -> List[Dict[str, Any]]:
 def sale_info(html: str) -> Dict[str, Any]:
     """{'sale_date': iso | None, 'sold': bool} from the page text."""
     text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html or ""))
-    m = _SALE_RE.search(text)
-    if not m:
+    headings = list(_SALE_RE.finditer(text))
+    if len(headings) != 1:
         return {"sale_date": None, "sold": False}
+    m = headings[0]
     try:
         d = datetime.strptime(m.group(3), "%B %d, %Y").date().isoformat()
     except ValueError:
@@ -131,33 +121,33 @@ def sale_info(html: str) -> Dict[str, Any]:
     return {"sale_date": d, "sold": m.group(2).lower() == "was"}
 
 
-def redemption_deadline(sale_date: Optional[str]) -> Optional[str]:
-    if not sale_date:
-        return None
-    d = date.fromisoformat(sale_date)
-    try:
-        return d.replace(year=d.year + 1).isoformat()
-    except ValueError:  # Feb 29
-        return d.replace(year=d.year + 1, day=28).isoformat()
+def listing_status(row, info, today):
+    if not info.get("sale_date"):
+        return "unknown"
+    if info["sold"] and info["sale_date"] <= today and row.get("buyer") and (row.get("sold_for") or 0) > 0:
+        return "sold"
+    if info["sold"] or row.get("buyer") or row.get("sold_for") or info["sale_date"] < today:
+        return "unknown"
+    return "upcoming"
 
 
 class MontgomeryTaxSaleBot(BotBase):
     name = "montgomery_tax_sale"
-    description = "Montgomery County Clerk and Master tax sale list (sold parcels in redemption)"
+    description = "Montgomery County upcoming tax listings and completed sale results"
     throttle_seconds = 2.0
     expected_min_yield = 0  # one sale a year; the list can be absent between sales
     frozen_after_runs = 60
 
     def scrape(self) -> List[LeadPayload]:
+        self.sold_rows = {}
         page = self.fetch(PAGE)
         if page is None or page.status_code != 200:
             self.logger.warning("tax sale page fetch failed")
             return []
         links = list(dict.fromkeys(urljoin(PAGE, m.group(1)) for m in _LINK_RE.finditer(page.text)))
         info = sale_info(page.text)
-        deadline = redemption_deadline(info["sale_date"]) if info["sold"] else None
-        if deadline and deadline < date.today().isoformat():
-            self.logger.info(f"sale {info['sale_date']}: redemption ended {deadline}, nothing to stage")
+        if len(links) != 1 or not info["sale_date"]:
+            self.logger.warning("Cannot associate a single tax workbook with a dated sale")
             return []
         leads: Dict[str, LeadPayload] = {}
         for url in links:
@@ -172,11 +162,15 @@ class MontgomeryTaxSaleBot(BotBase):
                 continue
             self.logger.info(f"{url.rsplit('/', 1)[-1]}: {len(rows)} parcels, sale {info['sale_date']}")
             for row in rows:
+                status = listing_status(row, info, date.today().isoformat())
+                facts = {**row, "sale_date": info["sale_date"], "sold": status == "sold", "list_url": url}
+                if status == "sold":
+                    self.sold_rows[row["parcel"]] = facts
+                if status != "upcoming":
+                    continue
                 street = row["address"] or ""
-                address = f"{street}, CLARKSVILLE, TN" if re.match(r"^\d", street) else \
-                    (f"{street} (no street number), MONTGOMERY COUNTY, TN" if street else None)
-                status = "sold, in redemption" if info["sold"] else "listed for sale"
-                key = self.make_lead_key("montgomery_tax_sale", row["parcel"])
+                address = f"{street}, Montgomery County, TN" if re.match(r"^\d", street) else None
+                key = self.make_lead_key(self.name, f"{info['sale_date']}|{row['parcel']}")
                 leads[key] = LeadPayload(
                     bot_source=self.name,
                     pipeline_lead_key=key,
@@ -185,16 +179,43 @@ class MontgomeryTaxSaleBot(BotBase):
                     full_name=row["owner"],
                     owner_name_records=row["owner"],
                     distress_type="TAX_LIEN",
+                    trustee_sale_date=info["sale_date"],
                     admin_notes=f"Montgomery tax sale {info['sale_date'] or '?'} ({status}): parcel {row['parcel']}, "
                                 f"base tax ${row['base_tax'] or 0:,.2f} for {', '.join(row['tax_years']) or '?'}"
-                                + (f", sold for ${row['sold_for']:,.0f}" if row["sold_for"] else "")
-                                + (f", redeem by {deadline}" if deadline else "") + ".",
-                    raw_payload={"tax_sale": {**row, "sale_date": info["sale_date"], "sold": info["sold"],
-                                              "redemption_deadline": deadline, "list_url": url}},
+                                    + ".",
+                    raw_payload={"tax_sale": facts},
                     source_url=url,
                 )
         self.logger.info(f"{len(leads)} Montgomery tax sale parcels from {len(links)} list(s)")
         return list(leads.values())
+
+    def _write_staging(self, leads):
+        result = super()._write_staging(leads)
+        sold = getattr(self, "sold_rows", {})
+        if not sold:
+            return result
+        client = _supabase()
+        if client is None:
+            return result
+        # The original collector keyed rows by parcel alone. Match the sale
+        # date as well so a later proceeding on the same parcel stays intact.
+        date_key = next(iter(sold.values()))["sale_date"]
+        parcels = list(sold)
+        table = client.table("homeowner_requests_staging")
+        for start in range(0, len(parcels), 50):
+            rows = (table.select("id,raw_payload").eq("bot_source", self.name)
+                    .eq("distress_type", "TAX_LIEN").eq("staging_status", "pending")
+                    .eq("raw_payload->tax_sale->>sale_date", date_key)
+                    .in_("raw_payload->tax_sale->>parcel", parcels[start:start + 50]).execute().data or [])
+            for row in rows:
+                raw = row["raw_payload"]
+                facts = sold[raw["tax_sale"]["parcel"]]
+                table.update({"raw_payload": {**raw, "tax_sale": facts}, "staging_status": "rejected",
+                              "admin_notes": f"County reports parcel {facts['parcel']} sold on {date_key}.",
+                              "rejection_reason": "Completed Montgomery County tax sale"}).eq(
+                                  "id", row["id"]).eq("staging_status", "pending").filter(
+                                      "raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute()
+        return result
 
 
 def run() -> dict:

@@ -45,13 +45,18 @@ class MontgomeryTaxSaleTests(unittest.TestCase):
         self.assertEqual((rows[0]["tax_years"], rows[0]["base_tax"], rows[0]["sold_for"]), (["2022 County", "2023 County"], 210.0, 5100.0))
         self.assertEqual((rows[1]["base_tax"], rows[1]["address"]), (58.0, "528 Example Street"))
 
-    def test_sale_info_and_deadline(self):
+    def test_sale_info_and_listing_status(self):
         info = m.sale_info("<p>The 2026 Tax Sale was on September 17, 2026. This is the list</p>")
         self.assertEqual(info, {"sale_date": "2026-09-17", "sold": True})
         self.assertFalse(m.sale_info("The 2027 Tax Sale will be held on Thursday, September 16, 2027.")["sold"])
-        self.assertEqual(m.redemption_deadline("2026-09-17"), "2027-09-17")
-        self.assertEqual(m.redemption_deadline("2028-02-29"), "2029-02-28")
-        self.assertIsNone(m.redemption_deadline(None))
+        self.assertEqual(m.listing_status({"buyer": "Buyer", "sold_for": 100}, info, "2026-11-21"), "sold")
+        self.assertEqual(m.listing_status({}, info, "2026-11-21"), "unknown")
+        future = {"sale_date": "2027-09-16", "sold": False}
+        self.assertEqual(m.listing_status({}, future, "2026-11-21"), "upcoming")
+        self.assertEqual(m.listing_status({"buyer": "Buyer", "sold_for": 50}, future, "2026-11-21"), "unknown")
+        self.assertEqual(m.listing_status({}, future, "2028-01-01"), "unknown")
+        self.assertEqual(m.listing_status({}, {"sale_date": None}, "2026-11-21"), "unknown")
+
 
 
 if __name__ == "__main__":
