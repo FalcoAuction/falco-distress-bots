@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from .hamilton_assessor_bot import tax_roll_parcel
 from ._field_confidence import deep_merge_dict, property_value_trust
 from ._provenance import record_field
 
@@ -117,6 +118,8 @@ class XrefAvmEnricherBot(BotBase):
                 rows = self._fetch_all(client, table)
                 self.logger.info(f"{table}: {len(rows)} rows fetched")
                 for r in rows:
+                    if tax_roll_parcel(r.get("raw_payload")):
+                        continue  # Hamilton roll valuations use the assessor parcel ID.
                     addr = r.get("property_address")
                     norm = _normalize_address(addr or "")
                     if not norm:
