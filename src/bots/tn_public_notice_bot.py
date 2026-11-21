@@ -399,6 +399,27 @@ class TnPublicNoticeBot(BotBase):
                     text, re.I,
                 ):
                     return None
+        if distress == "TAX_LIEN" and kind != "foreclosure" and county in {
+                "hardin", "houston", "stewart", "trousdale"}:
+            text = " ".join(excerpt.split())
+            if county == "hardin" and re.match(
+                    r"PUBLIC NOTICE [-–] LAND SALE FOR DELINQUENT TAXES SALE OF REAL PROPERTY "
+                    r"BY THE CHANCERY COURT OF MONTGOMERY COUNTY\b", text, re.I):
+                return None
+            civic_or_private = {
+                "hardin": r"(?:Page \d+[AB] |THURSDAY\b).{0,110}SENATE JOINT RESOLUTION NO\. 25 A RESOLUTION",
+                "houston": (r"(?:OFFICIAL NOTICE OF ELECTION ON QUESTIONS SENATE JOINT RESOLUTION|"
+                            r"Houston County Chancery Court .{0,140}NOTICE TO CREDITORS As Required by TCA|"
+                            r"CHANCERY COURT AUCTION .{0,210}Jerry Wimberly, et al Vs Docket 2018-CV-687)"),
+                "stewart": r"PUBLIC NOTICE Resolution 517-26 .{0,185}resolution to annex",
+                "trousdale": (r"(?:Barbara Jeanene Hubbard CHANCERY COURT SALE .{0,140}THE ESTATE OF BARBARA JEANENE HUBBARD|"
+                              r"DAVENPORT CHANCERY COURT SALE .{0,140}decree of the Probate Court|"
+                              r"GENERAL TAX RATE [\d.]+ \$ Funds listed receive funding from tax levies|"
+                              r"Notice of Public Hearings .{0,210}PUBLIC HEARING for REZONE)"),
+            }
+            if re.match(civic_or_private[county], text, re.I) and not re.search(
+                    r"\b(?:delinquent (?:real property |property )?tax|tax sale|back taxes)", text, re.I):
+                return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
