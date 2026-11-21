@@ -321,6 +321,13 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "sumner" and distress == "TAX_LIEN" and re.match(
+            r"\s*(?:public\s+notice\s*[:\-]?\s*)?(?:"
+            r"city of white house\s+meeting of the municipal planning commission\b|"
+            r"distribution of excess proceeds from the \d{4} sumner county delinquent tax sale\b)",
+            excerpt, re.I,
+        ):
+            return None
         if county == "wilson" and distress == "TAX_LIEN":
             # Category 22 includes zoning, towing and other counties' sales.
             tax_case = re.search(r"delinquent\s+(?:(?:real estate|property)\s+)?tax|back tax sale|tax sale", excerpt, re.I)
