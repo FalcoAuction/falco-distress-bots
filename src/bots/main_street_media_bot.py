@@ -250,12 +250,17 @@ class MainStreetMediaBot(BotBase):
             )]
         out = []
         text = " ".join(lines)
+        tax_date = None
+        if county == "wilson":
+            scheduled = re.search(rf"\bon\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?({_DATE}),?\s+at\s+\d{{1,2}}:\d{{2}}", text, re.I)
+            tax_date = _date_iso(scheduled[1]) if scheduled else None
         for parcel in tax_parcels(lines):
             out.append(LeadPayload(
                 bot_source=self.name,
                 pipeline_lead_key=self.make_lead_key("msm_tax", f"{county}|{parcel['parcel']}"),
                 county=county,
                 distress_type="TAX_LIEN",
+                trustee_sale_date=tax_date,
                 admin_notes=f"Chancery delinquent tax notice, {county.title()} County, parcel {parcel['parcel']}, "
                             f"tax years {', '.join(parcel['tax_years'])}.",
                 raw_payload={"publication": "main_street_media", "publication_date": issued.isoformat(),
