@@ -372,3 +372,21 @@ def extract_court_sale(lines: List[str]) -> Dict[str, Any]:
         "docket": m.group(1).strip("-").upper() if m else None,
         "headline": " ".join(lines[:3])[:300],
     }
+
+
+def court_sale_review(lines: List[str]) -> Dict[str, Any]:
+    """Describe the advertised procedure without inferring an order or title."""
+    text = " ".join(lines)
+    if re.search(r"petition to subject real property.{0,100}authority to sell real property", text, re.I):
+        docket = re.search(r"\bPR-\s*\d+\s*-\s*[IVX]+\b", text)
+        address = re.search(r"real property commonly known as (\d+ [^,]{3,80}, [^,]{2,40}, Tennessee \d{5})", text, re.I)
+        return {"stage": "estate_sale_authority_requested",
+                "docket": re.sub(r"\s", "", docket[0]) if docket else None,
+                "property_address": address[1] if address else None}
+    if re.search(r"abatement of a public nuisance|complaint for quiet title", text, re.I) and not re.search(r"order of sale|judicial sale", text, re.I):
+        return {"stage": "no_sale_in_notice"}
+    if re.search(r"trustee will sell", text, re.I) and re.search(r"by deed of trust", text, re.I):
+        return {"stage": "trustee_sale"}
+    if re.search(r"chancery court auction|this judicial sale shall occur|terms of sale:.*this is a judicial sale", text, re.I):
+        return {"stage": "sale_already_arranged"}
+    return {"stage": "review_notice"}
