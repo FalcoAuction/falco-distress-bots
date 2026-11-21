@@ -65,7 +65,8 @@ def publication_stage(text):
     normalized = (text or "").replace("’", "'").replace("�", "'")
     if PARTITION_ACTION_RE.search(normalized):
         return "partition_action"
-    if CIVIC.search(normalized):
+    normalized = re.sub(r"(?i)(trustee)[?`´]s", r"\1's", normalized)
+    if CIVIC.search(normalized) or "PUBLIC HEARING FOR ORDINANCE" in normalized.upper():
         return "public_hearing"
     if SALE.search(normalized):
         return "foreclosure_sale_publication"
