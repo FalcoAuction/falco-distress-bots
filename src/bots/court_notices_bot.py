@@ -27,6 +27,7 @@ in both papers stages once.
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -114,6 +115,45 @@ def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
     )
 
 
+def cheatham_tax_tracts(row, pub_date, today):
+    lines = row["lines"]
+    if not any(line.upper() == "NOTICE OF DELINQUENT TAX SALE" for line in lines):
+        return []
+    text = " ".join(lines)
+    if not re.search(r"CHANCERY COURT FOR CHEATHAM COUNTY", text, re.I):
+        return []
+    docket = re.search(r"Civil Action No\.\s*(\d+)\b", text, re.I)
+    scheduled = re.search(r"highest and best bidder at\s+\d+:\d+\s*[ap]\.m\. on \w+, (\w+ \d+, \d{4})", text, re.I)
+    if not docket or not scheduled:
+        return []
+    try:
+        sale = datetime.strptime(scheduled[1], "%B %d, %Y").date()
+    except ValueError:
+        return []
+    if sale < today:
+        return []
+    leads = []
+    for line in lines:
+        tract = re.match(r"([A-Z])\.\s+.+?\bParcel\s+(.+?)\s*\([^)]+\),\s*having an add(?:ress| re s) of (.+?)\s*[,\-]\s*Current Owners?\s*-\s*(.+?)\s*-\s*[$S]([\d,]+\.\d{2})$", line, re.I)
+        if not tract:
+            continue
+        letter, parcel, location, owners, amount = tract.groups()
+        owners = owners.split(" - Period of delinquency")[0].removeprefix("Defendant ").strip()
+        leads.append(LeadPayload(
+            bot_source="court_notices", county="cheatham", distress_type="TAX_LIEN",
+            pipeline_lead_key=BotBase.make_lead_key("cheatham_tax", f"{docket[1]}|{row['notice_id']}|{letter}"),
+            property_address=location if re.match(r"\d+\s", location) else None,
+            owner_name_records=None if owners.lower().startswith("unknown") else owners,
+            trustee_sale_date=sale.isoformat(),
+            source_url=f"https://www.tnledger.com/Search/Details/ViewNotice.aspx?id={row['notice_id']}&date={pub_date.month}/{pub_date.day}/{pub_date.year}",
+            raw_payload={"kind": "cheatham_tax_sale", "docket": docket[1], "notice_id": row["notice_id"],
+                         "tract": letter, "parcel_printed": parcel, "location_printed": location,
+                         "owners_printed": owners, "published_judgment": float(amount.replace(",", "")),
+                         "tract_text": line, "publication_date": pub_date.isoformat()},
+        ))
+    return leads
+
+
 class CourtNoticesBot(BotBase):
     name = "court_notices"
     description = "Probate and court-ordered-sale notices from the Nashville Ledger and Memphis Daily News"
@@ -139,6 +179,12 @@ class CourtNoticesBot(BotBase):
                     empty_editions.append(f"{pub['key']} {d}")
                     continue
                 for row in rows:
+                    if pub["key"] == "nashville_ledger":
+                        tracts = cheatham_tax_tracts(row, d, today)
+                        if tracts:
+                            for tract in tracts:
+                                leads.setdefault(tract.pipeline_lead_key, tract)
+                            continue
                     lead = build_lead(self.name, pub["key"], pub["base"], d, row)
                     if lead and lead.pipeline_lead_key not in leads:
                         leads[lead.pipeline_lead_key] = lead
