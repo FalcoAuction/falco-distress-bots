@@ -57,6 +57,9 @@ from ._base import BotBase, LeadPayload
 from . import _trustee_notice as trustee_notice
 from . import _court_order as court_order
 from . import _roane_tax
+from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
+from ._county_tax_headings import newspaper_tax_heading
+from . import _reviewed_tax_excerpts
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -116,6 +119,7 @@ class TnPublicNoticeBot(BotBase):
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
         roane_parcels = {}
+        tax_tables = {}
         seen_ids: set[str] = set()
 
         for cat_id, (distress, category_label) in CATEGORY_TO_DISTRESS.items():
@@ -141,6 +145,12 @@ class TnPublicNoticeBot(BotBase):
                         continue
                     ids_seen_this_cat.add(notice_id)
                     seen_ids.add(notice_id)
+                    if distress == "TAX_LIEN" and (row.get("county") or "").lower() in ("madison", "henry"):
+                        parsed = parcel_rows(row["county"].lower(), row)
+                        if parsed:
+                            for lead in parsed:
+                                tax_tables.setdefault(lead.county, {})[lead.pipeline_lead_key] = lead
+                            continue
                     if (row.get("county") or "").strip().lower() == "roane" and distress == "TAX_LIEN":
                         parcels = _roane_tax.exhibit_leads(row)
                         if parcels is not None:
@@ -158,6 +168,10 @@ class TnPublicNoticeBot(BotBase):
                     break
                 page_state = next_state
         _roane_tax.fill_roll(roane_parcels.values())
+        for table in tax_tables.values():
+            records = list(table.values())
+            fill_parcels(records)
+            leads.extend(records)
         return leads + list(roane_parcels.values())
 
     # ── Session bootstrap ───────────────────────────────────────────────────
@@ -329,7 +343,83 @@ class TnPublicNoticeBot(BotBase):
         # Sumner and Montgomery trustee sales arrive filed as "Delinquent
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
+        if distress == "TAX_LIEN" and kind != "foreclosure":
+            heading = newspaper_tax_heading(county, excerpt)
+            if heading == "exclude":
+                return None
+            if heading == "foreclosure":
+                kind = heading
+        if distress == "TAX_LIEN":
+            decision = _reviewed_tax_excerpts.disposition(county, excerpt)
+            if decision == "Mortgage trustee sale":
+                kind = "foreclosure"
+            elif decision and kind != "foreclosure":
+                return None
         tax_lead = None
+        if distress == "TAX_LIEN" and kind != "foreclosure" and non_tax_reason(county, excerpt):
+            return None
+        if county == "lauderdale" and distress == "TAX_LIEN" and kind != "foreclosure":
+            text = " ".join(excerpt.split())
+            civic_notice = re.match(
+                r"(?:REQUEST FOR BIDS FOR SURPLUS PROPERTY Sealed Bids are invited and will be received by the City of Ripley|"
+                r"(?:PUBLIC NOTICE )?NOTICE OF INTENT TO DESTROY IMPOUNDED PROPERTY Lauderdale County Sheriff|"
+                r"NOTICE Pursuant to Section [\d-]+, Tennessee Code Annotated, the property assessment records "
+                r"of Lauderdale County will be available for public inspection|"
+                r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE The City of Ripley)", text, re.I)
+            if civic_notice and not re.search(r"\b(?:delinquent (?:real property |property )?tax|tax sale|back taxes)", text, re.I):
+                return None
+        if county == "carroll" and distress == "TAX_LIEN":
+            text = " ".join(excerpt.split())
+            tax_claim = re.search(r"\b(?:delinquent\s+(?:(?:real\s+)?property\s+|real estate\s+)?tax|"
+                                  r"tax (?:lien|sale|suit)|back taxes|unpaid (?:property )?tax)", text, re.I)
+            if not tax_claim and re.match(r"TS#:\s*[\w-]+\s+Whereas,", text, re.I) and re.search(
+                    r"\bby Deed of\s*Trust\b", text, re.I):
+                kind = "foreclosure"  # Newspaper OCR joins "ofTrust".
+            elif not tax_claim and kind != "foreclosure" and re.search(
+                    r"Trezevant Board of Mayor and Aldermen.*zoning map amendment|"
+                    r"property assessment records of Carroll County will be available for public inspection|"
+                    r"NOTICE TO CREDITORS.*PROBATE CASE NO|lease-to-own storage building has been left unattended|"
+                    r"duty of the Grand Jurors to investigate|whereabouts of the father.*unknown|"
+                    r"bid on the real property in this Estate has been raised|"
+                    r"above styled Estate.*Probate Minute Book|CLERK AND MASTER AUCTION.*Attorney for Estate",
+                    text, re.I):
+                return None
+        if county == "henderson" and distress == "TAX_LIEN":
+            text = " ".join(excerpt.split())
+            if re.match(r"NOTICE OF SUBSTITUTE TRUSTEE\?S SALE\b", text, re.I):
+                kind = "foreclosure"
+            elif kind != "foreclosure" and not re.search(
+                r"\b(?:delinquent (?:real |property )*tax|tax lien|tax sale|back taxes)", text, re.I
+            ):
+                if re.search(
+                    r"Henderson County is undergoing a Current Value Update|"
+                    r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE The Town of Scotts Hill|"
+                    r"City of Scotts Hill, Tennessee, hereby provides certain financial information for the Fiscal Year|"
+                    r"TO: ANY UNKNOWN HEIRS OF MARY L\. HUNT,.*Gowan Road/Gurley Creek Road",
+                    text, re.I,
+                ):
+                    return None
+        if distress == "TAX_LIEN" and kind != "foreclosure" and county in {
+                "hardin", "houston", "stewart", "trousdale"}:
+            text = " ".join(excerpt.split())
+            if county == "hardin" and re.match(
+                    r"PUBLIC NOTICE [-–] LAND SALE FOR DELINQUENT TAXES SALE OF REAL PROPERTY "
+                    r"BY THE CHANCERY COURT OF MONTGOMERY COUNTY\b", text, re.I):
+                return None
+            civic_or_private = {
+                "hardin": r"(?:Page \d+[AB] |THURSDAY\b).{0,110}SENATE JOINT RESOLUTION NO\. 25 A RESOLUTION",
+                "houston": (r"(?:OFFICIAL NOTICE OF ELECTION ON QUESTIONS SENATE JOINT RESOLUTION|"
+                            r"Houston County Chancery Court .{0,140}NOTICE TO CREDITORS As Required by TCA|"
+                            r"CHANCERY COURT AUCTION .{0,210}Jerry Wimberly, et al Vs Docket 2018-CV-687)"),
+                "stewart": r"PUBLIC NOTICE Resolution 517-26 .{0,185}resolution to annex",
+                "trousdale": (r"(?:Barbara Jeanene Hubbard CHANCERY COURT SALE .{0,140}THE ESTATE OF BARBARA JEANENE HUBBARD|"
+                              r"DAVENPORT CHANCERY COURT SALE .{0,140}decree of the Probate Court|"
+                              r"GENERAL TAX RATE [\d.]+ \$ Funds listed receive funding from tax levies|"
+                              r"Notice of Public Hearings .{0,210}PUBLIC HEARING for REZONE)"),
+            }
+            if re.match(civic_or_private[county], text, re.I) and not re.search(
+                    r"\b(?:delinquent (?:real property |property )?tax|tax sale|back taxes)", text, re.I):
+                return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
