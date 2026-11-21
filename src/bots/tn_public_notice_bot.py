@@ -58,6 +58,7 @@ from . import _trustee_notice as trustee_notice
 from . import _court_order as court_order
 from . import _roane_tax
 from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
+from ._county_tax_headings import newspaper_tax_heading
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -341,6 +342,12 @@ class TnPublicNoticeBot(BotBase):
         # Sumner and Montgomery trustee sales arrive filed as "Delinquent
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
+        if distress == "TAX_LIEN" and kind != "foreclosure":
+            heading = newspaper_tax_heading(county, excerpt)
+            if heading == "exclude":
+                return None
+            if heading == "foreclosure":
+                kind = heading
         tax_lead = None
         if distress == "TAX_LIEN" and kind != "foreclosure" and non_tax_reason(county, excerpt):
             return None
