@@ -7,10 +7,8 @@ What this captures (honest scope):
   lis pendens recordings (those live at county Registers of Deeds,
   scraping which is a separate build).
 
-  In practice this surfaces ~100 additional foreclosure notices per
-  cron pass that the dedicated single-paper scrapers (nashville_ledger,
-  memphis_daily_news, hamilton_county_herald) miss because they're
-  published in smaller member papers we don't scrape directly.
+  Retain supplemental publications with visible sale evidence and explicit
+  partition actions. Compare exact publication URLs with the main feed.
 
 What it does NOT capture:
   True 60-120-day-earlier lis pendens signal. That would require a
@@ -31,14 +29,14 @@ Env knobs:
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Tuple
+import re
+from typing import Dict, List, Optional
 
 from ._base import LeadPayload
+from ._court_order import PARTITION_ACTION_RE
 from .tn_public_notice_bot import (
     TnPublicNoticeBot,
-    TNPN_BASE,
-    TNPN_SEARCH,
-    CATEGORY_TO_DISTRESS,
+
 )
 
 
@@ -54,25 +52,32 @@ LP_SEARCH_CATEGORIES: list[tuple[str, str]] = [
     ("26", "Tax Sales"),  # Some counties group LP w/ tax-sale notices
 ]
 
-# tn_public_notice's _build_lead does
-#   next(k for k, v in CATEGORY_TO_DISTRESS.items() if v[1] == category_label)
-# which raises StopIteration for any label not in the parent dict.
-# Inject benign synonyms so the keyword-mode label resolves. The
-# parent's own scrape() doesn't iterate these labels so we don't
-# change its behavior.
-_LP_SUPPLEMENT_LABEL = "Lis Pendens"
-if _LP_SUPPLEMENT_LABEL not in {v[1] for v in CATEGORY_TO_DISTRESS.values()}:
-    CATEGORY_TO_DISTRESS["__lp_supplement"] = (
-        "PRE_FORECLOSURE",
-        _LP_SUPPLEMENT_LABEL,
-    )
+# The clipped public excerpt must describe a sale, not merely refer to a
+# recorded loan or appear in a newspaper foreclosure search.
+SALE = re.compile(
+    r"\b(?:notice of (?:mortgage )?foreclosure|foreclosure (?:sale|notice)|"
+    r"(?:substitute |successor )?trustee(?:'s|s|')?\s+(?:notice of )?sale|"
+    r"sale (?:by|under) (?:the )?(?:substitute )?trustee)\b", re.I)
+CIVIC = re.compile(r"^\s*(?:public notice\s*[-:]?\s*)?notice of (?:public hearings?|zoning amendment)\b", re.I)
+
+
+def publication_stage(text):
+    normalized = (text or "").replace("’", "'").replace("�", "'")
+    if PARTITION_ACTION_RE.search(normalized):
+        return "partition_action"
+    normalized = re.sub(r"(?i)(trustee)[?`´]s", r"\1's", normalized)
+    if CIVIC.search(normalized) or "PUBLIC HEARING FOR ORDINANCE" in normalized.upper():
+        return "public_hearing"
+    if SALE.search(normalized):
+        return "foreclosure_sale_publication"
+    return "excerpt_unconfirmed"
 
 
 class TnLisPendensBot(TnPublicNoticeBot):
     name = "tn_lis_pendens"
     description = (
         "TN Public Notice statewide aggregator — keyword-driven search "
-        "for lis pendens notices (lawsuit-stage distress, pre-foreclosure)"
+        "for newspaper foreclosure sale notices"
     )
     # LP filings are less frequent than foreclosure notices, so widen
     # the look-back window. Most LP-to-trustee-sale gaps are 60-120
@@ -125,12 +130,12 @@ class TnLisPendensBot(TnPublicNoticeBot):
                     if notice_id in seen_ids:
                         continue
                     seen_ids.add(notice_id)
-                    # Tag as PRE_FORECLOSURE — these are
-                    # near-trustee-sale notices that mention LP, not
-                    # standalone lis-pendens recordings. The synonym
-                    # label keeps the parent's category lookup happy.
-                    lead = self._build_lead(row, "PRE_FORECLOSURE", "Lis Pendens")
+                    stage = publication_stage(row.get("excerpt"))
+                    if stage not in ("foreclosure_sale_publication", "partition_action"):
+                        continue
+                    lead = self._build_lead(row, "PRE_FORECLOSURE", cat_label)
                     if lead is not None:
+                        lead.raw_payload["publication_stage"] = stage
                         leads.append(lead)
                 if page_idx + 1 >= self.max_pages_per_category:
                     break
@@ -140,6 +145,25 @@ class TnLisPendensBot(TnPublicNoticeBot):
                 page_state = next_state
 
         return leads
+
+    def _write_staging(self, leads):
+        # An identical newspaper URL in the primary feed is the same
+        # publication. Keep supplemental coverage if its type differs.
+        from ._base import _supabase
+        client = _supabase()
+        if client is None:
+            return super()._write_staging(leads)
+        keep = []
+        for start in range(0, len(leads), 50):
+            batch = leads[start:start + 50]
+            rows = (client.table("homeowner_requests_staging")
+                    .select("source_url,distress_type")
+                    .eq("bot_source", "tn_public_notice").in_("staging_status", ["pending", "verified"])
+                    .in_("source_url", [lead.source_url for lead in batch]).execute().data or [])
+            known = {(row["source_url"], row["distress_type"]) for row in rows}
+            keep.extend(lead for lead in batch if (lead.source_url, lead.distress_type) not in known)
+        staged, duplicates = super()._write_staging(keep)
+        return staged, duplicates + len(leads) - len(keep)
 
     def _submit_keyword_search(
         self,
