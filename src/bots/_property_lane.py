@@ -407,10 +407,22 @@ def _land_flip(row: Dict[str, Any], contact: Dict[str, Any], acres: Optional[flo
 
 def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
     raw = _d(row.get("raw_payload"))
+    church = (row.get("distress_type") or "").upper() == "CHURCH_CLOSURE"
+    review = _d(raw.get("church_review")) if church else {}
+    # A reviewed match is tied to the actual parcel and owner. A later county
+    # update invalidates it instead of inheriting the old seller assumption.
+    reviewed = bool(review.get("parcel_id") and review.get("owner")
+                    and review["parcel_id"] == parcel_id(raw)
+                    and review["owner"] == parcel_owner(raw)
+                    and review.get("last_sale") == last_sale(raw)
+                    and review.get("property_address") == row.get("property_address"))
     pm = _d(row.get("phone_metadata"))
     oc = pm.get("owner_class")
     oc = (oc.get("class") or oc.get("value")) if isinstance(oc, dict) else oc
     owner = row.get("owner_name_records") or row.get("full_name")
+    if church and reviewed and review.get("status") == "county_match" and owner in (
+            review["owner"], "Tennessee-Western Kentucky Conference Trustees"):
+        owner = review["owner"]
     otype = owner_type(owner, oc)
 
     lane, basis = "unknown", None
@@ -430,7 +442,7 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
     # Comptroller records carry building count and improvement value: a
     # residential or commercial parcel with neither is a vacant lot.
     comp = _d(raw.get("comptroller_parcel"))
-    if (basis or "").startswith("comptroller") and lane in ("residential", "commercial") and comp \
+    if not church and (basis or "").startswith("comptroller") and lane in ("residential", "commercial") and comp \
             and not _num(comp.get("improvement_value")) and not comp.get("buildings") \
             and _num(comp.get("appraisal")):
         subtype = "vacant_residential" if lane == "residential" else "commercial_land"
@@ -440,6 +452,12 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
     if acres is not None and acres >= ACREAGE_LAND and lane in ("residential", "unknown") and subtype != "exempt":
         lane, subtype = "land", "acreage_with_home" if lane == "residential" else "acreage"
         basis = basis or f"acres:{acres}"
+
+    if church:
+        # Exempt rolls often omit improvements. That does not establish a
+        # vacant lot. Closure records describe a church, pending parcel review.
+        lane, subtype = "commercial", "church"
+        basis = basis or "church_closure:published resolution"
 
     value = _value(row, raw)
     contact = contact_path(row, raw)
@@ -453,7 +471,9 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
 
     dt = (row.get("distress_type") or "").upper()
     floor = COMMERCIAL_MIN_VALUE if lane == "commercial" else LAND_MIN_VALUE
-    if str(raw.get("parcel") or "").upper().startswith("PER-"):
+    if church and (not reviewed or review.get("status") != "county_match"):
+        out["exclude_reason"] = "church_ownership_review" if reviewed else "church_parcel_review"
+    elif str(raw.get("parcel") or "").upper().startswith("PER-"):
         # Hamilton business personal-property tax: a tenant's debt at the
         # address of the building it rents, not the owner's real estate.
         out["exclude_reason"] = "personal_property_tax"
