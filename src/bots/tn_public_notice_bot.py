@@ -377,6 +377,21 @@ class TnPublicNoticeBot(BotBase):
                     r"above styled Estate.*Probate Minute Book|CLERK AND MASTER AUCTION.*Attorney for Estate",
                     text, re.I):
                 return None
+        if county == "henderson" and distress == "TAX_LIEN":
+            text = " ".join(excerpt.split())
+            if re.match(r"NOTICE OF SUBSTITUTE TRUSTEE\?S SALE\b", text, re.I):
+                kind = "foreclosure"
+            elif kind != "foreclosure" and not re.search(
+                r"\b(?:delinquent (?:real |property )*tax|tax lien|tax sale|back taxes)", text, re.I
+            ):
+                if re.search(
+                    r"Henderson County is undergoing a Current Value Update|"
+                    r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE The Town of Scotts Hill|"
+                    r"City of Scotts Hill, Tennessee, hereby provides certain financial information for the Fiscal Year|"
+                    r"TO: ANY UNKNOWN HEIRS OF MARY L\. HUNT,.*Gowan Road/Gurley Creek Road",
+                    text, re.I,
+                ):
+                    return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
