@@ -321,6 +321,18 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "robertson" and distress == "TAX_LIEN":
+            if re.match(r"\s*(?:BOARD OF MAYOR AND ALDERMEN\b.{0,220}?City of White House|"
+                        r"CITY OF WHITE HOUSE\s+Meeting of the Municipal Planning Commission|"
+                        r"NOTICE OF PUBLIC HEARING CITY OF RIDGETOP\s+The Ridgetop Board of Zoning Appeals|"
+                        r"ROBERTSON COUNTY, TENNESSEE NOTICE OF PUBLIC HEARING FOR THE BUDGET)", excerpt, re.I | re.S):
+                return None
+            # The truncated consolidated caption identifies tax years and cases only.
+            if re.fullmatch(r"\s*IN THE CHANCERY COURT FOR ROBERTSON COUNTY, TENNESSEE, AT SPRINGFIELD\s+"
+                            r"CONSOLIDATED CIVIL ACTION NUMBERS:\s*(?:CH\d+-CV-\d+\s*\(\d{4}\)[,;]?\s*)+"
+                            r"ROBERTSON COUNTY, TENNESSEE vs\.\s+DE-?\s*LINQUENT TAXPAYERS FOR ROBERTSON COUNTY "
+                            r"and CITY OF S(?:PRINGFIELD)?\s*(?:\.{3}|…)?\s*", excerpt, re.I):
+                return None
         if county == "cheatham" and distress == "TAX_LIEN":
             if re.match(r"\s*(?:Governor \(All Precincts\) Vote for|Copyright Notice\s+Copyright Notice|"
                         r"(?:TN-\d+\s+)?Cheatham County Planning Commission\s+Meeting Agenda)", excerpt, re.I):
