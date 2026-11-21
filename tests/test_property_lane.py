@@ -244,6 +244,8 @@ class HelperTests(unittest.TestCase):
         r = self.church_row()
         r["raw_payload"]["church_review"]["status"] = "ownership_review"
         self.assertEqual(property_lane(r)["exclude_reason"], "church_ownership_review")
+        r["raw_payload"]["church_review"]["status"] = "valuation_review"
+        self.assertEqual(property_lane(r)["exclude_reason"], "church_valuation_review")
 
     def test_church_review_cannot_bypass_other_lanes_or_owner_conflict(self):
         r = self.church_row()

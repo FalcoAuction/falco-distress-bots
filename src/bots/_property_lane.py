@@ -471,7 +471,9 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
 
     dt = (row.get("distress_type") or "").upper()
     floor = COMMERCIAL_MIN_VALUE if lane == "commercial" else LAND_MIN_VALUE
-    if church and (not reviewed or review.get("status") != "county_match"):
+    if church and reviewed and review.get("status") == "valuation_review":
+        out["exclude_reason"] = "church_valuation_review"
+    elif church and (not reviewed or review.get("status") != "county_match"):
         out["exclude_reason"] = "church_ownership_review" if reviewed else "church_parcel_review"
     elif str(raw.get("parcel") or "").upper().startswith("PER-"):
         # Hamilton business personal-property tax: a tenant's debt at the
