@@ -59,6 +59,7 @@ from . import _court_order as court_order
 from . import _roane_tax
 from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
 from ._county_tax_headings import newspaper_tax_heading
+from . import _reviewed_tax_excerpts
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -348,6 +349,12 @@ class TnPublicNoticeBot(BotBase):
                 return None
             if heading == "foreclosure":
                 kind = heading
+        if distress == "TAX_LIEN":
+            decision = _reviewed_tax_excerpts.disposition(county, excerpt)
+            if decision == "Mortgage trustee sale":
+                kind = "foreclosure"
+            elif decision and kind != "foreclosure":
+                return None
         tax_lead = None
         if distress == "TAX_LIEN" and kind != "foreclosure" and non_tax_reason(county, excerpt):
             return None
