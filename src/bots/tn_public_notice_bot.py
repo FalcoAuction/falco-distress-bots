@@ -321,6 +321,19 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "hardeman" and distress == "TAX_LIEN" and kind != "foreclosure":
+            # One excerpt can be the lead item of an entire legal edition. Pull
+            # tax exhibits from the full PDF rather than assign the meeting address.
+            if not re.search(r"\b(?:delinquent (?:property )?tax|tax sale|back taxes)", excerpt, re.I):
+                if re.search(r"Hardeman County (?:Beer Board will meet|Election Commission will meet|"
+                             r"Regional Planning Commission will meet|Board of Zoning Appeals will meet)|"
+                             r"INVITATION TO BID (?:HVAC ROOFTOP|Hardeman County Board of Education)|"
+                             r"C D Farms in accordance with federal Guidelines|City of Bolivar Street Department is requesting bids|"
+                             r"Town of Hickory Valley is currently accepting applications|"
+                             r"HARDEMAN COUNTY ELECTION COMMISSION.{0,100}ELECTION PROCEDURES|"
+                             r"LAND SALE IN THE CHANCERY COURT OF HARDEMAN COUNTY.{0,40}IN THE MATTER OF THE ESTATE OF",
+                             excerpt, re.I | re.S):
+                    return None
         if county == "rutherford" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             # The paper's tax category also carries HOA sales and municipal notices.
