@@ -211,6 +211,52 @@ class LandFlipTests(unittest.TestCase):
 
 
 class HelperTests(unittest.TestCase):
+    def church_row(self):
+        return row(distress_type="CHURCH_CLOSURE", property_value=300000,
+                   owner_name_records="Tennessee-Western Kentucky Conference Trustees",
+                   raw_payload={"comptroller_parcel": {
+                       "parcelid": "123", "owner": "MAGGART METHODIST CHURCH",
+                       "class": "05 RELIGIOUS", "appraisal": 300000,
+                       "improvement_value": 0, "buildings": 0,
+                       "owner_mailing": "1 Main St, Nashville TN 37201"},
+                       "church_review": {"status": "county_match", "parcel_id": "123",
+                           "owner": "MAGGART METHODIST CHURCH",
+                           "property_address": "1 Main St, Nashville, TN"}})
+
+    def test_reviewed_church_is_not_vacant_or_false_owner_mismatch(self):
+        got = property_lane(self.church_row())
+        self.assertEqual((got["lane"], got["subtype"]), ("commercial", "church"))
+        self.assertIsNone(got["exclude_reason"])
+
+    def test_changed_church_owner_parcel_or_address_invalidates_review(self):
+        for field in ("owner", "parcelid"):
+            r = self.church_row()
+            r["raw_payload"]["comptroller_parcel"][field] = "CHANGED"
+            self.assertEqual(property_lane(r)["exclude_reason"], "church_parcel_review")
+        r = self.church_row()
+        r["property_address"] = "2 Main St"
+        self.assertEqual(property_lane(r)["exclude_reason"], "church_parcel_review")
+        r = self.church_row()
+        r["raw_payload"]["comptroller_parcel"]["last_sale_date"] = "20261121"
+        self.assertEqual(property_lane(r)["exclude_reason"], "church_parcel_review")
+
+    def test_church_transfer_review_does_not_surface(self):
+        r = self.church_row()
+        r["raw_payload"]["church_review"]["status"] = "ownership_review"
+        self.assertEqual(property_lane(r)["exclude_reason"], "church_ownership_review")
+        r["raw_payload"]["church_review"]["status"] = "valuation_review"
+        self.assertEqual(property_lane(r)["exclude_reason"], "church_valuation_review")
+
+    def test_church_review_cannot_bypass_other_lanes_or_owner_conflict(self):
+        r = self.church_row()
+        r["distress_type"] = "TAX_LIEN"
+        with_review = property_lane(r)
+        del r["raw_payload"]["church_review"]
+        self.assertEqual(property_lane(r), with_review)
+        r = self.church_row()
+        r["owner_name_records"] = "UNRELATED BUYER LLC"
+        self.assertEqual(property_lane(r)["exclude_reason"], "owner_mismatch")
+
     def test_owner_type(self):
         self.assertEqual(owner_type("ACME HOLDINGS LLC"), "entity")
         self.assertEqual(owner_type("JANE DOE"), "person")

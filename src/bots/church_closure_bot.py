@@ -158,8 +158,9 @@ class ChurchClosureBot(BotBase):
                     full_name=SELLER,
                     owner_name_records=SELLER,
                     distress_type="CHURCH_CLOSURE",
-                    admin_notes=f"{c['church']} ({c['district']}) closed; property vested in the Conference "
-                                f"Trustees, who may sell it. Final service {c.get('final_service') or 'n/a'}.",
+                    admin_notes=f"{c['church']} ({c['district']}): the published closure resolution names "
+                                f"the Conference Trustees as the disposal authority. Current ownership and "
+                                f"availability require verification. Final service {c.get('final_service') or 'n/a'}.",
                     source_url=source if source.startswith("http") else None,
                     raw_payload={"source": "twk_umc_closures", "state": "TN", "property_lane": "commercial",
                                  "church_closure": c, "seller": SELLER},

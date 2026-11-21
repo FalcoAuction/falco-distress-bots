@@ -39,7 +39,7 @@ PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
 RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "davidson_tax_sale", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address",
-            "parcel",
+            "parcel", "church_review",
             # readiness (2026-11-20): condition tags and source/link fields
             "condition", "source", "docket_url", "source_url")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
