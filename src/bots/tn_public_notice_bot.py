@@ -321,6 +321,25 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "rutherford" and distress == "TAX_LIEN" and kind != "foreclosure":
+            text = " ".join(excerpt.split())
+            # The paper's tax category also carries HOA sales and municipal notices.
+            if re.match(r"(?:NOTICE OF HOMEOWNERS ASSOCIATION LIEN SALE|NOTICE of ELECTION Constitutional Amendments|"
+                        r"(?:TN-\d+\s+)?NOTICE TO ALL PROPERTY OWNERS OF TAXABLE PROPERTY IN RUTHERFORD COUNTY|"
+                        r"NOTICE OF PUBLIC HEARINGS - LEGAL NOTICE - (?:RESOLUTION |26-R-PSA)|"
+                        r"Legal Notice of Public Hearing The Murfreesboro Planning Commission|"
+                        r"The Town Council of the Town of Smyrna will hold a public hearing|"
+                        r"LEGAL NOTICE Pursuant to the provisions of Article V, Section 5.05 of the Town Charter)", text, re.I
+                        ) and not re.search(r"\b(?:delinquent (?:property )?tax|tax sale)", text, re.I):
+                return None
+            if re.search(r"MIDSOUTH CONSTRUCTION, L\.L\.C\., Case No\. : 24CV-406|"
+                         r"IN RE: K\.W\.R\..*?JOHN DOE FATHERS", text, re.I):
+                return None
+            if re.fullmatch(r"IN THE CHANCERY COURT FOR RUTHERFORD COUNTY, TENNESSEE AT MURFREESBORO "
+                            r"DELINQUENT PROPERTY TAX NOTICE AND ORDER FOR PUBLICATION CITY OF MURFREESBORO, "
+                            r"A Municipal Corporation in Rutherford County, Tennessee, organized and existing "
+                            r"under the laws of the State of[?….\s]*", text, re.I):
+                return None  # Repeated caption; the full notice can identify the account.
         if county == "shelby" and distress == "TAX_LIEN" and kind != "foreclosure":
             # Category 22 includes environmental warrants, rate hearings and
             # case-wide announcements. The trustee extract identifies the parcels.

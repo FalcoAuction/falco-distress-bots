@@ -212,6 +212,28 @@ class MainStreetMediaBot(BotBase):
 
     def _leads(self, url: str, county: str, issued: date, index: int, lines: List[str]) -> List[LeadPayload]:
         notice_id = f"msm:{url.rstrip('/').rsplit('/', 1)[-1]}:{index}"
+        if county == "rutherford":
+            text = " ".join(lines)
+            if "DELINQUENT PROPERTY TAX NOTICE AND ORDER FOR PUBLICATION" in text.upper():
+                matches = re.findall(
+                    r"map/group/control map/parcel # as ([\w/.-]+), Account Number (R\d+), "
+                    r"which property is also known by the address of (\d+ [^,]+), Murfreesboro, Tennessee",
+                    text, re.I)
+                case = re.search(r"INDIVIDUAL CASE NO\.\s*(\d+MB-\d+)\b", text, re.I)
+                if len(matches) == 1 and case:
+                    parcel, account, address = matches[0]
+                    party = re.search(r"\bTO:\s*(.+?)\s+TAKE NOTICE", text, re.I)
+                    years = re.search(r"property taxes for the years?\s+([\d ,and]+)", text, re.I)
+                    return [LeadPayload(
+                        bot_source=self.name, county=county, distress_type="TAX_LIEN",
+                        pipeline_lead_key=self.make_lead_key("msm_tax", f"{county}|{account}|{case[1]}"),
+                        property_address=f"{address}, Murfreesboro, TN", source_url=url,
+                        raw_payload={"kind": "tax_collection_suit", "publication": self.name,
+                                     "publication_date": issued.isoformat(), "notice_id": notice_id,
+                                     "case_number": case[1], "parcel": parcel, "tax_account": account,
+                                     "tax_years": re.findall(r"\b\d{4}\b", years[1]) if years else [],
+                                     "named_defendant": party[1] if party else None},
+                    )]
         kind = cn.classify(lines)
         if kind != cn.KIND_OTHER:
             lead = build_lead("court_notices", "main_street_media", "", issued,
