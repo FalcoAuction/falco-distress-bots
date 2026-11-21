@@ -57,6 +57,7 @@ from ._base import BotBase, LeadPayload
 from . import _trustee_notice as trustee_notice
 from . import _court_order as court_order
 from . import _roane_tax
+from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -116,6 +117,7 @@ class TnPublicNoticeBot(BotBase):
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
         roane_parcels = {}
+        tax_tables = {}
         seen_ids: set[str] = set()
 
         for cat_id, (distress, category_label) in CATEGORY_TO_DISTRESS.items():
@@ -141,6 +143,12 @@ class TnPublicNoticeBot(BotBase):
                         continue
                     ids_seen_this_cat.add(notice_id)
                     seen_ids.add(notice_id)
+                    if distress == "TAX_LIEN" and (row.get("county") or "").lower() in ("madison", "henry"):
+                        parsed = parcel_rows(row["county"].lower(), row)
+                        if parsed:
+                            for lead in parsed:
+                                tax_tables.setdefault(lead.county, {})[lead.pipeline_lead_key] = lead
+                            continue
                     if (row.get("county") or "").strip().lower() == "roane" and distress == "TAX_LIEN":
                         parcels = _roane_tax.exhibit_leads(row)
                         if parcels is not None:
@@ -158,6 +166,10 @@ class TnPublicNoticeBot(BotBase):
                     break
                 page_state = next_state
         _roane_tax.fill_roll(roane_parcels.values())
+        for table in tax_tables.values():
+            records = list(table.values())
+            fill_parcels(records)
+            leads.extend(records)
         return leads + list(roane_parcels.values())
 
     # ── Session bootstrap ───────────────────────────────────────────────────
@@ -330,6 +342,8 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if distress == "TAX_LIEN" and kind != "foreclosure" and non_tax_reason(county, excerpt):
+            return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
