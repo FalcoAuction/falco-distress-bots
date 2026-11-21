@@ -344,6 +344,16 @@ class TnPublicNoticeBot(BotBase):
         tax_lead = None
         if distress == "TAX_LIEN" and kind != "foreclosure" and non_tax_reason(county, excerpt):
             return None
+        if county == "lauderdale" and distress == "TAX_LIEN" and kind != "foreclosure":
+            text = " ".join(excerpt.split())
+            civic_notice = re.match(
+                r"(?:REQUEST FOR BIDS FOR SURPLUS PROPERTY Sealed Bids are invited and will be received by the City of Ripley|"
+                r"(?:PUBLIC NOTICE )?NOTICE OF INTENT TO DESTROY IMPOUNDED PROPERTY Lauderdale County Sheriff|"
+                r"NOTICE Pursuant to Section [\d-]+, Tennessee Code Annotated, the property assessment records "
+                r"of Lauderdale County will be available for public inspection|"
+                r"NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE The City of Ripley)", text, re.I)
+            if civic_notice and not re.search(r"\b(?:delinquent (?:real property |property )?tax|tax sale|back taxes)", text, re.I):
+                return None
         if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
             text = " ".join(excerpt.split())
             if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
