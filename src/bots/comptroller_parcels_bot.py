@@ -134,6 +134,21 @@ def dickson_tax_hit(index, printed, name_context=""):
             "source_url": "https://comptroller.tn.gov/content/dam/cot/pa/documents/landuse/maps/parcel-maps-data/Dickson.zip"}
 
 
+def wilson_tax_hit(con, printed):
+    m = re.fullmatch(r"(\d{1,3})([A-Z]?)(?:-([A-Z]))?-(\d{1,3})\.(\d{2})", printed)
+    if not m:
+        return None
+    sheet, block, group, lot, cents = m.groups()
+    prefix = f"095 {int(sheet):03}{block or ' '} {group or ' '} {int(lot):03}{cents} "
+    rows = con.execute("SELECT * FROM parcels WHERE county='WILSON' AND parcelid LIKE ? LIMIT 2",
+                       (prefix + "%",)).fetchall()
+    if len(rows) != 1 or not rows[0]["parcelid"].startswith(prefix + "000 "):
+        return None
+    return {**_record(rows[0]), "method": "wilson_tax_parcel", "county": "WILSON",
+            "situs_address": situs_address(rows[0]), "printed_parcel": printed,
+            "source_url": "https://comptroller.tn.gov/content/dam/cot/pa/documents/landuse/maps/parcel-maps-data/Wilson.zip"}
+
+
 def dickson_tax_patch(row, hit):
     patch = {"raw_payload": {**row["raw_payload"], "comptroller_parcel": hit}}
     if not row.get("owner_name_records") and hit.get("owner"):
@@ -231,6 +246,12 @@ class ComptrollerParcelsBot(BotBase):
                 if hit:
                     record(row, hit)
                 continue
+            if (row.get("county") == "wilson" and row.get("distress_type") == "TAX_LIEN"
+                    and row.get("bot_source") == "main_street_media" and row.get("printed_parcel")):
+                hit = wilson_tax_hit(idx.con, row["printed_parcel"])
+                if hit:
+                    record(row, hit)
+                continue
             if addr:
                 if idx.resolve_county(row.get("county"), addr):
                     stats["in_coverage_with_address"] += 1
@@ -304,11 +325,11 @@ class ComptrollerParcelsBot(BotBase):
         written = 0
         for u in updates:
             try:
-                if u["hit"].get("method") == "dickson_tax_parcel":
+                if u["hit"].get("method") in ("dickson_tax_parcel", "wilson_tax_parcel"):
                     from .free_county_completion_bot import apply
                     rows = (client.table("homeowner_requests_staging")
                             .select("id,raw_payload,owner_name_records,property_address,property_value,property_value_source")
-                            .eq("id", u["id"]).eq("bot_source", "main_street_media").eq("county", "dickson")
+                            .eq("id", u["id"]).eq("bot_source", "main_street_media").eq("county", u["hit"]["county"].lower())
                             .eq("distress_type", "TAX_LIEN").limit(1).execute().data or [])
                     if rows and rows[0]["raw_payload"].get("parcel") == u["hit"]["printed_parcel"]:
                         patch = dickson_tax_patch(rows[0], u["hit"])

@@ -321,6 +321,20 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "wilson" and distress == "TAX_LIEN":
+            # Category 22 includes zoning, towing and other counties' sales.
+            tax_case = re.search(r"delinquent\s+(?:(?:real estate|property)\s+)?tax|back tax sale|tax sale", excerpt, re.I)
+            if not tax_case:
+                return None
+            from .main_street_media_bot import LABELED_PARCEL_RE
+            maps = LABELED_PARCEL_RE.findall(excerpt.upper())
+            situs = re.search(r"\b(?:property address|street address)\s*:\s*(\d[^;\n]{3,90})", excerpt, re.I)
+            address = self._extract_address(situs[1], city) if situs else None
+            if len(maps) > 1 or not (maps or address):
+                return None
+            printed = "-".join(x.replace(" ", "") for x in maps[0] if x) if maps else None
+            tax_lead = (printed, address)
+            kind = None
         if county == "hamilton" and distress == "TAX_LIEN":
             # Newspaper search categories also return meetings, court calendars
             # and sales in other counties. A case number is not a street number.
