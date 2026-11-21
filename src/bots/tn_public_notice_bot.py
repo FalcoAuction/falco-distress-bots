@@ -321,6 +321,13 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "cheatham" and distress == "TAX_LIEN":
+            if re.match(r"\s*(?:Governor \(All Precincts\) Vote for|Copyright Notice\s+Copyright Notice|"
+                        r"(?:TN-\d+\s+)?Cheatham County Planning Commission\s+Meeting Agenda)", excerpt, re.I):
+                return None
+            if (re.search(r"Civil Action No\.?(?:\s+)19076\b", excerpt, re.I)
+                    and not re.search(r"\b(?:parcel|property address|tract [A-Z]\b)", excerpt, re.I)):
+                return None  # The full Ledger edition carries the individual tracts.
         if county == "sumner" and distress == "TAX_LIEN" and re.match(
             r"\s*(?:public\s+notice\s*[:\-]?\s*)?(?:"
             r"city of white house\s+meeting of the municipal planning commission\b|"
