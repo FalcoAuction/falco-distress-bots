@@ -87,6 +87,33 @@ class StalledBuildBot(BotBase):
     throttle_seconds = 0.5
     expected_min_yield = 0
 
+    def _write_staging(self, leads: List[LeadPayload]) -> tuple[int, int]:
+        result = super()._write_staging(leads)
+        # Base dedupe only touches last_seen. Refresh this lane's county review
+        # as well, otherwise a resolved case could remain corroborated forever.
+        from ._base import _supabase
+        from .free_county_completion_bot import apply
+        client = _supabase()
+        if client is None:
+            return result
+        keyed = {lead.pipeline_lead_key: lead for lead in leads}
+        keys = list(keyed)
+        for offset in range(0, len(keys), BATCH):
+            rows = (client.table("homeowner_requests_staging")
+                    .select("id,pipeline_lead_key,raw_payload,property_value,property_value_source")
+                    .eq("bot_source", self.name).eq("distress_type", "STALLED_BUILD")
+                    .in_("pipeline_lead_key", keys[offset:offset + BATCH]).execute().data) or []
+            for row in rows:
+                lead = keyed[row["pipeline_lead_key"]]
+                raw = dict(row.get("raw_payload") or {})
+                raw["stalled_review"] = lead.raw_payload["stalled_review"]
+                raw["metro_parcel"] = {**(raw.get("metro_parcel") or {}), **lead.raw_payload["metro_parcel"]}
+                patch = {"raw_payload": raw}
+                if not row.get("property_value") or row.get("property_value_source") in ("metro_nashville_parcels", "permit_construction_cost_proxy"):
+                    patch.update(property_value=lead.property_value, property_value_source="metro_nashville_parcels")
+                apply(client, "homeowner_requests_staging", row, patch)
+        return result
+
     def scrape(self) -> List[LeadPayload]:
         res = self.fetch(PERMITS, params={"where": WHERE, "outFields": "*", "returnGeometry": "false",
                                           "resultRecordCount": 2000, "orderByFields": "Date_Issued DESC", "f": "json"},

@@ -1,5 +1,6 @@
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, MagicMock, patch
+from types import SimpleNamespace
 from src.bots.stalled_build_bot import review, stalled, StalledBuildBot
 
 
@@ -49,6 +50,26 @@ class StalledBuildTests(unittest.TestCase):
         self.assertEqual(lead.property_value, 95000)
         self.assertEqual(lead.raw_payload['permit']['Const_Cost'], 900000)
         self.assertEqual(lead.raw_payload['stalled_review']['status'], 'watchlist')
+
+    def test_repeat_scan_refreshes_review_without_overwriting_paid_value(self):
+        client = MagicMock()
+        query = client.table.return_value
+        query.select.return_value = query
+        query.eq.return_value = query
+        query.in_.return_value = query
+        query.execute.return_value.data = [{'id': '1', 'pipeline_lead_key': 'key',
+            'property_value': 400000, 'property_value_source': 'paid_avm',
+            'raw_payload': {'stalled_review': {'status': 'corroborated'}, 'other_lane': {'keep': True}}}]
+        lead = SimpleNamespace(pipeline_lead_key='key', property_value=95000,
+            raw_payload={'stalled_review': {'status': 'watchlist'}, 'metro_parcel': {'apn': '123'}})
+        with patch('src.bots._base.BotBase._write_staging', return_value=(0, 1)), \
+                patch('src.bots._base._supabase', return_value=client), \
+                patch('src.bots.free_county_completion_bot.apply') as write:
+            self.assertEqual(StalledBuildBot()._write_staging([lead]), (0, 1))
+            changed = write.call_args.args[3]
+            self.assertNotIn('property_value', changed)
+            self.assertEqual(changed['raw_payload']['stalled_review']['status'], 'watchlist')
+            self.assertEqual(changed['raw_payload']['other_lane'], {'keep': True})
 
 
 if __name__ == '__main__':
