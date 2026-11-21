@@ -6,6 +6,7 @@ from src.bots._free_data import county_patch, hmda_principal_repair, notice_phon
 from src.bots.auto_promoter_bot import AutoPromoterBot, _is_defensible, SHARED_COLUMNS
 from src.bots.phone_resolver_bot import PhoneResolverBot
 from src.bots.hmda_enricher_bot import HmdaEnricherBot
+from src.bots.rutherford_assessor_bot import RutherfordAssessorBot
 from src.bots.shelby_free_chain_bot import ShelbyFreeChainBot, evidence_stack
 from src.bots.free_lien_review_bot import review
 from src.enrichment.shortlist import register_system
@@ -20,6 +21,44 @@ class EmptyClient:
 
 
 class FreeDataTests(unittest.TestCase):
+    def test_rutherford_pages_before_checking_markers_and_preserves_sale_order(self):
+        records = [{"id": f"{i:08d}-0000-0000-0000-000000000000", "county": "davidson"}
+                   for i in range(1, 1004)]
+        for i, sale in ((0, "2026-12-01"), (1, "2027-01-01"), (1001, "2026-12-20")):
+            records[i].update(county="Rutherford County", property_address="123 MAIN ST",
+                              property_value=None, trustee_sale_date=sale)
+        class Client(EmptyClient):
+            def table(self, name):
+                self.table_name = name
+                return self
+            def select(self, fields):
+                self.fields = fields
+                return self
+            def gt(self, key, value):
+                self.after = value
+                return self
+            def in_(self, key, values):
+                self.ids = values
+                return self
+            def or_(self, *a):
+                raise AssertionError("unbounded address/JSON query returned")
+            def execute(self):
+                if self.table_name == "homeowner_requests":
+                    return SimpleNamespace(data=[])
+                if "marker:" in self.fields:
+                    return SimpleNamespace(data=[{"id": rid, "marker": {"status": "not_found"}
+                                                  if rid == records[1]["id"] else None} for rid in self.ids])
+                return SimpleNamespace(data=[r for r in records if r["id"] > self.after][:1000])
+        result = RutherfordAssessorBot()._candidates(Client())
+        self.assertEqual([r["id"] for r in result], [records[1001]["id"], records[0]["id"]])
+
+    def test_rutherford_query_failure_is_not_reported_as_no_candidates(self):
+        class Broken(EmptyClient):
+            def execute(self):
+                raise RuntimeError("database unavailable")
+        with self.assertRaises(RuntimeError):
+            RutherfordAssessorBot()._candidates(Broken())
+
     def test_shelby_request_budget_goes_to_queue_first(self):
         class Pages(EmptyClient):
             pages = iter([[{"id": "first", "raw_payload": {}},
