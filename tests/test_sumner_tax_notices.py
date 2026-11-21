@@ -12,7 +12,7 @@ class SumnerTaxNotices(unittest.TestCase):
         for heading in ("CITY OF WHITE HOUSE Meeting of the Municipal Planning Commission",
                         "PUBLIC NOTICE DISTRIBUTION OF EXCESS PROCEEDS FROM THE 2024 SUMNER COUNTY DELINQUENT TAX SALE"):
             self.assertIsNone(self.build(heading))
-            self.assertIsNotNone(self.build(heading, county="robertson"))
+            self.assertIsNotNone(self.build(heading, county="maury"))
 
     def test_parcel_and_foreclosure(self):
         self.assertEqual(self.build("DELINQUENT TAX SALE PARCEL NO: 011-009.00").raw_payload["parcel"], "011-009.00")
