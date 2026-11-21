@@ -56,6 +56,7 @@ from bs4 import BeautifulSoup
 from ._base import BotBase, LeadPayload
 from . import _trustee_notice as trustee_notice
 from . import _court_order as court_order
+from . import _roane_tax
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -114,6 +115,7 @@ class TnPublicNoticeBot(BotBase):
 
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
+        roane_parcels = {}
         seen_ids: set[str] = set()
 
         for cat_id, (distress, category_label) in CATEGORY_TO_DISTRESS.items():
@@ -139,6 +141,12 @@ class TnPublicNoticeBot(BotBase):
                         continue
                     ids_seen_this_cat.add(notice_id)
                     seen_ids.add(notice_id)
+                    if (row.get("county") or "").strip().lower() == "roane" and distress == "TAX_LIEN":
+                        parcels = _roane_tax.exhibit_leads(row)
+                        if parcels is not None:
+                            for parcel in parcels:
+                                roane_parcels.setdefault(parcel.pipeline_lead_key, parcel)
+                            continue
                     lead = self._build_lead(row, distress, category_label)
                     if lead is not None:
                         leads.append(lead)
@@ -149,7 +157,8 @@ class TnPublicNoticeBot(BotBase):
                 if next_state is None:
                     break
                 page_state = next_state
-        return leads
+        _roane_tax.fill_roll(roane_parcels.values())
+        return leads + list(roane_parcels.values())
 
     # ── Session bootstrap ───────────────────────────────────────────────────
 
@@ -321,6 +330,16 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "roane" and distress == "TAX_LIEN" and kind != "foreclosure":
+            if re.match(r"(?:Governor \(All Precincts\) Vote for|NOTICE of ELECTION Tennessee Constitutional Amendments|"
+                        r"PUBLIC NOTICE NOTICE OF PROPERTY MAINTENANCE VIOLATION AND INTENT TO REMEDY|"
+                        r"(?:NOTICE OF DELINQUENT TAX LAWSUIT )?IN THE CHANCERY COURT FOR CHEATHAM COUNTY)", excerpt, re.I):
+                return None
+            if (re.match(r"IN THE CHANCERY COURT FOR ROANE COUNTY", excerpt, re.I)
+                    and re.search(r"CITY OF (?:KINGSTON|HARRIMAN|OLIVER SPRINGS|OAK RIDGE)", excerpt, re.I)
+                    and "DELINQUENT TAXPAYERS" in excerpt.upper()
+                    and not re.search(r"\b(?:parcel|property address)\b|\d+/\d+[A-Z]?/", excerpt, re.I)):
+                return None  # A municipality and court caption alone do not identify a parcel.
         if county == "hardeman" and distress == "TAX_LIEN" and kind != "foreclosure":
             # One excerpt can be the lead item of an entire legal edition. Pull
             # tax exhibits from the full PDF rather than assign the meeting address.
