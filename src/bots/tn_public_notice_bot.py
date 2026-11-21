@@ -330,6 +330,17 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "hawkins" and distress == "TAX_LIEN" and kind != "foreclosure":
+            text = " ".join(excerpt.split())
+            if not re.search(r"\b(?:delinquent (?:property |real property )?tax|tax sale|back taxes)", text, re.I):
+                if re.match(r"(?:IN THE NOVEMBER 3, 2026 GENERAL ELECTION POLLS WILL OPEN|"
+                            r"NOTICE OF SPECIAL CALLED MEETING AND PUBLIC HEARING The Board of Mayor and Aldermen "
+                            r"of the Town of Rogersville|TOWN OF MOUNT CARMEL, TENNESSEE PUBLIC NOTICE "
+                            r"ORDINANCE #26-549\b|Surgoinsville Utility District .+?Request for Bid on Surplus Property)", text, re.I):
+                    return None
+                if (re.match(r"(?:CHANCERY COURT SALE|IN THE CHANCERY COURT .+? LAND SALE NOTICE)", text, re.I)
+                        and re.search(r"\bRE:\s*(?:ESTATE OF\b|Peggy Lane Castle\b.+?\bVS\.\s*Rebecca Kern\b)", text, re.I)):
+                    return None  # Estate administrations and a private-party suit.
         if county == "roane" and distress == "TAX_LIEN" and kind != "foreclosure":
             if re.match(r"(?:Governor \(All Precincts\) Vote for|NOTICE of ELECTION Tennessee Constitutional Amendments|"
                         r"PUBLIC NOTICE NOTICE OF PROPERTY MAINTENANCE VIOLATION AND INTENT TO REMEDY|"
