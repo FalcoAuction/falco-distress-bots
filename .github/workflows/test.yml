@@ -12,6 +12,11 @@ on:
       - ".github/workflows/test.yml"
   pull_request:
   workflow_dispatch:
+    inputs:
+      shelby_parcels:
+        description: Verify two current Shelby parcels against the county trustee
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -32,3 +37,26 @@ jobs:
       - name: Run tests
         # No Supabase creds on purpose: the tests fake the client.
         run: python -m unittest discover -s tests -v
+
+      - name: Verify live Shelby parcel lookups
+        if: github.event_name == 'workflow_dispatch' && inputs.shelby_parcels
+        run: |
+          python - <<'PY'
+          from datetime import date
+          from src.bots.shelby_tax_sale_bot import ShelbyTaxSaleBot, parcel_evidence
+          bot = ShelbyTaxSaleBot()
+          leads = bot.scrape()
+          verified = 0
+          for lead in leads[:5]:
+              response = bot.fetch(lead.source_url, timeout=20)
+              if response is None or not response.ok:
+                  raise SystemExit("County parcel page unavailable")
+              evidence = parcel_evidence(response.text, lead.raw_payload, date.today())
+              if evidence.get("primary_owner") and evidence.get("estimated_appraisal"):
+                  verified += 1
+              if verified == 2:
+                  break
+          if verified < 2:
+              raise SystemExit(f"Only {verified} complete parcel lookups")
+          print(f"Verified owner and assessment for {verified} scheduled Shelby parcels")
+          PY
