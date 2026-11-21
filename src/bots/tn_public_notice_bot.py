@@ -321,6 +321,16 @@ class TnPublicNoticeBot(BotBase):
         # Taxes", and county-wide "taxes are due" notices name no property.
         kind = trustee_notice.classify(excerpt)
         tax_lead = None
+        if county == "maury" and distress == "TAX_LIEN" and kind != "foreclosure":
+            # The category contains county meeting announcements and citywide rate changes.
+            municipal = re.match(
+                r"\s*(?:LEGAL NOTICE OF ZONING MAP AMENDMENTS(?: AND TEMPORARY DATA CENTER MORATORIUM)? "
+                r"MAURY COUNTY LEGISLATIVE BODY|LEGAL NOTICE OF PUBLIC HEARING MAURY COUNTY LEGISLATIVE BODY "
+                r"Notice is hereby given that the Maury County Legislative Body will hold a Public Hearing|"
+                r"City of Spring Hill Board of Mayor and Alderm[ae]n NOTICE OF INTENT TO EXCEED CERTIFIED TAX RATE|"
+                r"NOTICE OF PUBLIC HEARING ON PROPERTY TAX LEVY ORDINANCE FOR THE CITY OF COLUMBIA)", excerpt, re.I)
+            if municipal and not re.search(r"\b(?:delinquent (?:property )?tax(?:es)?|tax sales?|back taxes)\b", excerpt, re.I):
+                return None
         if county == "robertson" and distress == "TAX_LIEN":
             if re.match(r"\s*(?:BOARD OF MAYOR AND ALDERMEN\b.{0,220}?City of White House|"
                         r"CITY OF WHITE HOUSE\s+Meeting of the Municipal Planning Commission|"
