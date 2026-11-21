@@ -63,9 +63,14 @@ class LienShortlistBot(BotBase):
             day = (client.table("lead_opportunities").select("captured_on")
                    .order("captured_on", desc=True).limit(1).execute().data) or []
             if day:
-                opps = (client.table("lead_opportunities")
-                        .select("staging_id,county,sale_date,expected_fee,property_value")
-                        .eq("captured_on", day[0]["captured_on"]).limit(5000).execute().data) or []
+                for offset in range(0, 5000, 1000):
+                    batch = (client.table("lead_opportunities")
+                            .select("staging_id,county,sale_date,expected_fee,property_value")
+                            .eq("captured_on", day[0]["captured_on"]).lt("rank", 100000)
+                            .order("rank").range(offset, offset + 999).execute().data) or []
+                    opps.extend(batch)
+                    if len(batch) < 1000:
+                        break
             opps = [o for o in opps if county_key(o.get("county")) in IN_SCOPE]
             raw_by_id: Dict[str, Dict[str, Any]] = {}
             ids = [o["staging_id"] for o in opps if o.get("staging_id")]

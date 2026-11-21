@@ -1,41 +1,7 @@
-"""
-Multi-source phone resolver — replaces BatchData skip-trace at $0.
+"""Preserve public notice contact candidates separately from owner phones.
 
-The honest 2026 reality: most TN public records strip phone before
-publication (privacy redaction). The pre-2015 era of free homeowner-
-phone-by-name lookups is over. What's still recoverable at $0:
-
-  1. Phones embedded in body text of notices we already scrape
-     (foreclosure notices, probate notices, court filings) — extracted
-     via regex on raw_payload['body'] which we already store
-  2. Craigslist FSBO listings (phone is in the listing description)
-  3. CourtListener bankruptcy attorneys (firm phone via API attorney[]
-     field) — the debtor's lawyer, not the debtor, but a legitimate
-     contact path for a bankruptcy lead
-  4. Cross-reference: when the same person appears in two scraped
-     sources, harvest phone from whichever has it
-  5. Owner mailing address from county assessor records (Davidson,
-     Williamson, Shelby, Rutherford, Hamilton CSV) — for direct-mail
-     dispatch when no phone is available
-
-Coverage estimate at $0 with these sources alone: ~10-20% of leads
-get a usable phone (lower than the 25-35% I initially estimated;
-most TN open-data sources block bots or strip PII). The 80-90% of
-leads without a phone get routed to direct-mail dispatch instead.
-
-For higher coverage Patrick has authorized voter-file purchase
-($500/yr) as a future option; this bot's framework supports adding
-that as another `Source` class without changes to the resolver core.
-
-Confidence scoring per phone:
-  1.00 — phone explicitly published in foreclosure/probate notice
-         alongside the homeowner's name
-  0.95 — phone in Craigslist FSBO listing they wrote themselves
-  0.80 — phone matched to attorney-of-record (bankruptcy attorney)
-  0.60 — phone from cross-reference of name across two sources
-  0.40 — voter file phone (when wired)
-
-Distress type: N/A (utility enricher).
+Homeowner phone/email discovery belongs to the paid contact service.
+Unattributed numbers are review candidates, not verified professional contacts.
 """
 
 from __future__ import annotations
@@ -229,7 +195,7 @@ def harvest_from_existing_lead(row: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 class PhoneResolverBot(BotBase):
     name = "phone_resolver"
-    description = "Multi-source $0 homeowner-phone resolver (replaces BatchData skip-trace)"
+    description = "Public notice contact candidates; never writes owner phones"
     throttle_seconds = 0.0
     expected_min_yield = 1
     max_leads_per_run = 5000
@@ -279,50 +245,18 @@ class PhoneResolverBot(BotBase):
                         no_phones_found += 1
                         continue
 
-                    # Pick highest-confidence phone
-                    best = max(candidates, key=lambda c: c["confidence"])
-                    phone = best["phone"]
-
-                    # Skip if existing phone is already higher confidence
-                    existing_meta = row.get("phone_metadata") or {}
-                    if not isinstance(existing_meta, dict):
-                        existing_meta = {}
-                    existing_resolver = existing_meta.get("phone_resolver") or {}
-                    if (existing_resolver.get("phone") == phone and
-                        existing_resolver.get("confidence", 0) >= best["confidence"]):
+                    raw = dict(row.get("raw_payload") or {})
+                    prior = raw.get("public_contact_candidates") or []
+                    merged = {(c.get("phone"), c.get("source")): c for c in prior if isinstance(c, dict)}
+                    for c in candidates:
+                        merged[(c["phone"], c["source"])] = {**c, "role": "unverified_notice_contact"}
+                    found = list(merged.values())
+                    if found == prior:
                         already_had += 1
                         continue
-
-                    update: Dict[str, Any] = {}
-                    # Only set phone if currently null OR confidence beats the
-                    # best known global phone confidence (BatchData, prior
-                    # resolver, etc). Notice-body attorney phones must not
-                    # overwrite a stronger homeowner skip trace.
-                    current_conf = existing_resolver.get("confidence", 0)
-                    global_conf = phone_trust(row).confidence if row.get("phone") else 0
-                    current_conf = max(current_conf, global_conf)
-                    if not row.get("phone") or best["confidence"] > current_conf:
-                        update["phone"] = phone
-
-                    existing_meta["phone_resolver"] = {
-                        "phone": phone,
-                        "source": best["source"],
-                        "confidence": best["confidence"],
-                        "all_candidates": candidates,
-                        "resolved_at": datetime.now(timezone.utc).isoformat(),
-                    }
-                    update["phone_metadata"] = existing_meta
-
-                    try:
-                        client.table(table).update(update).eq("id", row["id"]).execute()
-                        resolved += 1
-                        if table == "homeowner_requests" and "phone" in update:
-                            record_field(client, row["id"], "phone", phone,
-                                          f"phone_resolver:{best['source']}",
-                                          confidence=best["confidence"],
-                                          metadata=best.get("metadata"))
-                    except Exception as e:
-                        self.logger.warning(f"  update failed id={row['id']}: {e}")
+                    raw["public_contact_candidates"] = found
+                    from .free_county_completion_bot import apply
+                    resolved += apply(client, table, row, {"raw_payload": raw})
 
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{tb.format_exc()}"
@@ -402,17 +336,6 @@ class PhoneResolverBot(BotBase):
 
         # Source 1: notice body (foreclosure / probate / Hamilton Herald)
         candidates.extend(harvest_from_notice_body(raw))
-
-        # Source 2: Craigslist FSBO
-        if row.get("bot_source") == "craigslist_tn":
-            candidates.extend(harvest_from_craigslist(raw))
-
-        # Source 3: CourtListener bankruptcy
-        if row.get("bot_source") == "courtlistener_bankruptcy":
-            candidates.extend(harvest_from_courtlistener(raw))
-
-        # Source 4: existing fields
-        candidates.extend(harvest_from_existing_lead(row))
 
         # Dedupe by phone, keep highest confidence per phone
         by_phone: Dict[str, Dict[str, Any]] = {}

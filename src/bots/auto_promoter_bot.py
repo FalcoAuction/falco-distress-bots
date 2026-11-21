@@ -3,15 +3,15 @@ without manual /admin/staging review.
 
 Eligibility (the "no human review needed" gate — every condition must
 pass):
-  - county in Middle TN focus
+  - county in Tennessee
   - owner_name_records OR full_name set
   - property_address set
   - mortgage_balance set AND from a defensible source (ROD-verified,
-    HMDA sale-anchored or year-anchored, nashville_ledger extracted,
+    nashville_ledger extracted,
     or amortized:* — written by mortgage_amortizer)
   - property_value (AVM) set
   - distress_type set (not null)
-  - phone set OR will be backfilled tomorrow's 6am skip-trace pass
+  - non-foreclosure: trusted owner phone or a named professional contact
   - NOT a duplicate of an existing live lead (match by
     pipeline_lead_key OR property_address+owner_name)
 
@@ -43,6 +43,9 @@ from typing import Any, Dict, List, Optional, Set
 from ._base import BotBase, _supabase
 from ._provenance import record_field
 from ._address import is_natural_person
+from ._paid import paid_data_enabled
+from ._field_confidence import phone_trust
+from ._free_data import entity_eligible, professional_contact_ready
 from ._twilio_lookup import (
     get_twilio_client,
     normalize_phone_e164,
@@ -91,24 +94,14 @@ def _is_defensible(pm: Dict[str, Any]) -> tuple:
         return True, "ustitlesearch_rod"
     if src == "nashville_ledger_extracted":
         return True, "nashville_ledger_extracted"
-    if src == "hmda_match":
-        # Sale-anchored or year-anchored = unambiguously defensible
-        if sig.get("sale_anchored") or sig.get("year_anchored"):
-            return True, "hmda_match"
-        # Wide single match (no anchor but only one HMDA record matched the
-        # property) hits 0.65 — accept; wide multi (0.45) stays in staging.
-        try:
-            if float(sig.get("confidence") or 0) >= 0.65:
-                return True, "hmda_match_wide_single"
-        except (TypeError, ValueError):
-            pass
+    # HMDA identifies a possible origination, never a verified current balance.
     return False, ""
 
 
 # Columns shared between staging + live. Translated when promoting.
 SHARED_COLUMNS = (
     "pipeline_lead_key", "property_address", "county", "full_name",
-    "owner_name_records", "email", "phone", "property_value",
+    "owner_name_records", "email", "phone", "property_value", "property_value_source", "year_built",
     "mortgage_balance", "trustee_sale_date", "distress_type",
     "admin_notes", "raw_payload", "priority_score", "phone_metadata",
     "alternate_phones",
@@ -118,7 +111,7 @@ SHARED_COLUMNS = (
 class AutoPromoterBot(BotBase):
     name = "auto_promoter"
     description = (
-        "Promotes Middle TN staging leads to live homeowner_requests "
+        "Promotes Tennessee staging leads to live homeowner_requests "
         "without manual review when defensible-mortgage gate passes."
     )
     throttle_seconds = 0
@@ -181,7 +174,7 @@ class AutoPromoterBot(BotBase):
         # that case we still promote (graceful degradation), but log
         # a warning so we know phones are going to the dialer
         # unvalidated.
-        twilio_client = get_twilio_client()
+        twilio_client = get_twilio_client() if paid_data_enabled() and not sample else None
         if twilio_client is None:
             self.logger.info(
                 "Twilio client unavailable (env or pkg) — promoting "
@@ -238,18 +231,9 @@ class AutoPromoterBot(BotBase):
                 if not row.get("distress_type"):
                     skipped_missing_field += 1
                     continue
-                # LLC / business-owner filter — these can't be helped by
-                # the FALCO playbook (we negotiate equity for natural
-                # persons facing foreclosure; corporate owners have
-                # different legal posture, often investors, often
-                # represented). Audit showed Jebra Home Contractors LLC,
-                # Quality Clean Construction LLC, and similar polluting
-                # the active dialer list. Reject here so they never
-                # make it to live. The corresponding regex in
-                # route_high_probability.sql kept catching them on the
-                # query side; this kills them at promotion.
+                # Entity-owned assets are eligible only in supported asset lanes.
                 owner = (row.get("owner_name_records") or row.get("full_name") or "")
-                if not is_natural_person(owner):
+                if not is_natural_person(owner) and not entity_eligible(row):
                     skipped_business_owner += 1
                     continue
                 dt = (row.get("distress_type") or "").upper()
@@ -272,11 +256,9 @@ class AutoPromoterBot(BotBase):
                         skipped_not_defensible += 1
                         continue
                 else:
-                    # Loose gate for non-foreclosure: must have a phone
-                    # (otherwise the dialer can't call them) and a
-                    # distress signal. Mortgage data is irrelevant to the
-                    # conversation; free-and-clear owners are best-case.
-                    if not row.get("phone"):
+                    # A named professional contact is a valid research route; keep
+                    # it separate from the paid-service homeowner phone field.
+                    if not (phone_trust(row).trusted_for_hard_gate or professional_contact_ready(row)):
                         skipped_missing_field += 1
                         continue
                     source_label = f"non_foreclosure_{dt.lower()}"
@@ -345,7 +327,7 @@ class AutoPromoterBot(BotBase):
                 # live insert via the phone_metadata column we'll set
                 # below. Skip if Twilio unavailable, missing/unparseable
                 # phone, or recent (<30d) validation already exists.
-                if twilio_client is not None:
+                if twilio_client is not None and paid_data_enabled():
                     e164 = normalize_phone_e164(row.get("phone"))
                     if e164:
                         existing_lookup = pm.get("twilio_lookup") or {}

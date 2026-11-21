@@ -18,6 +18,7 @@ HARD_EQUITY_CONFIDENCE = 0.70
 SCORING_EQUITY_CONFIDENCE = 0.40
 
 NON_PAYOFF_KINDS = {
+    "hmda_origination",
     "original_principal",
     "default_amount",
     "delinquent_amount",
