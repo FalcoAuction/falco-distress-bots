@@ -116,6 +116,21 @@ def _build_owner_mailing(row: Dict[str, str]) -> Optional[str]:
     return full or None
 
 
+def tax_roll_parcel(raw):
+    if not isinstance(raw, dict):
+        return None
+    review = raw.get("hamilton_roll_valuation") or {}
+    if review.get("parcel"):
+        return review["parcel"]
+    if str(raw.get("county") or "").lower() == "hamilton" and "cumulative_owed" in raw:
+        return raw.get("parcel")
+    return None
+
+
+def may_update_roll_value(source):
+    return source in (None, "", "hamilton_assessor", "xref_avm_enricher")
+
+
 class HamiltonAssessorBot(BotBase):
     name = "hamilton_assessor"
     description = "Hamilton County assessor (Chattanooga) — AVM + sales + owner from weekly CSV"
@@ -161,6 +176,10 @@ class HamiltonAssessorBot(BotBase):
         # Also build an address-keyed secondary index for leads that
         # don't have parcel ID yet
         addr_index = self._build_address_index(index)
+        roll_index = {}
+        for parcel, facts in index.items():
+            key = "".join(parcel.split())
+            roll_index[key] = None if key in roll_index else facts
 
         # Step 2: walk Hamilton leads needing AVM
         enriched = 0
@@ -179,7 +198,11 @@ class HamiltonAssessorBot(BotBase):
                 if str(raw0.get("parcel") or "").upper().startswith("PER-"):
                     skipped += 1
                     continue
-                hit = self._lookup(row, index, addr_index)
+                roll_key = tax_roll_parcel(row.get("raw_payload"))
+                if roll_key and roll_key.startswith("PER-"):
+                    skipped += 1
+                    continue
+                hit = roll_index.get("".join(roll_key.split())) if roll_key else self._lookup(row, index, addr_index)
                 if hit is None:
                     no_match += 1
                     continue
@@ -188,7 +211,10 @@ class HamiltonAssessorBot(BotBase):
                 # Value only fills a gap; leads that already carry a value
                 # are here for the parcel facts (land use, acres, mailing)
                 # the commercial / land lanes read.
-                if hit.get("appraised") and not row.get("property_value"):
+                if hit.get("appraised") and (not row.get("property_value") or
+                        (roll_key and may_update_roll_value(row.get("property_value_source")) and
+                         (row.get("property_value_source") != "hamilton_assessor" or
+                          float(row["property_value"]) != float(hit["appraised"])))):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "hamilton_assessor"
                 if hit.get("owner") and not row.get("owner_name_records"):
@@ -199,6 +225,7 @@ class HamiltonAssessorBot(BotBase):
                 if existing_raw.get("hamilton_assessor") == hit and "property_value" not in update:
                     skipped += 1
                     continue
+                existing_raw = dict(existing_raw)
                 existing_raw["hamilton_assessor"] = hit
                 update["raw_payload"] = existing_raw
                 if not update:
@@ -207,7 +234,13 @@ class HamiltonAssessorBot(BotBase):
 
                 table = row["__table__"]
                 try:
-                    client.table(table).update(update).eq("id", row["id"]).execute()
+                    if roll_key:
+                        from .free_county_completion_bot import apply
+                        if not apply(client, table, row, update):
+                            skipped += 1
+                            continue
+                    else:
+                        client.table(table).update(update).eq("id", row["id"]).execute()
                     enriched += 1
                     if table == "homeowner_requests" and "property_value" in update:
                         record_field(client, row["id"], "property_value",
@@ -361,7 +394,7 @@ class HamiltonAssessorBot(BotBase):
                     q = (
                         client.table(table)
                         .select("id, property_address, county, owner_name_records, "
-                                "property_value, raw_payload")
+                                "property_value, property_value_source, raw_payload, phone_metadata")
                         .or_(OR_FILTER)
                         .order("id")
                         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
