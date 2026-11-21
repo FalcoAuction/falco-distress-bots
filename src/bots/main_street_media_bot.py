@@ -249,6 +249,7 @@ class MainStreetMediaBot(BotBase):
                 source_url=url,
             )]
         out = []
+        text = " ".join(lines)
         for parcel in tax_parcels(lines):
             out.append(LeadPayload(
                 bot_source=self.name,
@@ -259,6 +260,8 @@ class MainStreetMediaBot(BotBase):
                             f"tax years {', '.join(parcel['tax_years'])}.",
                 raw_payload={"publication": "main_street_media", "publication_date": issued.isoformat(),
                              "kind": "chancery_tax_notice", "parcel": parcel["parcel"],
+                             **({"tax_name_context": text[:text.index(parcel["parcel"])][-90:]}
+                                if county == "dickson" and "/" in parcel["parcel"] and parcel["parcel"] in text else {}),
                              "tax_years": parcel["tax_years"], "notice_id": notice_id,
                              "headline": " ".join(lines[:3])[:300]},
                 source_url=url,

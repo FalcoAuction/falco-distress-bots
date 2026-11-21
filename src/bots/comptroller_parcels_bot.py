@@ -35,8 +35,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ._base import BotBase, _supabase
-from ._bk_match import district_counties, match_debtors
-from ._comptroller import ParcelIndex, build_index
+from ._bk_match import district_counties, match_debtors, situs_address
+from ._comptroller import ParcelIndex, build_index, _record
 
 ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = ROOT / "data" / "comptroller"
@@ -87,7 +87,62 @@ def _save_tried(ids: set) -> None:
 VERSION = "comptroller-parcels-2026-11-05"
 FIELDS = ("id,county,property_address,owner_name_records,full_name,distress_type,property_value,"
           "done:raw_payload->comptroller_parcel->>parcelid,court:raw_payload->>court_id,"
-          "state:raw_payload->>state,borrowers:raw_payload->borrowers")
+          "state:raw_payload->>state,borrowers:raw_payload->borrowers,bot_source,printed_parcel:raw_payload->>parcel,tax_name_context:raw_payload->>tax_name_context")
+
+
+def dickson_tax_index(con):
+    """Index Dickson roll numbers in the newspaper format, including special interests."""
+    result = {}
+    for parcel in con.execute("SELECT * FROM parcels WHERE county='DICKSON'"):
+        m = re.fullmatch(r"022 (\d{3})([A-Z]?) +([A-Z]?) +(\d{3})(\d{2}) (\d{3}) \d{4}", parcel["parcelid"])
+        if not m:
+            continue
+        sheet, block, group, whole, cents, interest = m.groups()
+        key = "-".join(x for x in (str(int(sheet)), block + group, f"{int(whole)}.{cents}") if x)
+        if interest != "000":
+            key += " " + interest
+        # A duplicate on the roll needs manual review.
+        result[key] = None if key in result else parcel
+    return result
+
+
+def dickson_tax_hit(index, printed, name_context=""):
+    parcel = index.get(printed)
+    split = re.fullmatch(r"(\d+)([A-Z])/(\d+)([A-Z])-([A-Z])-(\d+\.\d{2})", printed or "")
+    if split:
+        # Both sheets can contain the printed lot. Require an adjacent owner name
+        # from this notice and exactly one matching candidate across both sheets.
+        a, b, c, d, group, lot = split.groups()
+        matches = []
+        context = re.sub(r"[^A-Z ]", " ", (name_context or "").upper()).split()
+        while context and context[-1] in {"ETAL", "ET", "AL"}:
+            context.pop()
+        for key in {f"{a}-{b}{group}-{lot}", f"{c}-{d}{group}-{lot}"}:
+            candidate = index.get(key)
+            if candidate is None:
+                continue
+            words = re.findall(r"[A-Z]+", (candidate["owner"] or "").upper())
+            if len(words) >= 2 and len(context) >= 2 and context[-1] == words[0] and (
+                    context[-2] == words[1] or (len(context) >= 3 and len(words) >= 3
+                    and context[-3] == words[1] and context[-2] == words[2])):
+                matches.append(candidate)
+        parcel = matches[0] if len(matches) == 1 else None
+    if parcel is None:
+        return None
+    return {**_record(parcel), "method": "dickson_tax_parcel", "county": "DICKSON",
+            "situs_address": situs_address(parcel), "printed_parcel": printed,
+            "source_url": "https://comptroller.tn.gov/content/dam/cot/pa/documents/landuse/maps/parcel-maps-data/Dickson.zip"}
+
+
+def dickson_tax_patch(row, hit):
+    patch = {"raw_payload": {**row["raw_payload"], "comptroller_parcel": hit}}
+    if not row.get("owner_name_records") and hit.get("owner"):
+        patch["owner_name_records"] = hit["owner"]
+    if not row.get("property_address") and hit.get("situs_address"):
+        patch["property_address"] = hit["situs_address"]
+    if not row.get("property_value") and (hit.get("appraisal") or 0) > 0:
+        patch.update(property_value=hit["appraisal"], property_value_source="comptroller")
+    return patch
 
 
 def notice_names(row: Dict[str, Any]) -> List[str]:
@@ -148,6 +203,7 @@ class ComptrollerParcelsBot(BotBase):
         # Debtor searches wait until the scan is done, then run events first.
         bk_queue: List[tuple] = []
         notice_queue: List[tuple] = []
+        dickson_index = None
 
         def record(row: Dict[str, Any], hit: Dict[str, Any]) -> None:
             hit["version"] = VERSION
@@ -167,6 +223,14 @@ class ComptrollerParcelsBot(BotBase):
                 continue
             hit: Optional[Dict[str, Any]] = None
             addr = row.get("property_address")
+            if (row.get("bot_source") == "main_street_media" and row.get("distress_type") == "TAX_LIEN"
+                    and row.get("county") == "dickson" and row.get("printed_parcel")):
+                if dickson_index is None:
+                    dickson_index = dickson_tax_index(idx.con)
+                hit = dickson_tax_hit(dickson_index, row["printed_parcel"], row.get("tax_name_context"))
+                if hit:
+                    record(row, hit)
+                continue
             if addr:
                 if idx.resolve_county(row.get("county"), addr):
                     stats["in_coverage_with_address"] += 1
@@ -240,6 +304,16 @@ class ComptrollerParcelsBot(BotBase):
         written = 0
         for u in updates:
             try:
+                if u["hit"].get("method") == "dickson_tax_parcel":
+                    from .free_county_completion_bot import apply
+                    rows = (client.table("homeowner_requests_staging")
+                            .select("id,raw_payload,owner_name_records,property_address,property_value,property_value_source")
+                            .eq("id", u["id"]).eq("bot_source", "main_street_media").eq("county", "dickson")
+                            .eq("distress_type", "TAX_LIEN").limit(1).execute().data or [])
+                    if rows and rows[0]["raw_payload"].get("parcel") == u["hit"]["printed_parcel"]:
+                        patch = dickson_tax_patch(rows[0], u["hit"])
+                        written += bool(apply(client, "homeowner_requests_staging", rows[0], patch))
+                    continue
                 cur = (client.table("homeowner_requests_staging").select("raw_payload,property_value,property_address")
                        .eq("id", u["id"]).limit(1).execute().data) or []
                 if not cur:
