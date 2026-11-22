@@ -230,7 +230,7 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 ROUTE_TO = "McLemore Auction Company"
 _VALUE_BASIS = {
     "estate": "home value used as a proxy for the contents (no inventory yet)",
-    "owner_asset": "FAA registry value band for the aircraft",
+    "owner_asset": "Aircraft appraisal unverified",
     "vessel_arrest": "unknown until the docket or listing is checked",
     "vessel_lien": "estimated from make, year and size",
 }

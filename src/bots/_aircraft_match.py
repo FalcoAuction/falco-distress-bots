@@ -297,7 +297,10 @@ class AircraftIndex:
         addrs = [x for x in [lead.get("property_address"), lead.get("mailing_address")] if x]
         cities = {clean(lead["city"])} if lead.get("city") else set()
         counties = set()
-        if lead.get("county"):
+        # The FL court feed copies its county from the first FAA candidate.
+        # It is not independent geographic evidence for that registrant.
+        faa_county = is_bk and state == "FL" and lead.get("source") == "pacer_rss"
+        if lead.get("county") and not faa_county:
             counties.add(lead["county"].lower().replace(" county", "").replace(" ", "").strip())
 
         hits: Dict[str, Tuple[Dict[str, Any], str, str]] = {}

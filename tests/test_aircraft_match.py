@@ -161,6 +161,15 @@ class MatchTests(unittest.TestCase):
         self.assertEqual(idx.match({"id": "1", "distress_type": "BANKRUPTCY", "full_name": "Chad Conner",
                                     "court_id": "tnwb"}), [])
 
+    def test_florida_feed_cannot_corroborate_registry_using_its_own_county(self):
+        fl = BARON.replace(",TN,", ",FL,").replace(",079,", ",031,")
+        idx = AircraftIndex(load_aircraft([MASTER_HEADER, fl], load_ref(REF), states=["FL"]))
+        lead = dict(distress_type="BANKRUPTCY", source="pacer_rss", state="FL", county="Duval",
+                    court_id="flmb", full_name="Chad E Conner")
+        tag, = idx.match(lead)
+        self.assertEqual(tag["match_type"], "name_middle_bk_district")
+        self.assertFalse(idx.match({**lead, "court_id": "flsb"}))
+
     def test_creditor_parties_never_match(self):
         heli = master_row("901TN", "JET01", "1975", "TN DEPT OF PUBLIC SAFETY", "225 EZELL PIKE", "NASHVILLE",
                           "37217", "037", type_acft="6", type_eng="3")

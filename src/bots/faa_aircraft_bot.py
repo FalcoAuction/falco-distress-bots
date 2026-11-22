@@ -81,7 +81,7 @@ def evidence_tags(index, lead):
 # selects keep the page small; the full raw_payload is fetched only for
 # rows that need a write.
 _RAW_FIELDS = ("subject", "owner_name_1", "owner_name_2", "case_name", "mailing_address",
-               "city", "court_id", "excerpt", "state")
+               "city", "court_id", "excerpt", "state", "source")
 _SELECT = {
     "homeowner_requests_staging": "id, distress_type, full_name, owner_name_records, property_address, county",
     "homeowner_requests": "id, distress_type, full_name, owner_name_records, property_address, county",
