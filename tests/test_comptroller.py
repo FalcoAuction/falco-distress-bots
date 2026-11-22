@@ -7,6 +7,7 @@ no county files: a tiny SQLite index is built in a temp dir.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -174,6 +175,32 @@ class RefreshZipTests(unittest.TestCase):
                  "Moore/Field Dictionary.xlsx", "ASSESSMENT_DATA_99.DBF"]
         self.assertEqual(assessment_members(names),
                          ["Anderson\ASSESSMENT_DATA_01.dbf", "Moore/ASSESSMENT_DATA_64.dbf", "ASSESSMENT_DATA_99.DBF"])
+
+
+class StatewideCacheTests(unittest.TestCase):
+    def test_manifest_and_index_must_both_cover_expected_counties(self):
+        from src.bots.comptroller_refresh import COUNTIES, county_key, verify_statewide_cache
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db, manifest = Path(tmp) / "index.sqlite", Path(tmp) / "refresh_state.json"
+            state = dict.fromkeys(COUNTIES, "source-stamp")
+            manifest.write_text(json.dumps(state))
+            con = sqlite3.connect(db)
+            try:
+                con.execute("create table parcels (county text)")
+                con.executemany("insert into parcels values (?)", [(county_key(n),) for n in COUNTIES[:-1]])
+                con.commit()
+                with self.assertRaisesRegex(ValueError, COUNTIES[-1]):
+                    verify_statewide_cache(db, manifest)
+                con.execute("insert into parcels values (?)", (county_key(COUNTIES[-1]),))
+                con.commit()
+                verify_statewide_cache(db, manifest)
+                del state[COUNTIES[0]]
+                manifest.write_text(json.dumps(state))
+                with self.assertRaisesRegex(ValueError, COUNTIES[0]):
+                    verify_statewide_cache(db, manifest)
+            finally:
+                con.close()
 
 
 if __name__ == "__main__":
