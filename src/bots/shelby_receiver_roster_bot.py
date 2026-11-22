@@ -7,11 +7,12 @@ import re
 import pdfplumber
 
 from ._base import BotBase, BotTimeout
+from .shelby_tax_sale_bot import EXTRACT, SCHEDULE, scheduled_parcels
 
 
 SOURCE = "https://www.shelbycountytn.gov/DocumentCenter/View/35671"
 WARRANT = re.compile(r"[0-9]{8}")
-HEARING = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})\s*[-–—]+\s*\d")
+HEARING = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})\s*[-â€“â€”]+\s*\d")
 PARCEL = re.compile(r"\bParcel ID\s*(\d{6})\s*([A-Z]?\d{4,5}[A-Z]?)(?=\s|$)", re.I)
 
 
@@ -63,6 +64,22 @@ def read_roster(content):
             "disposition": "receiver_eligibility_research", "cases": list(cases.values())}
 
 
+def attach_trustee_list(receipt, leads):
+    by_parcel = {}
+    for lead in leads:
+        raw = lead.raw_payload
+        key = "".join(raw["parcel"].split()).upper()
+        by_parcel.setdefault(key, []).append({
+            "sale_id": raw["sale_id"], "advertised_date": lead.trustee_sale_date, "source_url": lead.source_url,
+        })
+    for case in receipt["cases"]:
+        if case["parcel"]:
+            key = "".join(case["parcel"].split()).upper()
+            case["current_trustee_listings"] = by_parcel.get(key, [])
+    receipt["trustee_schedule_url"] = SCHEDULE
+    receipt["trustee_extract_url"] = EXTRACT
+
+
 class ShelbyReceiverBot(BotBase):
     name = "shelby_receiver_roster"
     description = "Shelby Environmental Court receiver-eligible property research"
@@ -76,6 +93,12 @@ class ShelbyReceiverBot(BotBase):
             if response is None or response.status_code != 200 or not response.content.startswith(b"%PDF"):
                 raise ValueError("County roster PDF unavailable")
             receipt = read_roster(response.content)
+            schedule = self.fetch(SCHEDULE)
+            extract = self.fetch(EXTRACT)
+            if schedule is None or not schedule.ok or extract is None or not extract.ok:
+                raise ValueError("Trustee list unavailable for roster cross-check")
+            leads = scheduled_parcels(schedule.text, extract.content.decode("utf-8-sig"), started.date())
+            attach_trustee_list(receipt, leads)
         except BotTimeout as exc:
             status, error = "timed_out", str(exc)
         except Exception as exc:

@@ -1,7 +1,7 @@
 from unittest import TestCase
 from unittest.mock import MagicMock, patch
 
-from src.bots.shelby_receiver_roster_bot import read_roster
+from src.bots.shelby_receiver_roster_bot import attach_trustee_list, read_roster
 
 HEADER = [["As of November 13,", "", "", "", ""],
           ["ADDRESS", "CIVIL WARRANT", "DEFENDANT", "NEXT COURT", "Tax Sale or other"]]
@@ -41,3 +41,11 @@ class ShelbyReceiverTests(TestCase):
             roster([row, row], "")
         with self.assertRaises(ValueError):
             roster([row[:3]], "")
+
+    def test_tax_listing_bound_to_parcel_independently_of_county_note(self):
+        lead = MagicMock(raw_payload={"parcel": "123456 A00012", "sale_id": "TS2302"},
+                         trustee_sale_date="2027-04-13", source_url="county")
+        receipt = {"cases": [{"parcel": "123456A00012"}, {"parcel": "123456A00013", "county_note": "Tax Sale 23.02"}]}
+        attach_trustee_list(receipt, [lead])
+        self.assertEqual(receipt["cases"][0]["current_trustee_listings"][0]["sale_id"], "TS2302")
+        self.assertEqual(receipt["cases"][1]["current_trustee_listings"], [])
