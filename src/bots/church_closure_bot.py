@@ -22,10 +22,13 @@ import io
 import json
 import re
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, LeadPayload, _supabase
+from ._church_parcel import match, words
 
 CLOSURE_PDFS = [
     # 2026: the live file refuses automated requests; saved in _data/church_closures_2026.json.
@@ -161,6 +164,55 @@ class ChurchClosureBot(BotBase):
                                  "church_closure": c},
                 ))
         return list(leads.values())
+
+    def _refresh_parcels(self, client):
+        """Rotate pending records independently of annual PDF availability."""
+        table = "homeowner_requests_staging"
+        deadline = time.monotonic() + 45
+        today = datetime.now(timezone.utc).date().isoformat()
+        rows = (client.table(table).select("id,property_address,county,pipeline_lead_key,raw_payload")
+                .eq("bot_source", self.name).eq("distress_type", "CHURCH_CLOSURE")
+                .eq("staging_status", "pending").eq("raw_payload->>source", "twk_umc_closures")
+                .or_("raw_payload->church_review->>status.is.null,raw_payload->church_review->>status.eq.parcel_review")
+                .order("raw_payload->church_parcel_lookup->>checked_on", nullsfirst=True)
+                .order("id").limit(6).execute().data or [])
+        for row in rows:
+            if time.monotonic() >= deadline:
+                break
+            raw = row["raw_payload"]
+            previous = raw.get("church_parcel_lookup") or {}
+            if previous.get("checked_on") == today:
+                continue
+            c = raw.get("church_closure") or {}
+            key = self.make_lead_key(self.name, f"{c.get('church')}|{c.get('address')}")
+            if (key != row["pipeline_lead_key"] or words(c.get("county")) != words(row["county"])
+                    or words(row["property_address"]) not in
+                    {words(c.get("address")), words(c.get("address")) + " TN"}):
+                evidence = {"status": "held", "reason": "staging_identity_conflict", "checked_on": today}
+            else:
+                evidence = match(c)
+            if evidence.get("reason") == "source_incomplete":
+                prior_match = (previous if previous.get("status") == "parcel_identified"
+                               else previous.get("previous_observation"))
+                if prior_match:
+                    evidence["previous_observation"] = prior_match
+            updated = (client.table(table).update({"raw_payload": {**raw, "church_parcel_lookup": evidence}})
+                       .eq("id", row["id"]).eq("bot_source", self.name).eq("staging_status", "pending")
+                       .eq("distress_type", "CHURCH_CLOSURE").eq("pipeline_lead_key", row["pipeline_lead_key"]))
+            for field in ("property_address", "county"):
+                value = row[field]
+                updated = updated.is_(field, "null") if value is None else updated.eq(field, value)
+            updated.filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute()
+
+    def _write_staging(self, leads):
+        counts = super()._write_staging(leads)
+        client = _supabase()
+        if client is not None:
+            try:
+                self._refresh_parcels(client)
+            except Exception as exc:
+                self.logger.warning("Church parcel refresh deferred (%s)", type(exc).__name__)
+        return counts
 
 
 def run() -> dict:
