@@ -97,7 +97,7 @@ def _num(v: Any) -> Optional[float]:
     return n if n > 0 else None
 
 
-# ── land use ────────────────────────────────────────────────────────────────
+# â”€â”€ land use â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _classify_text(text: str) -> Optional[str]:
     """Lane for a free-text land-use description, or 'exempt', or None."""
@@ -258,7 +258,7 @@ def _value(row: Dict[str, Any], raw: Dict[str, Any]) -> Optional[float]:
     return None
 
 
-# ── owner + contact ─────────────────────────────────────────────────────────
+# â”€â”€ owner + contact â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def owner_type(owner: Optional[str], owner_class: Optional[str] = None) -> str:
     name = (owner or "").strip()
@@ -329,7 +329,7 @@ def contact_path(row: Dict[str, Any], raw: Dict[str, Any]) -> Dict[str, Any]:
             "out_of_state": bool(state and state != "TN"), "unverified_phone": unverified_phone}
 
 
-# ── lane ────────────────────────────────────────────────────────────────────
+# â”€â”€ lane â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 _NAME_STOP = {"LLC", "INC", "CORP", "CO", "LP", "LLP", "LTD", "TRUST", "TR", "TRS", "THE", "AND", "OF", "ETUX",
               "ETAL", "ETVIR", "JR", "SR", "II", "III", "ATTN", "C/O", "TN", "LIVING", "REVOCABLE", "FAMILY",
@@ -423,7 +423,7 @@ def property_lane(row: Dict[str, Any], land_events=()) -> Dict[str, Any]:
     oc = (oc.get("class") or oc.get("value")) if isinstance(oc, dict) else oc
     owner = row.get("owner_name_records") or row.get("full_name")
     if church and reviewed and review.get("status") == "county_match" and owner in (
-            review["owner"], "Tennessee-Western Kentucky Conference Trustees"):
+            None, review["owner"], "Tennessee-Western Kentucky Conference Trustees"):
         owner = review["owner"]
     otype = owner_type(owner, oc)
 
@@ -526,7 +526,7 @@ def property_lane(row: Dict[str, Any], land_events=()) -> Dict[str, Any]:
     return out
 
 
-# ── readiness: every data point before paid enrichment ──────────────────────
+# â”€â”€ readiness: every data point before paid enrichment â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 COUNTY_VALUE_SOURCES = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "tpad", "shelby_arcgis",
                         "rutherford_arcgis", "williamson_inigo", "padctn_owner_match", "davidson_assessor",

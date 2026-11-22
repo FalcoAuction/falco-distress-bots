@@ -1,10 +1,8 @@
 """Closed United Methodist churches in Tennessee, from the Tennessee-Western
 Kentucky Conference's published closure resolutions.
 
-Each resolution names the church, its street address and county, and vests
-the property in the Conference Trustees with authority to sell it. One
-seller (the Trustees) for every building, which makes this a relationship
-lane: the leads are the buildings, the contact is the Conference.
+Closure resolutions document a denominational decision about a congregation.
+Current parcel ownership and sale authority require separate evidence.
 
 Source PDFs are listed in CLOSURE_PDFS (the conference posts one set a year
 before its June session; add the new URL when it is published). When the
@@ -38,7 +36,6 @@ CLOSURE_PDFS = [
     "https://web.archive.org/web/20250121212301id_/https://twkumc.org/wp-content/uploads/2023/06/"
     "TWK-Resolutions-for-Church-Closure-2023-revised-6.9.2023-.docx.pdf",
 ]
-SELLER = "Tennessee-Western Kentucky Conference Trustees"
 # Years whose PDF the conference's server will not serve to this bot: the
 # closures parsed from the public file, saved by hand (src/bots/_data).
 DATA_DIR = Path(__file__).resolve().parent / "_data"
@@ -120,7 +117,7 @@ def county_for(address: str, index: Dict[str, str]) -> Optional[str]:
 
 class ChurchClosureBot(BotBase):
     name = "church_closure"
-    description = "Closed United Methodist churches (TN), property vested in the Conference Trustees"
+    description = "Tennessee United Methodist congregational closure resolutions"
     throttle_seconds = 1.0
     expected_min_yield = 0
 
@@ -155,15 +152,13 @@ class ChurchClosureBot(BotBase):
                     pipeline_lead_key=key,
                     property_address=f"{c['address']}, TN",
                     county=c["county"],
-                    full_name=SELLER,
-                    owner_name_records=SELLER,
                     distress_type="CHURCH_CLOSURE",
-                    admin_notes=f"{c['church']} ({c['district']}): the published closure resolution names "
-                                f"the Conference Trustees as the disposal authority. Current ownership and "
-                                f"availability require verification. Final service {c.get('final_service') or 'n/a'}.",
+                    admin_notes=f"{c['church']} ({c['district']}): published closure resolution. "
+                                f"Current ownership and availability require verification. "
+                                f"Final service {c.get('final_service') or 'n/a'}.",
                     source_url=source if source.startswith("http") else None,
                     raw_payload={"source": "twk_umc_closures", "state": "TN", "property_lane": "commercial",
-                                 "church_closure": c, "seller": SELLER},
+                                 "church_closure": c},
                 ))
         return list(leads.values())
 
