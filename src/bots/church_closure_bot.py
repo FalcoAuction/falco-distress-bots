@@ -1,10 +1,8 @@
 """Closed United Methodist churches in Tennessee, from the Tennessee-Western
 Kentucky Conference's published closure resolutions.
 
-Each resolution names the church, its street address and county, and vests
-the property in the Conference Trustees with authority to sell it. One
-seller (the Trustees) for every building, which makes this a relationship
-lane: the leads are the buildings, the contact is the Conference.
+Closure resolutions document a denominational decision about a congregation.
+Current parcel ownership and sale authority require separate evidence.
 
 Source PDFs are listed in CLOSURE_PDFS (the conference posts one set a year
 before its June session; add the new URL when it is published). When the
@@ -24,10 +22,13 @@ import io
 import json
 import re
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, LeadPayload, _supabase
+from ._church_parcel import match, words
 
 CLOSURE_PDFS = [
     # 2026: the live file refuses automated requests; saved in _data/church_closures_2026.json.
@@ -38,7 +39,6 @@ CLOSURE_PDFS = [
     "https://web.archive.org/web/20250121212301id_/https://twkumc.org/wp-content/uploads/2023/06/"
     "TWK-Resolutions-for-Church-Closure-2023-revised-6.9.2023-.docx.pdf",
 ]
-SELLER = "Tennessee-Western Kentucky Conference Trustees"
 # Years whose PDF the conference's server will not serve to this bot: the
 # closures parsed from the public file, saved by hand (src/bots/_data).
 DATA_DIR = Path(__file__).resolve().parent / "_data"
@@ -120,7 +120,7 @@ def county_for(address: str, index: Dict[str, str]) -> Optional[str]:
 
 class ChurchClosureBot(BotBase):
     name = "church_closure"
-    description = "Closed United Methodist churches (TN), property vested in the Conference Trustees"
+    description = "Tennessee United Methodist congregational closure resolutions"
     throttle_seconds = 1.0
     expected_min_yield = 0
 
@@ -155,17 +155,67 @@ class ChurchClosureBot(BotBase):
                     pipeline_lead_key=key,
                     property_address=f"{c['address']}, TN",
                     county=c["county"],
-                    full_name=SELLER,
-                    owner_name_records=SELLER,
                     distress_type="CHURCH_CLOSURE",
-                    admin_notes=f"{c['church']} ({c['district']}): the published closure resolution names "
-                                f"the Conference Trustees as the disposal authority. Current ownership and "
-                                f"availability require verification. Final service {c.get('final_service') or 'n/a'}.",
+                    admin_notes=f"{c['church']} ({c['district']}): published closure resolution. "
+                                f"Current ownership and availability require verification. "
+                                f"Final service {c.get('final_service') or 'n/a'}.",
                     source_url=source if source.startswith("http") else None,
                     raw_payload={"source": "twk_umc_closures", "state": "TN", "property_lane": "commercial",
-                                 "church_closure": c, "seller": SELLER},
+                                 "church_closure": c},
                 ))
         return list(leads.values())
+
+    def _refresh_parcels(self, client):
+        """Rotate pending records independently of annual PDF availability."""
+        table = "homeowner_requests_staging"
+        deadline = time.monotonic() + 45
+        today = datetime.now(timezone.utc).date().isoformat()
+        rows = (client.table(table).select("id,property_address,county,pipeline_lead_key,raw_payload")
+                .eq("bot_source", self.name).eq("distress_type", "CHURCH_CLOSURE")
+                .eq("staging_status", "pending").eq("raw_payload->>source", "twk_umc_closures")
+                .or_("raw_payload->church_review->>status.is.null,raw_payload->church_review->>status.eq.parcel_review")
+                .order("raw_payload->church_parcel_lookup->>checked_on", nullsfirst=True)
+                .order("id").limit(6).execute().data or [])
+        for row in rows:
+            if time.monotonic() >= deadline:
+                break
+            raw = row["raw_payload"]
+            previous = raw.get("church_parcel_lookup") or {}
+            if previous.get("checked_on") == today:
+                continue
+            c = raw.get("church_closure") or {}
+            key = self.make_lead_key(self.name, f"{c.get('church')}|{c.get('address')}")
+            if (key != row["pipeline_lead_key"] or words(c.get("county")) != words(row["county"])
+                    or words(row["property_address"]) not in
+                    {words(c.get("address")), words(c.get("address")) + " TN"}):
+                evidence = {"status": "held", "reason": "staging_identity_conflict", "checked_on": today}
+            else:
+                evidence = match(c)
+            if evidence.get("reason") == "source_incomplete":
+                prior_match = (previous if previous.get("status") == "parcel_identified"
+                               else previous.get("previous_observation"))
+                if prior_match:
+                    evidence["previous_observation"] = prior_match
+            updated = (client.table(table).update({"raw_payload": {**raw, "church_parcel_lookup": evidence}})
+                       .eq("id", row["id"]).eq("bot_source", self.name).eq("staging_status", "pending")
+                       .eq("distress_type", "CHURCH_CLOSURE").eq("pipeline_lead_key", row["pipeline_lead_key"]))
+            for field in ("property_address", "county"):
+                value = row[field]
+                updated = updated.is_(field, "null") if value is None else updated.eq(field, value)
+            try:
+                updated.filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute()
+            except Exception as exc:
+                self.logger.warning("Parcel observation deferred for %s (%s)", row["id"], type(exc).__name__)
+
+    def _write_staging(self, leads):
+        counts = super()._write_staging(leads)
+        client = _supabase()
+        if client is not None:
+            try:
+                self._refresh_parcels(client)
+            except Exception as exc:
+                self.logger.warning("Church parcel refresh deferred (%s)", type(exc).__name__)
+        return counts
 
 
 def run() -> dict:
