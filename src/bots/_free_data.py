@@ -59,6 +59,30 @@ def johnson_board_research(row: dict) -> bool:
             and isinstance(raw.get("johnson_city_bdsr"), dict))
 
 
+def inventory_or_complaint_hold(row: dict) -> str | None:
+    reasons = {
+        "hud_reo": "HUD agency inventory; no private seller mandate",
+        "mtn_cities_codes": "Municipal complaint; auction authority unverified",
+    }
+    source = row.get("bot_source") or row.get("source")
+    if source in reasons:
+        return reasons[source]
+    if source != "bot":
+        return None
+    # The promoter stores a generic live source and appends a bounded
+    # source tag. Older copies also retain the original collector payload.
+    tags = (row.get("admin_notes") or "").split(" · ")
+    raw = row.get("raw_payload")
+    raw = raw if isinstance(raw, dict) else {}
+    if "bot_source=hud_reo" in tags or isinstance(raw.get("hud_arcgis"), dict):
+        return reasons["hud_reo"]
+    if ("bot_source=mtn_cities_codes" in tags or
+            (raw.get("city") == "Mt. Juliet" and raw.get("platform") == "seeclickfix"
+             and isinstance(raw.get("issue"), dict))):
+        return reasons["mtn_cities_codes"]
+    return None
+
+
 def entity_eligible(row: dict) -> bool:
     raw = row.get("raw_payload") or {}
     lane = raw.get("property_lane") or {}
