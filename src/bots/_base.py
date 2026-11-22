@@ -511,7 +511,8 @@ class BotBase:
                     staging_columns += (",county,property_address,trustee_sale_date,tdn:raw_payload->structured->>tdn_no,"
                                         "loan:raw_payload->structured->>instrument_no,"
                                         "substitute_trustee_appointment:raw_payload->substitute_trustee_appointment,"
-                                        "published_sale_clause:raw_payload->published_sale_clause")
+                                        "published_sale_clause:raw_payload->published_sale_clause,"
+                                        "foundation_legal_address:raw_payload->foundation_legal_address")
 
                 # Promoted direct listings still need their staging date refreshed.
                 try:

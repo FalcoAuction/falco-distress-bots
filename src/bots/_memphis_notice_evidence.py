@@ -15,6 +15,12 @@ APPOINTMENT = re.compile(
 SALE = re.compile(r"\bwill proceed to sell the below-mentioned property on "
                   r"(\d{1,2}/\d{1,2}/\d{4}), at \d{1,2}:\d{2} [AP]M\b", re.I)
 
+# Foundation's legal property description ends with this labeled address.
+AKA = re.compile(r"\bALSO KNOWN AS:\s*(\d+[A-Za-z]? [^,;:]{1,90}),\s*([A-Za-z .'-]{2,50}),\s*"
+                 r"TN\s+(\d{5})(?:-\d{4})?\s*(?=This sale is subject to)", re.I)
+CONTROLS = {"substitute_trustee_appointment": "instrument_number", "published_sale_clause": "date",
+            "foundation_legal_address": "address"}
+
 
 def publisher_evidence(detail, county, fid, source_url):
     if county != "shelby" or detail.get("tdn_no") != fid:
@@ -22,6 +28,13 @@ def publisher_evidence(detail, county, fid, source_url):
     body = " ".join((detail.get("body") or "").split())
     base = {"notice_id": fid, "source_url": source_url}
     evidence = {}
+    if (detail.get("substitute_trustee") == "Foundation Legal Group, LLP"
+            and detail.get("instrument_no") and len(re.findall(r"\bALSO KNOWN AS:", body, re.I)) == 1):
+        alias = AKA.search(body)
+        if alias:
+            evidence["foundation_legal_address"] = {
+                **base, "instrument_no": detail["instrument_no"], "street": alias[1], "city": alias[2],
+                "zip": alias[3], "address": alias[0].strip()}
     matches = list(APPOINTMENT.finditer(body))
     numbers = {m[1] for m in matches}
     if (len(numbers) == 1 and matches[0][1] != detail.get("instrument_no")
@@ -46,7 +59,7 @@ def repeat_evidence(lead, row, tracking, guards, patch):
 
     raw = lead.raw_payload or {}
     notice = raw.get("structured") or {}
-    evidence = {k: raw[k] for k in ("substitute_trustee_appointment", "published_sale_clause") if k in raw}
+    evidence = {k: raw[k] for k in CONTROLS if k in raw}
     if not evidence:
         return
     fid = raw["notice_id"]
@@ -56,7 +69,7 @@ def repeat_evidence(lead, row, tracking, guards, patch):
         return
     safe = {}
     for key, value in evidence.items():
-        control = "instrument_number" if key == "substitute_trustee_appointment" else "date"
+        control = CONTROLS[key]
         for old in (tracking.get(key), row.get(key)):
             if old is not None and (not isinstance(old, dict) or old.get(control) != value[control]):
                 break
@@ -68,7 +81,7 @@ def repeat_evidence(lead, row, tracking, guards, patch):
                    "raw_payload->structured->>instrument_no": row["loan"], "county": "shelby",
                    "property_address": row["property_address"], "staging_status": "pending"})
     for key in safe:
-        control = "instrument_number" if key == "substitute_trustee_appointment" else "date"
+        control = CONTROLS[key]
         prior = row.get(key) or {}
         guards[f"raw_payload->{key}->>{control}"] = prior.get(control)
     tracking.update(safe)

@@ -54,6 +54,7 @@ from . import tn_tax_delinquent_bot
 from . import hamilton_tax_delinquent_bot
 from . import nashville_ledger_bot
 from . import memphis_daily_news_bot
+from . import memphis_trustee_calendar
 from . import hamilton_county_herald_bot
 # Direct substitute-trustee firm scrapers — bypass the newspaper-publication
 # requirement of TCA § 35-5-101 by going to the firms' own public sale
@@ -162,6 +163,7 @@ NEW_BOTS = [
     ("hamilton_tax_delinquent", hamilton_tax_delinquent_bot.run),
     ("nashville_ledger", nashville_ledger_bot.run),
     ("memphis_daily_news", memphis_daily_news_bot.run),
+    ("memphis_trustee_calendar", memphis_trustee_calendar.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
     # Substitute trustee firms — direct scrape, earlier than newspaper.
     # Brock & Scott: ~27 TN listings, static HTML. Mackie Wolf: ~58 TN
