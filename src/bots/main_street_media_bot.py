@@ -28,7 +28,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
-from ._base import BotBase, LeadPayload
+from ._base import LeadPayload
+from ._probate_staging import ProbateNoticeBot, remember_notice
 from . import _court_notices as cn
 from .court_notices_bot import build_lead
 
@@ -183,7 +184,7 @@ def tax_parcels(lines: List[str]) -> List[Dict[str, Any]]:
     return list(found.values())
 
 
-class MainStreetMediaBot(BotBase):
+class MainStreetMediaBot(ProbateNoticeBot):
     name = "main_street_media"
     description = "Probate, court-sale and tax-suit notices from Main Street Media papers (9 Middle TN counties)"
     throttle_seconds = 2.0
@@ -205,7 +206,7 @@ class MainStreetMediaBot(BotBase):
                 continue
             for i, lines in enumerate(notices(res.text)):
                 for lead in self._leads(url, county, issued, i, lines):
-                    leads.setdefault(lead.pipeline_lead_key, lead)
+                    remember_notice(leads, lead)
                     counts[lead.distress_type] = counts.get(lead.distress_type, 0) + 1
         self.logger.info(f"parsed {len(leads)} leads from Main Street Media: {counts}")
         return list(leads.values())
@@ -243,7 +244,7 @@ class MainStreetMediaBot(BotBase):
             # The paper's county when the notice text does not name one.
             if not lead.county:
                 lead.county = county
-                if isinstance(lead.raw_payload.get("court_notice"), dict):
+                if not lead.raw_payload.get("probate_review") and isinstance(lead.raw_payload.get("court_notice"), dict):
                     lead.raw_payload["court_notice"]["county"] = county
             lead.raw_payload["paper_county"] = county
             return [lead]

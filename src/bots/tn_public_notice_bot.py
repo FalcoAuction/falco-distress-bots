@@ -53,9 +53,11 @@ from typing import Dict, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 
-from ._base import BotBase, LeadPayload
+from ._base import LeadPayload
+from ._probate_staging import ProbateNoticeBot
 from . import _trustee_notice as trustee_notice
 from . import _court_order as court_order
+from . import _court_notices as cn
 from . import _roane_tax
 from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
 from ._county_tax_headings import newspaper_tax_heading
@@ -100,7 +102,7 @@ DECEDENT_HINT_RE = re.compile(r"Estate of\s+([A-Z][A-Za-z\.\-' ]+?),\s*Deceased"
 BORROWER_HINT_RE = re.compile(r"executed by\s+([A-Z][A-Za-z. ,'\-]+?),", re.IGNORECASE)
 
 
-class TnPublicNoticeBot(BotBase):
+class TnPublicNoticeBot(ProbateNoticeBot):
     name = "tn_public_notice"
     description = "TN Public Notice statewide aggregator (foreclosure, tax, probate, court order and public sale categories)"
     throttle_seconds = 1.5
@@ -338,6 +340,24 @@ class TnPublicNoticeBot(BotBase):
         pub_date = row.get("pub_date") or ""
         city = row.get("city") or ""
         county = (row.get("county") or "").strip().lower() or None
+
+        if distress == "PROBATE":
+            lines = excerpt.splitlines() or [excerpt]
+            fields = cn.extract_probate(lines)
+            review = cn.probate_review(lines, fields)
+            notice_id = row["notice_id"]
+            return LeadPayload(
+                bot_source=self.name, distress_type=distress, county=fields["county"] or county,
+                pipeline_lead_key=self.make_lead_key(self.name, notice_id),
+                full_name=fields["decedent"],
+                source_url=f"{TNPN_BASE}/Details.aspx?ID={notice_id}",
+                admin_notes=f"TN Public Notice {notice_id} · {review['stage']}",
+                raw_payload={"publication": self.name, "notice_id": notice_id,
+                             "category": category_label, "category_id": "23", "newspaper": paper,
+                             "publication_date": pub_date, "city": city, "county": county,
+                             "excerpt": excerpt, "subject": fields["decedent"], "parcel": None,
+                             "court_notice": fields, "probate_review": review},
+            )
 
         # The notice text decides the type, not the newspaper's category:
         # Sumner and Montgomery trustee sales arrive filed as "Delinquent

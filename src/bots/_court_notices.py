@@ -80,6 +80,13 @@ _SALE_RE = re.compile(
 )
 
 
+_INACTIVE_ESTATE = re.compile(
+        r"\b(?:estate (?:has been |is |was )?closed|case (?:has been |is |was )?dismissed|"
+        r"letters (?:of (?:administration|authority) |testamentary )?(?:(?:have been|were|are) )?(?:revoked|expired)|"
+        r"(?:representative|executor|administrator) (?:has been |was |is )?(?:discharged|removed))\b",
+        re.I)
+
+
 def classify(lines: List[str]) -> str:
     text = " ".join(lines)
     upper = text.upper()
@@ -95,6 +102,11 @@ def classify(lines: List[str]) -> str:
         if "DEED OF TRUST" in upper and not _JUDICIAL_RE.search(text):
             return KIND_OTHER
         return KIND_COURT_SALE
+    if "ESTATE OF" in upper and _INACTIVE_ESTATE.search(text):
+        return KIND_PROBATE
+    if "ESTATE OF" in upper and re.search(r"\bletters (?:of )?(?:testamentary|administration|authority)"
+                                          r".{0,280}?\b(?:were|have been) issued\b", text, re.I):
+        return KIND_PROBATE
     return KIND_OTHER
 
 
@@ -227,7 +239,7 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             "administrator" if "admin" in word else "personal_representative"
 
     def flush_reps(role: Optional[str] = None) -> None:
-        role = role or label_role or "personal_representative"
+        role = role or label_role
         names: List[str] = []
         for chunk in pending_names:
             # "James Hugh Atkins II and" / "Patrice Atkins Empson": the
@@ -235,7 +247,8 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             chunk = re.sub(r"\s+(?:and|&)\s*$", "", chunk, flags=re.I)
             names.extend(n for n in re.split(r"\s+and\s+|\s*&\s*", chunk) if n.strip())
         for n in names:
-            reps.append({"name": _name(n), "role": role, "address": list(pending_address)})
+            if role and probate_name(n):
+                reps.append({"name": _name(n), "role": role, "address": list(pending_address)})
         pending_names.clear()
         pending_address.clear()
 
@@ -252,7 +265,8 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             attorney["address"].extend(pending_address)
             pending_names.clear()
             pending_address.clear()
-            reps.append({"name": _name(for_person.group(1)), "role": role_name(for_person.group(2)), "address": []})
+            if probate_name(_name(for_person.group(1))):
+                reps.append({"name": _name(for_person.group(1)), "role": role_name(for_person.group(2)), "address": []})
             continue
         # Robertson: "Rebecca A Bell-Houchin, Attorney" on one line.
         trailing = re.match(r"^(.+?),\s*Attorney(?:\s+for\b.*)?$", line, re.I)
@@ -325,6 +339,15 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
     return {"representatives": reps, "attorney": attorney}
 
 
+def probate_name(value: str) -> bool:
+    """An isolated personal name, never a caption, address or truncated clause."""
+    return bool(isinstance(value, str) and 2 <= len(value.split()) <= 7
+                and re.fullmatch(r"[^\W\d_][^\W\d_]*(?:[ ,.'’\-]+[^\W\d_]+)*\.?", value.strip(), re.UNICODE)
+                and not re.search(r"\b(?:estate|court|notice|clerk|attorney|deceased|executor|letters|"
+                                  r"hereby|case|docket|appointed|undersigned|creditors|file|of|the)\b",
+                                  value, re.I))
+
+
 def extract_probate(lines: List[str]) -> Dict[str, Any]:
     """Structured fields from a probate notice to creditors. Missing fields
     are None or empty, never guessed."""
@@ -337,6 +360,14 @@ def extract_probate(lines: List[str]) -> Dict[str, Any]:
     if decedent:
         decedent = re.sub(r"\s*,\s*$", "", decedent)
         decedent = re.split(r"\s+(?:Notice is hereby|Docket)", decedent)[0].strip(" ,")
+    if not probate_name(decedent):
+        decedent = None
+        for line in lines:
+            m = re.search(r"\bestate of\s+(.{2,75}?)(?=,?\s+\(?deceased\b|,?\s+who died\b|"
+                          r"\s+(?:were issued|notice to creditors|case (?:no|number)|docket)\b|$)", line, re.I)
+            if m and probate_name(m[1].strip(" ,")):
+                decedent = m[1].strip(" ,")
+                break
     docket = None
     for line in lines[:12]:
         m = _DOCKET_LINE_RE.match(line)
@@ -344,12 +375,32 @@ def extract_probate(lines: List[str]) -> Dict[str, Any]:
             docket = re.sub(r"\s+", "", m.group(1)).strip("-").upper()
             break
     if docket is None:
-        m = _DOCKET_RE.search(text)
+        m = re.search(r"\b(?:Docket|Case|File)\s*(?:No\.?|Number|#)?[\s:.]*"
+                      r"(MC\s+CH\s+CV\s+PB[-\d]+|[A-Z0-9]+(?:-[A-Z0-9]+)*)\b", text, re.I)
         if m:
-            docket = m.group(1).strip("-").upper()
+            docket = re.sub(r"\s+", "", m[1]).upper()
+    if docket and not any(ch.isdigit() for ch in docket):
+        # A boilerplate "as the case may be" may precede the actual caption.
+        valid = re.search(r"\b(?:docket|case|file)\s*(?:no\.?|number|#)\s*[:.]?\s*"
+                          r"(?=[A-Z0-9-]*\d)([A-Z0-9-]{3,40})\b", text, re.I)
+        docket = valid[1].upper() if valid else None
+    if docket and not re.fullmatch(r"(?=[A-Z0-9-]*\d)[A-Z0-9-]{3,40}", docket):
+        docket = None
     died = _DIED_RE.search(text)
     letters_type = _LETTERS_TYPE_RE.search(text)
+    if re.search(r"testamentary\s*\(?\s*or (?:of )?administration", text, re.I):
+        letters_type = None
     signers = _parse_signers(_signature_block(lines))
+    for m in re.finditer(r"\b(?:issued to|appointing)\s+([^,;:\n]{2,70}?),?\s+as\s+"
+                         r"(?:the\s+)?(executor|executrix|administrator|administratrix|personal representative)\b",
+                         text, re.I):
+        name, role = m.groups()
+        if probate_name(name) and not any(r["name"].casefold() == name.casefold()
+                                          for r in signers["representatives"]):
+            role = role.lower()
+            signers["representatives"].append({"name": name, "role": "executor" if role.startswith("exec")
+                                               else "administrator" if role.startswith("admin")
+                                               else "personal_representative", "address": []})
     return {
         "county": _county(text),
         "docket": docket,
@@ -360,6 +411,61 @@ def extract_probate(lines: List[str]) -> Dict[str, Any]:
         "representatives": signers["representatives"],
         "attorney": signers["attorney"],
     }
+
+
+def probate_review(lines: List[str], fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Classify the document. A reported order still needs scope and title review."""
+    text = " ".join(lines)
+    stage = "estate_notice"
+    for stage_name, pattern in (
+        ("sale_interrupted", r"\b(?:sale (?:has been |is )?(?:cancelled|canceled|stayed|withdrawn|postponed)|"
+                             r"order (?:denying|vacating) (?:the )?(?:petition|order) (?:of|to) (?:sale|sell))\b"),
+        ("sale_order_reported", r"\b(?:the court (?:hereby )?(?:orders|ordered) (?:the )?(?:sale of|the (?:executor|administrator|personal representative) to sell) "
+                                r"(?:the |said )?real (?:property|estate)|order (?:was )?entered authorizing "
+                                r"the (?:executor|administrator|personal representative) to sell (?:the )?real property)\b"),
+        ("sale_advertised", r"\b(?:clerk and master|special commissioner) will (?:offer for sale|sell) "
+                            r"(?:at public auction|the following (?:real property|real estate))\b"),
+        ("sale_authority_requested", r"\b(?:petition (?:seeking authority )?to (?:sell|subject) real property|"
+                                     r"petition for (?:authority|permission) to sell)\b"),
+        ("appointment_reported", r"\b(?:letters (?:of )?(?:testamentary|administration|authority).{0,280}?"
+                                 r"(?:were|have been) issued|was appointed (?:as )?(?:the )?"
+                                 r"(?:executor|administrator|personal representative))\b"),
+        ("creditor_notice", r"\bnotice to creditors\b"),
+    ):
+        found = re.search(pattern, text, re.I)
+        if found:
+            stage = stage_name
+            break
+    evidence = found[0] if found else None
+    inactive = _INACTIVE_ESTATE.search(text)
+    reasons = []
+    if inactive:
+        stage, evidence = "estate_inactive_reported", inactive[0]
+        reasons.append("inactive_case_or_representative")
+    if stage in {"sale_advertised", "sale_interrupted"}:
+        reasons.append(stage)
+    if not all(fields.get(k) for k in ("county", "docket", "decedent")):
+        reasons.append("incomplete_case_identity")
+    if not fields.get("representatives"):
+        reasons.append("no_named_representative")
+    if not (fields.get("attorney") or {}).get("names"):
+        reasons.append("no_named_estate_attorney")
+    return {"stage": stage, "evidence": evidence,
+            "estate_key": f"{fields['county']}|{fields['docket']}" if fields["county"] and fields["docket"] else None,
+            "contact_hold": True, "contact_hold_scope": "owner_seller_solicitation",
+            "contact_hold_reasons": ["sale_authority_unverified"],
+            "attorney_draft_status": "hold" if reasons else "requires_verification",
+            "attorney_draft_hold_reasons": reasons, "sale_authority_verified": False}
+
+
+def historic_probate_docket(lines):
+    """Reproduce the original court lead identity even for a corrected parse."""
+    for line in lines[:12]:
+        match = _DOCKET_LINE_RE.match(line)
+        if match:
+            return re.sub(r"\s+", "", match[1]).strip("-").upper()
+    match = _DOCKET_RE.search(" ".join(lines))
+    return match[1].strip("-").upper() if match else None
 
 
 def extract_court_sale(lines: List[str]) -> Dict[str, Any]:
