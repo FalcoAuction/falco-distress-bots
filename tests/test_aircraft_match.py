@@ -51,14 +51,15 @@ BARON = master_row("4590S", "TWN01", "1975", "CONNER CHAD E", "595 STILLWATER DR
 
 class HelperTests(unittest.TestCase):
     def test_street_key_normalizes_suffix_and_direction(self):
-        self.assertEqual(street_key("207 S Idlewild Street", "38104"), street_key("207 IDLEWILD ST", "38104"))
+        self.assertEqual(street_key("207 S Idlewild Street", "38104"), street_key("207 SOUTH IDLEWILD ST", "38104"))
 
     def test_street_key_ignores_unit_text(self):
-        self.assertEqual(street_key("600 12TH AVE S UNIT 1000", "37203"), "600|12TH|37203")
+        self.assertEqual(street_key("600 12TH AVE S UNIT 1000", "37203"), "600|12TH AVE S|37203")
 
     def test_units(self):
         self.assertEqual(units_of("7022 SHALLOWFORD RD STE 1 # 146"), frozenset({"1", "146"}))
         self.assertEqual(units_of("96 JAMESTOWN PARK"), frozenset())
+        self.assertEqual(units_of("25 STERLING WAY STE. 2"), frozenset({"2"}))
 
     def test_parse_addr_keeps_unit_part(self):
         st, city, z = parse_addr("600 12TH AVE S, Unit 509, NASHVILLE, 37203")
@@ -95,7 +96,36 @@ class MatchTests(unittest.TestCase):
         tags = idx.match({"id": "1", "distress_type": "PRE_FORECLOSURE", "full_name": "Benjamin Holman",
                           "property_address": "96 Jamestown Park, Nashville, TN 37205"})
         self.assertEqual([(t["n_number"], t["match_type"], t["confidence"]) for t in tags],
-                         [("N722AP", "address", "high")])
+                         [("N722AP", "address", "low")])
+
+    def test_address_requires_full_street_direction_and_state(self):
+        idx = build([JET])
+        for street in ("96 Jamestown Park Rd", "96 Jamestown Ln", "96 S Jamestown Park"):
+            self.assertEqual(idx.match({"property_address": street + ", Nashville, TN 37205"}), [])
+        self.assertEqual(idx.match({"property_address": "96 Jamestown Park, Nashville, TN 37205",
+                                    "state": "FL"}), [])
+
+    def test_address_and_exact_registrant_are_separate_evidence(self):
+        from src.bots.faa_aircraft_bot import evidence_tags
+        idx = build([JET])
+        lead = {"property_address": "96 Jamestown Park, Nashville, TN 37205"}
+        for name, expected in (("Other Owner", False), ("Capital Rearden Group Inc", False),
+                               ("Rearden Capital Group, Inc.", True)):
+            tag, = evidence_tags(idx, {**lead, "owner_name_records": name})
+            self.assertEqual(tag["identity_verified"], expected)
+            self.assertEqual(tag["confidence"], "high" if expected else "low")
+            self.assertEqual(tag["match_type"], "address_and_name" if expected else "address")
+        plane = idx.by_entity["REARDEN CAPITAL GROUP"][0]
+        plane["status"] = "R"
+        tag, = evidence_tags(idx, {**lead, "owner_name_records": plane["name"]})
+        self.assertFalse(tag["identity_verified"])
+
+    def test_florida_address_uses_registry_state(self):
+        ref = load_ref(REF)
+        fl = JET.replace(",TN,", ",FL,")
+        idx = AircraftIndex(load_aircraft([MASTER_HEADER, fl], ref, states=["FL"]))
+        tag, = idx.match({"state": "FL", "full_name": "REARDEN CAPITAL GROUP INC"})
+        self.assertIn(" FL ", tag["registrant_address"])
 
     def test_condo_different_unit_is_not_a_match(self):
         tbm = master_row("93BN", "JET01", "2010", "PETER LITCHFIELD M D LLC", "600 12TH AVE S UNIT 1000",
@@ -130,6 +160,15 @@ class MatchTests(unittest.TestCase):
                                     "court_id": "tneb"}), [])
         self.assertEqual(idx.match({"id": "1", "distress_type": "BANKRUPTCY", "full_name": "Chad Conner",
                                     "court_id": "tnwb"}), [])
+
+    def test_florida_feed_cannot_corroborate_registry_using_its_own_county(self):
+        fl = BARON.replace(",TN,", ",FL,").replace(",079,", ",031,")
+        idx = AircraftIndex(load_aircraft([MASTER_HEADER, fl], load_ref(REF), states=["FL"]))
+        lead = dict(distress_type="BANKRUPTCY", source="pacer_rss", state="FL", county="Duval",
+                    court_id="flmb", full_name="Chad E Conner")
+        tag, = idx.match(lead)
+        self.assertEqual(tag["match_type"], "name_middle_bk_district")
+        self.assertFalse(idx.match({**lead, "court_id": "flsb"}))
 
     def test_creditor_parties_never_match(self):
         heli = master_row("901TN", "JET01", "1975", "TN DEPT OF PUBLIC SAFETY", "225 EZELL PIKE", "NASHVILLE",

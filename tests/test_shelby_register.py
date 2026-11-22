@@ -7,11 +7,13 @@ trustee lead builder. No network. Fixtures copy the register's markup
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 os.environ["NEXT_PUBLIC_SUPABASE_URL"] = ""
 os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
@@ -142,6 +144,11 @@ class LeadTests(unittest.TestCase):
         bot = ShelbySubstituteTrusteeBot()
         row = parse_results(RESULTS)[1]
         lead = build_lead(bot, row, parse_detail(APPT_OLD_BOOK), None)
+        self.assertEqual(lead.raw_payload["appointment_cross_references"],
+                         [{"instrument": "LM6983", "year": "2001"}])
+        self.assertIsNone(lead.raw_payload["deed_of_trust"])
+        self.assertIsNone(lead.raw_payload["parcel_id"])
+        self.assertEqual(lead.raw_payload["party_basis"], "lender_words")
         self.assertIsNone(lead.property_address)
         self.assertIsNone(lead.mortgage_balance)
         self.assertEqual(lead.owner_name_records, "ROE RICHARD; ROE RITA")
@@ -158,6 +165,105 @@ class LeadTests(unittest.TestCase):
         self.assertEqual(lead.raw_payload["borrowers"], [])
         self.assertEqual(lead.raw_payload["party_basis"], "unidentified")
         self.assertIn("Borrower not identified", lead.admin_notes)
+
+
+class ScheduledSelectionTests(unittest.TestCase):
+    def test_budget_shares_newest_and_oldest_unstaged_filings(self):
+        bot = ShelbySubstituteTrusteeBot()
+        dates = ["2026-10-31", "2026-11-01", "2026-11-08", "2026-11-09",
+                 "2026-11-10", "2026-11-11", "2026-11-20", "2026-11-21",
+                 "2026-11-22", "2026-11-23", None]
+        rows = [dict(parse_results(RESULTS)[0], instrument=str(i), recorded=day,
+                     detail_url=f"https://example/{i}") for i, day in enumerate(dates)]
+        known = {bot.make_lead_key(bot.name, "shelby|2")}
+        with patch("src.bots.shelby_substitute_trustee_bot.date", wraps=date) as clock, \
+                patch("src.bots.shelby_substitute_trustee_bot.parse_results", return_value=rows + [rows[1]]), \
+                patch.object(bot, "_known", side_effect=lambda keys: known & keys), \
+                patch.object(bot, "fetch", return_value=Mock(status_code=200)) as fetch, \
+                patch.object(bot, "_detail", return_value={}) as detail, \
+                patch.object(bot, "retry_deferred_appointment", return_value=2), patch.object(bot, "backfill") as backfill:
+            clock.today.return_value = date(2026, 11, 22)
+            for expected in (["8", "7", "1", "3", "4", "5"], ["6"], []):
+                leads = bot.scrape()
+                self.assertEqual([lead.raw_payload["instrument"] for lead in leads], expected)
+                self.assertEqual([call.args[0] for call in detail.call_args_list],
+                                 [f"https://example/{i}" for i in expected])
+                self.assertEqual(fetch.call_args.kwargs["data"]["startdate"], "11/01/2026")
+                backfill.assert_called_with(1)
+                known.update(lead.pipeline_lead_key for lead in leads)
+                detail.reset_mock()
+
+
+class DeferredDetailTests(unittest.TestCase):
+    def setUp(self):
+        self.bot = ShelbySubstituteTrusteeBot()
+        self.raw = {"instrument": "26000001", "recorded": "2026-11-16", "borrowers": ["INDEX NAME"],
+                    "recovery": {"source": "saved_register_APPT_index", "detail_issue": "HTTP 503"}}
+        self.row = {"id": "id1", "raw_payload": self.raw, "property_address": None}
+        self.client = Mock()
+        self.query = self.client.table.return_value
+        for method in ("update", "eq", "filter", "is_"):
+            getattr(self.query, method).return_value = self.query
+        self.enterContext(patch("src.bots.shelby_substitute_trustee_bot._supabase", return_value=self.client))
+        self.rows = self.enterContext(patch.object(self.bot, "_deferred_rows", return_value=[self.row]))
+        self.detail = self.enterContext(patch.object(self.bot, "_verified_detail"))
+
+    def retry(self, docs, expected_requests):
+        self.detail.side_effect = docs
+        self.assertEqual(self.bot.retry_deferred_appointment(), expected_requests)
+        self.assertEqual(self.detail.call_count, expected_requests)
+        self.query.filter.assert_called_once_with("raw_payload", "eq", json.dumps(self.raw, separators=(",", ":")))
+        return self.query.update.call_args.args[0]
+
+    def test_linked_loan_fills_property_and_keeps_distinct_roles(self):
+        patch = self.retry([parse_detail(APPT), parse_detail(DOT)], 2)
+        raw = patch["raw_payload"]
+        self.assertEqual(set(patch), {"raw_payload", "property_address"})
+        self.assertEqual(raw["borrowers"], ["INDEX NAME"])
+        self.assertEqual(raw["recovery"]["loan_grantors"], ["DOE JANE Q"])
+        self.assertEqual(raw["parcel_id"], "08300800028")
+        self.assertTrue(raw["dot_checked_at"])
+        self.assertTrue(raw["recovery"]["detail_checked_at"])
+        self.query.is_.assert_called_once_with("property_address", "null")
+
+    def test_conflicting_evidence_preserves_fields(self):
+        self.row["property_address"] = "previous address"
+        self.raw["parcel_id"] = "previous parcel"
+        patch = self.retry([parse_detail(APPT), parse_detail(DOT)], 2)
+        self.assertEqual(set(patch), {"raw_payload"})
+        self.assertEqual(patch["raw_payload"]["parcel_id"], "previous parcel")
+        self.assertEqual(patch["raw_payload"]["recovery"]["register_parcel"], "08300800028")
+        self.query.eq.assert_any_call("property_address", "previous address")
+
+    def test_failed_link_remains_due_and_rotates(self):
+        patch = self.retry([parse_detail(APPT), None], 2)
+        recovery = patch["raw_payload"]["recovery"]
+        self.assertTrue(recovery["last_detail_attempt"])
+        self.assertNotIn("detail_checked_at", recovery)
+
+    def test_unavailable_appointment_still_due(self):
+        patch = self.retry([None], 1)
+        self.assertNotIn("detail_checked_at", patch["raw_payload"]["recovery"])
+        self.assertNotIn("deed_of_trust", patch["raw_payload"])
+
+    def test_legacy_reference_finishes_without_inventing_parcel(self):
+        patch = self.retry([parse_detail(APPT_OLD_BOOK)], 1)
+        self.assertEqual(patch["raw_payload"]["recovery"]["detail_outcome"], "no_linked_loan")
+        self.assertNotIn("parcel_id", patch["raw_payload"])
+
+    def test_empty_queue_uses_no_requests_or_writes(self):
+        self.rows.return_value = []
+        self.assertEqual(self.bot.retry_deferred_appointment(), 0)
+        self.detail.assert_not_called()
+        self.query.update.assert_not_called()
+
+    def test_mismatched_instrument_page_is_rejected(self):
+        response = Mock(status_code=200, text="<a>Detail Information For Instrument # 26000002</a>" + APPT)
+        with patch.object(self.bot, "fetch", return_value=response) as fetch:
+            read = ShelbySubstituteTrusteeBot._verified_detail
+            self.assertIsNone(read(self.bot, "26000001", "2026"))
+            self.assertEqual(read(self.bot, "26000002", "2026")["doc_type"], "APPOINTMENT OF SUBSTITUTE TR")
+            self.assertFalse(fetch.call_args.kwargs["allow_redirects"])
 
 
 if __name__ == "__main__":

@@ -105,7 +105,7 @@ class CourtRssBot(BotBase):
                 distress_type="BANKRUPTCY", full_name=caption, owner_name_records=caption,
                 county=county.title() if county else None, source_url=item["docket_url"],
                 admin_notes=f"FL bankruptcy ({item['court_id']} {item['case_number']}, ch. {item['chapter'] or '?'})"
-                            + (f": owner of {planes[0]['aircraft']} {planes[0]['n_number']}" if planes else ""),
+                            + (f": possible FAA registrant match for {planes[0]['aircraft']} {planes[0]['n_number']}" if planes else ""),
                 raw_payload={"source": "pacer_rss", "state": "FL", "court_id": item["court_id"],
                              "case_number": item["case_number"], "case_name": caption, "chapter": item["chapter"],
                              "trustee": item["trustee"], "docket_url": item["docket_url"],

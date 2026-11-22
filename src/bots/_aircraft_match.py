@@ -69,7 +69,8 @@ FLSB = {"broward", "miami-dade", "monroe", "palm beach", "martin", "st. lucie", 
 SUFFIX = {"STREET": "ST", "DRIVE": "DR", "ROAD": "RD", "LANE": "LN", "COURT": "CT", "CIRCLE": "CIR",
           "AVENUE": "AVE", "BOULEVARD": "BLVD", "HIGHWAY": "HWY", "PLACE": "PL", "TRAIL": "TRL",
           "PARKWAY": "PKWY", "TERRACE": "TER", "COVE": "CV", "POINT": "PT", "HOLLOW": "HOLW"}
-DIRS = {"N", "S", "E", "W", "NE", "NW", "SE", "SW", "NORTH", "SOUTH", "EAST", "WEST"}
+DIRECTIONS = {"NORTH": "N", "SOUTH": "S", "EAST": "E", "WEST": "W",
+              "NORTHEAST": "NE", "NORTHWEST": "NW", "SOUTHEAST": "SE", "SOUTHWEST": "SW"}
 NAME_SUFFIX = {"JR", "SR", "II", "III", "IV", "MD", "DR", "ESQ", "DECEASED", "DEC", "ESTATE"}
 ENTITY_RE = re.compile(r"\b(LLC|L L C|INC|CORP|CORPORATION|COMPANY|CO|LP|LLP|PLLC|LTD|TRUST|HOLDINGS|"
                        r"PARTNERS|GROUP|ENTERPRISES|AVIATION|PROPERTIES)\b")
@@ -77,7 +78,7 @@ ENTITY_STRIP_RE = re.compile(r"\b(LLC|L L C|INC|CORP|CORPORATION|COMPANY|CO|LP|L
 # Bankruptcy "parties" and some notices list creditors / agencies — never the lead.
 NOT_OWNER_RE = re.compile(r"\b(DEPT|DEPARTMENT|STATE OF|COUNTY|CITY OF|UNITED STATES|INTERNAL REVENUE|BANK|"
                           r"CREDIT UNION|TRUSTEE|BLUECROSS|INSURANCE)\b")
-UNIT_RE = re.compile(r"(?:\b(?:UNIT|APT|STE|SUITE)\s*#?\s*|#\s*)([A-Z0-9\-]+)", re.I)
+UNIT_RE = re.compile(r"(?:\b(?:UNIT|APT|STE|SUITE)(?=\b|\d)\.?\s*#?\s*|#\s*)([A-Z0-9\-]+)", re.I)
 ESTATE_RE = re.compile(r"ESTATE OF\s+([A-Z][A-Z .'\-]{3,60}?)(?:,|\s+DOCKET|\s+WHO|\s+DECEASED|\s+NOTICE|\s+\d)",
                        re.I)
 EXEC_BY_RE = re.compile(r"EXECUTED BY\s+([A-Z][A-Z .'\-]{3,60}?)(?:,|\s+TO\s)", re.I)
@@ -113,10 +114,10 @@ def street_key(street: Optional[str], zip5: Optional[str]) -> Optional[str]:
     toks = s.split()
     if not toks[0].isdigit():
         return None
-    rest = [t for t in toks[1:] if t not in DIRS]
-    if not rest:
+    if len(toks) < 2 or not re.fullmatch(r"\d{5}", zip5):
         return None
-    return f"{toks[0]}|{SUFFIX.get(rest[0], rest[0])}|{zip5}"
+    road = " ".join(DIRECTIONS.get(t, SUFFIX.get(t, t)) for t in toks[1:])
+    return f"{toks[0]}|{road}|{zip5}"
 
 
 def parse_addr(a: Optional[str]) -> Tuple[Optional[str], Optional[str], Optional[str]]:
@@ -296,7 +297,10 @@ class AircraftIndex:
         addrs = [x for x in [lead.get("property_address"), lead.get("mailing_address")] if x]
         cities = {clean(lead["city"])} if lead.get("city") else set()
         counties = set()
-        if lead.get("county"):
+        # The FL court feed copies its county from the first FAA candidate.
+        # It is not independent geographic evidence for that registrant.
+        faa_county = is_bk and state == "FL" and lead.get("source") == "pacer_rss"
+        if lead.get("county") and not faa_county:
             counties.add(lead["county"].lower().replace(" county", "").replace(" ", "").strip())
 
         hits: Dict[str, Tuple[Dict[str, Any], str, str]] = {}
@@ -311,8 +315,8 @@ class AircraftIndex:
             if (k, lu) in self.crowded:
                 continue
             for a, fu in self.by_addr.get(k, []):
-                if fu == lu:
-                    hits[a["n"]] = (a, "address", "high")
+                if a["state"] == state and fu == lu:
+                    hits[a["n"]] = (a, "address", "low")
         for nm in names:
             ek = entity_key(nm)
             if ek:
@@ -344,7 +348,7 @@ class AircraftIndex:
             "value_band_label": BAND_LABEL[a["band"]],
             "registrant": a["name"],
             "co_owners": a["others"],
-            "registrant_address": re.sub(r"\s+", " ", f'{a["street"]} {a["street2"]}, {a["city"]} TN {a["zip"]}'),
+            "registrant_address": re.sub(r"\s+", " ", f'{a["street"]} {a["street2"]}, {a["city"]} {a["state"]} {a["zip"]}'),
             "registrant_county": a["county"],
             "registration_status": a["status"],
             "registration_expires": a["exp"],
