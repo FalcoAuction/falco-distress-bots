@@ -202,7 +202,10 @@ class ChurchClosureBot(BotBase):
             for field in ("property_address", "county"):
                 value = row[field]
                 updated = updated.is_(field, "null") if value is None else updated.eq(field, value)
-            updated.filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute()
+            try:
+                updated.filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute()
+            except Exception as exc:
+                self.logger.warning("Parcel observation deferred for %s (%s)", row["id"], type(exc).__name__)
 
     def _write_staging(self, leads):
         counts = super()._write_staging(leads)

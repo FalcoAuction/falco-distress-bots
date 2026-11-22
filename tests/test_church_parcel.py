@@ -83,4 +83,3 @@ class ChurchParcelTests(unittest.TestCase):
             bot._refresh_parcels(client)
             matcher.assert_called_once()
             table.update.assert_called_once()
-

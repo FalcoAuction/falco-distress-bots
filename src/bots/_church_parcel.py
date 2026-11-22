@@ -114,4 +114,3 @@ def match(closure, lookup=query):
                 "basis": "church_named_assessor_parcel"}
     except (requests.RequestException, ValueError, TypeError, KeyError, AttributeError):
         return hold("source_incomplete")
-
