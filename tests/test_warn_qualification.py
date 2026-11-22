@@ -1,7 +1,7 @@
 from datetime import date, timedelta
 import unittest
 
-from src.bots._personal_property import classify
+from src.bots._personal_property import classify, dedupe_key
 from src.bots._property_lane import property_lane
 from src.bots._warn_gate import is_tn_warn
 from src.enrichment.shortlist import screen
@@ -38,7 +38,9 @@ class WarnQualificationTests(unittest.TestCase):
         row = record()
         ev = asset_review()
         row["raw_payload"]["personal_property_evidence"] = ev
+        ev["valuation"] = dict(ev["availability"], amount=50000)
         tag = classify(row)
+        self.assertEqual(tag["est_value_min"], 50000)
         self.assertTrue(tag["routable"])
         self.assertEqual(tag["controller"], "Officer")
         self.assertIsNone(tag["deadline"])
@@ -46,6 +48,7 @@ class WarnQualificationTests(unittest.TestCase):
         tag = classify(row)
         self.assertEqual(tag["qualification"], "qualified_prospect")
         self.assertFalse(tag["routable"])
+        self.assertIsNone(dedupe_key(tag, row, row["raw_payload"]))
         ev["assets"][0]["source_url"] = row["raw_payload"]["warn"]["letter_url"] + "?copy=1"
         self.assertEqual(classify(row)["qualification"], "research")
 
@@ -66,5 +69,12 @@ class WarnQualificationTests(unittest.TestCase):
     def test_other_proceeding_at_same_company_remains_independent(self):
         row = record()
         row.update(bot_source="bankruptcy_events", distress_type="BANKRUPTCY")
+        row.update(full_name="Example Beverages Inc.")
+        row["raw_payload"].update(chapter="7")
+        row["raw_payload"]["warn"].update(asset_disposition="sold")
+        with_notice = classify(row)
+        del row["raw_payload"]["warn"]
+        self.assertEqual(with_notice, classify(row))
+        self.assertEqual(with_notice["lane"], "business_liquidation")
         self.assertFalse(is_tn_warn(row))
         self.assertFalse(is_tn_warn({"distress_type":"BUSINESS_CLOSURE", "bot_source":"fl_sunbiz"}))
