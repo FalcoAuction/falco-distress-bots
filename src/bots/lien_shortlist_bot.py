@@ -24,13 +24,14 @@ from collections import Counter
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
-from ._base import BotBase, _supabase
+from ._base import BotBase, _supabase, guard_phone_metadata
 from ._warn_gate import is_tn_warn
 from ._land_qualification import is_land_signal, land_gate
 from ..enrichment.shortlist import IN_SCOPE, county_key, screen
 
 QUEUE_CAP = int(os.environ.get("FALCO_LIEN_QUEUE_CAP", "600") or 600)
 ID_BATCH = 200
+STAGING_FIELDS = "id,county,distress_type,bot_source,staging_status,owner_name_records,raw_payload,trustee_sale_date"
 
 
 class LienShortlistBot(BotBase):
@@ -78,9 +79,12 @@ class LienShortlistBot(BotBase):
             raw_by_id: Dict[str, Dict[str, Any]] = {}
             ids = [o["staging_id"] for o in opps if o.get("staging_id")]
             for i in range(0, len(ids), ID_BATCH):
-                rows = (client.table("homeowner_requests_staging").select("id,county,distress_type,bot_source,staging_status,owner_name_records,raw_payload")
+                rows = (client.table("homeowner_requests_staging")
+                        .select(STAGING_FIELDS + ",sale_flag:phone_metadata->sale_status,notice_review:phone_metadata->trustee_notice_review")
                         .in_("id", ids[i:i + ID_BATCH]).execute().data) or []
                 for r in rows:
+                    if r.get("bot_source") == "mackie_wolf_trustee":
+                        r["phone_metadata"] = {"sale_status": r.get("sale_flag"), "trustee_notice_review": r.get("notice_review")}
                     raw_by_id[r["id"]] = r
             today = date.today()
             for o in opps:
@@ -116,13 +120,19 @@ class LienShortlistBot(BotBase):
         """Re-read raw_payload right before the write so a concurrent
         enricher's change is not clobbered."""
         try:
-            cur = (client.table("homeowner_requests_staging").select("county,distress_type,bot_source,staging_status,owner_name_records,raw_payload")
+            cur = (client.table("homeowner_requests_staging").select(STAGING_FIELDS + ",phone_metadata")
                    .eq("id", c["staging_id"]).limit(1).execute().data) or []
             if not cur or is_tn_warn(cur[0]) or not land_gate(cur[0], client=client):
                 return 0
             raw = cur[0].get("raw_payload") or {}
             if not isinstance(raw, dict):
                 raw = {}
+            mackie = cur[0].get("bot_source") == "mackie_wolf_trustee"
+            if mackie:
+                ok, current = screen(cur[0], raw, date.today())
+                if not ok or cur[0].get("staging_status") == "rejected":
+                    return 0
+                c = {**c, **current}
             prior = raw.get("lien_check") or {}
             raw = dict(raw)
             raw["lien_check"] = {
@@ -135,7 +145,10 @@ class LienShortlistBot(BotBase):
                 "tight": c.get("tight"),
             }
             update = client.table("homeowner_requests_staging").update({"raw_payload": raw}).eq("id", c["staging_id"])
-            if is_land_signal(cur[0]):
+            if mackie:
+                update = guard_phone_metadata(update, cur[0].get("phone_metadata"))
+                update = update.eq("trustee_sale_date", cur[0]["trustee_sale_date"]).eq("staging_status", cur[0]["staging_status"])
+            if mackie or is_land_signal(cur[0]):
                 update = update.filter("raw_payload", "eq", json.dumps(cur[0]["raw_payload"], separators=(",", ":")))
             return int(bool(update.execute().data))
         except Exception as e:
