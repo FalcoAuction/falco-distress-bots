@@ -25,6 +25,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List
 
 from ._base import BotBase, _supabase, guard_phone_metadata
+from ._warn_gate import is_tn_warn
 from ._land_qualification import is_land_signal, land_gate
 from ..enrichment.shortlist import IN_SCOPE, county_key, screen
 
@@ -121,7 +122,7 @@ class LienShortlistBot(BotBase):
         try:
             cur = (client.table("homeowner_requests_staging").select(STAGING_FIELDS + ",phone_metadata")
                    .eq("id", c["staging_id"]).limit(1).execute().data) or []
-            if not cur or not land_gate(cur[0], client=client):
+            if not cur or is_tn_warn(cur[0]) or not land_gate(cur[0], client=client):
                 return 0
             raw = cur[0].get("raw_payload") or {}
             if not isinstance(raw, dict):

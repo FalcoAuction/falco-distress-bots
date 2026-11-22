@@ -200,7 +200,7 @@ def qualify(row, events, today=None):
 
 # Narrow JSON projections for contact providers that never needed the full payload.
 GATE_FIELDS = ("lane_tag:raw_payload->property_lane,land_input:raw_payload->land,"
-               "land_roll:raw_payload->comptroller_parcel,land_source:raw_payload->>source")
+               "land_roll:raw_payload->comptroller_parcel,land_source:raw_payload->>source,warn_notice:raw_payload->warn->>company")
 
 
 def land_gate(row, today=None, client=None):

@@ -26,6 +26,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._warn_gate import is_tn_warn
 from ._land_qualification import is_land_signal, qualify
 from ._address import is_natural_person
 from ._field_confidence import phone_trust
@@ -467,6 +468,10 @@ def property_lane(row: Dict[str, Any], land_events=()) -> Dict[str, Any]:
         "owner_type": otype, "contact": contact, "grade": None, "exclude_reason": None,
         "stacked_distress": stacked_distress(raw), "version": VERSION,
     }
+    if is_tn_warn(row):
+        out["exclude_reason"] = "employment_notice"
+        out["readiness"] = readiness(row, raw, out)
+        return out
     if is_land_signal(row):
         review = qualify(row, land_events)
         out["land_qualification"] = review
@@ -592,6 +597,8 @@ def readiness(row: Dict[str, Any], raw: Dict[str, Any], lane: Dict[str, Any]) ->
         "forcing_distress": dt in STRONG_DISTRESS or bool(lane.get("stacked_distress")) or _failing_structure(raw),
         "source_link": bool(row.get("source_url") or raw.get("source_url") or raw.get("docket_url") or raw.get("source")),
     }
+    if is_tn_warn(row):
+        checks["forcing_distress"] = False
     if "land_qualification" in lane:
         checks["forcing_distress"] = lane["land_qualification"]["status"] == "corroborated_opportunity"
         checks["source_link"] = bool(lane["land_qualification"]["source_url"])
