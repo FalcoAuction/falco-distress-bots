@@ -29,6 +29,13 @@ TAX = ('TAXPAYERS The 2026 Real and Personal Property taxes are now due and paya
 
 
 class TrusteeNoticeTests(unittest.TestCase):
+    def test_only_supported_unambiguous_auction_dates(self):
+        notice = "Deed of Trust dated May 2, 2021. Will sell at public outcry on Monday, December 7, 2026."
+        self.assertEqual(sale_date(notice), "2026-12-07")
+        self.assertIsNone(sale_date(notice + " Foreclosure sale date: January 4, 2027."))
+        self.assertIsNone(sale_date("Foreclosure sale date: February 30, 2027"))
+        self.assertIsNone(sale_date("Deed of Trust dated May 2, 2021. Appointment of Substitute Trustee."))
+
     def test_classify(self):
         self.assertEqual(classify(SUB), "foreclosure")
         self.assertEqual(classify(LLC), "foreclosure")

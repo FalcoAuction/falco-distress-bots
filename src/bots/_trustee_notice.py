@@ -20,6 +20,7 @@ distress type, not the category.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Dict, List, Optional
 
 TRUSTEE_SALE_RE = re.compile(
@@ -115,7 +116,11 @@ def deed_ref(text: str) -> Dict[str, Optional[str]]:
 
 
 SALE_DATE_RE = re.compile(
-    r"\bsale\s+at\s+public\s+auction\s+will\s+be\s+(?:held\s+)?on\s+([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})",
+    r"\b(?:sale\s+at\s+public\s+auction\s+will\s+be\s+(?:held\s+)?on|"
+    r"will\s+(?:sell|offer\s+for\s+sale)\s+at\s+public\s+(?:auction|outcry)\s+on|"
+    r"(?:foreclosure|trustee['’]s)\s+sale\s+(?:will\s+be\s+held\s+on|date\s*:))"
+    r"\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
+    r"([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})\b",
     re.IGNORECASE)
 _MONTHS = {m: i for i, m in enumerate(
     ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
@@ -123,14 +128,14 @@ _MONTHS = {m: i for i, m in enumerate(
 
 def sale_date(text: str) -> Optional[str]:
     """ISO date from 'Sale at public auction will be on October 28, 2026'."""
-    m = SALE_DATE_RE.search(text or "")
-    if not m:
-        return None
-    parts = re.match(r"([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})", m.group(1))
-    month = _MONTHS.get(parts.group(1)[:3].lower()) if parts else None
-    if not month:
-        return None
-    return f"{int(parts.group(3)):04d}-{month:02d}-{int(parts.group(2)):02d}"
+    dates = set()
+    for match in SALE_DATE_RE.finditer(text or ""):
+        month = _MONTHS.get(match[1][:3].lower())
+        try:
+            dates.add(date(int(match[3]), month or 0, int(match[2])).isoformat())
+        except ValueError:
+            return None
+    return dates.pop() if len(dates) == 1 else None
 
 
 def is_entity(name: str) -> bool:

@@ -14,7 +14,7 @@ class MortgageDocTypeTests(unittest.TestCase):
     def test_mortgage_and_deed_of_trust_both_accepted(self):
         for t in ("MORTGAGE", "DEED OF TRUST", "Deed of Trust"):
             self.assertTrue(LOAN_DOC.search(t), t)
-        for t in ("WARRANTY DEED", "RELEASE", ""):
+        for t in ("WARRANTY DEED", "RELEASE OF DEED OF TRUST", "MORTGAGE ASSIGNMENT", "RELEASE", ""):
             self.assertFalse(LOAN_DOC.search(t), t)
 
     def test_mortgage_doc_gives_address_loan_and_borrowers(self):
