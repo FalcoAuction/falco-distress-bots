@@ -228,6 +228,11 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((got["lane"], got["subtype"]), ("commercial", "church"))
         self.assertIsNone(got["exclude_reason"])
 
+    def test_county_review_supplies_owner_when_closure_has_none(self):
+        r = self.church_row()
+        r.update(owner_name_records=None, full_name=None)
+        self.assertEqual(property_lane(r), property_lane(self.church_row()))
+
     def test_changed_church_owner_parcel_or_address_invalidates_review(self):
         for field in ("owner", "parcelid"):
             r = self.church_row()

@@ -40,6 +40,7 @@ from ._base import BotTimeout, close_open_runs
 from ._paid import PAID_BOTS, paid_data_enabled
 
 from . import hud_reo_bot
+from . import shelby_receiver_roster_bot
 from . import nashville_codes_bot
 from . import memphis_codes_bot
 from . import chattanooga_codes_bot
@@ -86,6 +87,7 @@ from . import davidson_parcels_bot
 from . import landlord_portfolio_bot
 from . import williamson_assessor_bot
 from . import shelby_assessor_bot
+from . import memphis_county_value_bot
 from . import shelby_loan_value_bot
 from . import rutherford_assessor_bot
 from . import montgomery_assessor_bot
@@ -150,6 +152,7 @@ NEW_BOTS = [
     ("bot_health_monitor", bot_health_monitor.run),
     # Lead sources
     ("hud_reo", hud_reo_bot.run),
+    ("shelby_receiver_roster", shelby_receiver_roster_bot.run),
     ("nashville_codes", nashville_codes_bot.run),
     ("memphis_codes", memphis_codes_bot.run),
     ("chattanooga_codes", chattanooga_codes_bot.run),
@@ -243,6 +246,7 @@ NEW_BOTS = [
     ("davidson_assessor", davidson_assessor_bot.run),
     ("landlord_portfolio", landlord_portfolio_bot.run),
     ("williamson_assessor", williamson_assessor_bot.run),
+    ("memphis_county_value", memphis_county_value_bot.run),
     ("shelby_assessor", shelby_assessor_bot.run),
     # Free: Shelby pre-foreclosure stand-in value (recorded loan x Memphis
     # FHFA index) until the Assessor's certified roll arrives.

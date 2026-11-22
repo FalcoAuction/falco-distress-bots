@@ -40,6 +40,7 @@ EXPECTED_BOTS = {
     "memphis_daily_news":        {"max_silent_days": 14, "min_total": 30},
     "nashville_ledger":          {"max_silent_days": 14, "min_total": 30},
     "hud_reo":                   {"max_silent_days": 14, "inventory_only": True},
+    "shelby_receiver_roster":    {"max_silent_days": 14, "inventory_only": True},
     "tn_probate":                {"max_silent_days": 30, "min_total": 0},
     # Dozens of TN dismissals a week; a silent week means the feed or the
     # entry labels changed.
