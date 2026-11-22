@@ -31,9 +31,18 @@ TAX = ('TAXPAYERS The 2026 Real and Personal Property taxes are now due and paya
 class TrusteeNoticeTests(unittest.TestCase):
     def test_auction_venue_is_not_the_distressed_property(self):
         from src.bots._trustee_notice import property_address_text
+        from src.bots.tn_public_notice_bot import TnPublicNoticeBot
         venue = "At the county courthouse, 140 ADAMS AVENUE, Memphis."
         self.assertEqual(property_address_text(venue), "")
         self.assertEqual(property_address_text(venue + " Property address: 52 Pine Street"), "52 PINE STREET")
+        row = {"county": "shelby", "notice_id": "71", "excerpt":
+               "Trustee's sale at public auction will be on 12/22/2026. " + venue}
+        build = TnPublicNoticeBot()._build_lead
+        lead = build(row, "PRE_FORECLOSURE", "Foreclosures")
+        self.assertIsNone(lead.property_address)
+        self.assertEqual(lead.trustee_sale_date, "2026-12-22")
+        row["excerpt"] += " Property address: 52 Pine Street"
+        self.assertEqual(build(row, "PRE_FORECLOSURE", "Foreclosures").property_address, "52 Pine Street")
 
     def test_only_supported_unambiguous_auction_dates(self):
         notice = "Deed of Trust dated May 2, 2021. Will sell at public outcry on Monday, December 7, 2026."
