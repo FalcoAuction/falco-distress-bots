@@ -314,5 +314,43 @@ class ScheduledLaneTests(unittest.TestCase):
             self.assertEqual(stored['raw_payload']['unrelated'], {'keep': True})
 
 
+
+class OpportunityDedupeTests(unittest.TestCase):
+    def key(self, raw=None, **kw):
+        from src.bots._personal_property import dedupe_key
+        return dedupe_key({'lane': 'estate'}, {'distress_type': 'PROBATE', **kw}, raw or {})
+
+    def test_blank_or_owner_alone_never_suppressed(self):
+        self.assertIsNone(self.key())
+        self.assertIsNone(self.key(full_name='Jane Doe'))
+        self.assertIsNone(self.key({'case_number': '123'}, full_name='Jane Doe'))
+        self.assertIsNone(self.key({'case_number': 'Unknown', 'court_id': 'tnwb'}))
+
+    def test_case_requires_jurisdiction_and_distinguishes_counties(self):
+        raw = {'state': 'TN', 'court_notice': {'docket': '26P123', 'county': 'Shelby'}}
+        a = self.key(raw)
+        self.assertIsNotNone(a)
+        self.assertEqual(a, self.key(raw, id='second-newspaper'))
+        self.assertNotEqual(a, self.key({'state': 'TN', 'court_notice': {'docket': '26P123', 'county': 'Davidson'}}))
+        self.assertNotEqual(self.key({'case_number': '26-123', 'court_id': 'tnwb'}),
+                            self.key({'case_number': '26-123', 'court_id': 'tnmb'}))
+
+    def test_assets_dont_collapse_by_owner_or_case(self):
+        a = {'aircraft': [{'n_number': 'N123', 'serial': '1'}]}
+        b = {'aircraft': [{'n_number': 'N456', 'serial': '2'}]}
+        self.assertIsNone(self.key(a))
+        self.assertEqual(self.key(a, full_name='Jane Doe'), self.key(a, full_name=' jane doe '))
+        self.assertNotEqual(self.key(a, full_name='Jane Doe'), self.key(b, full_name='Jane Doe'))
+        self.assertNotEqual(self.key(a, full_name='Jane Doe'), self.key(a, full_name='John Doe'))
+        a.update(case_number='26-123', court_id='tnwb')
+        b.update(case_number='26-123', court_id='tnwb')
+        self.assertNotEqual(self.key(a), self.key(b))
+        combined = {'aircraft': a['aircraft'] + b['aircraft']}
+        reversed_assets = {'aircraft': list(reversed(combined['aircraft']))}
+        self.assertEqual(self.key(combined, full_name='Jane Doe'), self.key(reversed_assets, full_name='Jane Doe'))
+        self.assertIsNone(self.key({'court_id': 'tnwb', 'case_number': '26-123',
+                                    'aircraft': [{'n_number': 'N999'}]}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -31,6 +31,7 @@ appraisals; `signals` says what each one rests on.
 from __future__ import annotations
 
 import re
+import json
 import math
 from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
@@ -381,14 +382,49 @@ def qualify_routing(tag, lead, raw):
         tag.update(controller=controller["name"], primary_contact=controller["name"],
                    est_value_min=value.get("amount") or tag.get("est_value_min"),
                    value_basis=value.get("source_url") or tag.get("value_basis"))
+    tag["prospect"] = tag["qualification"] in ("qualified_prospect", "reviewed")
     return tag
 
 
-def dedupe_key(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any]) -> str:
-    """Same opportunity filed twice (two newspapers, two notices)."""
-    ident = (raw.get("docket_number") or raw.get("case_number") or lead.get("owner_name_records")
-             or lead.get("full_name") or "")
-    return tag["lane"] + "|" + re.sub(r"[^A-Z0-9]", "", str(ident).upper())
+def dedupe_key(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any]) -> Optional[str]:
+    """Only suppress proven repeat opportunities, never an owner or blank alone.
+
+    Asset sets are part of case keys too: one case can contain separate lots.
+    Missing identity returns None, which the caller must not deduplicate.
+    """
+    def norm(value):
+        return re.sub(r"\s+", " ", str(value or "").strip().upper())
+    owner = norm(lead.get("owner_name_records") or lead.get("full_name"))
+    if owner in ("UNKNOWN", "UNKNOWN OWNER", "UNNAMED", "N/A"):
+        owner = ""
+    assets = set()
+    for p in _aircraft(raw):
+        if not (p.get("n_number") and p.get("serial")):
+            return None  # An unidentified lot must not disappear behind its case.
+        if p.get("n_number") and p.get("serial"):
+            assets.add(("AIRCRAFT", norm(p["n_number"]), norm(p["serial"])))
+    evidence = raw.get("personal_property_evidence")
+    for a in (evidence.get("assets") or []) if isinstance(evidence, dict) else []:
+        if not (isinstance(a, dict) and a.get("kind") and a.get("asset_id")):
+            return None
+        if isinstance(a, dict) and a.get("kind") and a.get("asset_id"):
+            assets.add((norm(a["kind"]), norm(a["asset_id"]), norm(a.get("serial"))))
+    vessel = raw.get("vessel")
+    if isinstance(vessel, dict) and vessel.get("hin"):
+        assets.add(("VESSEL", norm(vessel["hin"]), ""))
+    notice = raw.get("court_notice")
+    notice = notice if isinstance(notice, dict) else {}
+    case = norm(raw.get("docket_number") or raw.get("case_number") or notice.get("docket"))
+    state = norm(raw.get("state") or lead.get("state") or notice.get("state"))
+    county = norm(notice.get("county") or lead.get("county"))
+    jurisdiction = norm(raw.get("court_id")) or ([state, county, norm(notice.get("court"))]
+                                                if state and county else None)
+    if case and re.search(r"\d", case) and jurisdiction:
+        return json.dumps([tag["lane"], "case", jurisdiction, norm(lead.get("distress_type")),
+                           case, sorted(assets)], separators=(",", ":"))
+    if assets and owner:
+        return json.dumps([tag["lane"], "assets", owner, sorted(assets)], separators=(",", ":"))
+    return None
 
 
 def _vessel_arrest(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:

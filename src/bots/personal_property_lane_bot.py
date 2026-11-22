@@ -34,7 +34,7 @@ _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "c
              "trustee", "sale_date")
 _RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
              "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts", "personal_property_evidence")
-_BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value, trustee_sale_date"
+_BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value, trustee_sale_date, county"
 
 
 class PersonalPropertyLaneBot(BotBase):
@@ -74,10 +74,11 @@ class PersonalPropertyLaneBot(BotBase):
                     tag = classify(lead)
                     if tag:
                         key = dedupe_key(tag, lead, raw)
-                        if key in first_seen and first_seen[key] != row["id"]:
-                            tag = {**tag, "duplicate_of": first_seen[key], "routable": False,
+                        tag["dedupe_key"] = key
+                        if key is not None and key in first_seen and first_seen[key] != row["id"]:
+                            tag = {**tag, "duplicate_of": first_seen[key], "routable": False, "prospect": False,
                                    "not_routable_reason": "duplicate of another lead", "route_to": None}
-                        else:
+                        elif key is not None:
                             first_seen[key] = row["id"]
                     if tag:
                         lanes[f"{tag['lane']}:{tag['grade']}"] += 1
