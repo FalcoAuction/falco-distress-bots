@@ -45,12 +45,13 @@ import io
 import sys
 import traceback as tb
 import zipfile
-from collections import defaultdict
+from collections import ChainMap, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
 from ._provenance import record_field
+from . import _hamilton_herald_assessor as herald
 
 
 HAMILTON_ASSESSOR_ZIP = (
@@ -194,6 +195,13 @@ class HamiltonAssessorBot(BotBase):
             except Exception as exc:
                 self.logger.warning("Chattanooga parcel review incomplete: %s", type(exc).__name__)
                 error_message = f"Chattanooga parcel review incomplete: {type(exc).__name__}"
+            try:
+                enriched += herald.refresh(client, ChainMap(self.herald_details, index), addr_index,
+                                           ambiguous_addresses, self.duplicate_parcels,
+                                           self.county_file_stamp, HAMILTON_ASSESSOR_ZIP)
+            except Exception as exc:
+                self.logger.warning("Herald appraisal review incomplete: %s", type(exc).__name__)
+                error_message = f"Herald appraisal review incomplete: {type(exc).__name__}"
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} Hamilton candidates to enrich")
             for row in candidates[:self.max_leads_per_run]:
@@ -201,6 +209,10 @@ class HamiltonAssessorBot(BotBase):
                 # business rents in; attaching that parcel would hand a tenant
                 # the landlord's land use, value and mailing.
                 raw0 = row.get("raw_payload") if isinstance(row.get("raw_payload"), dict) else {}
+                if (row["__table__"] == "homeowner_requests_staging" and row.get("bot_source") == herald.SOURCE
+                        and row.get("distress_type") == "PRE_FORECLOSURE"):
+                    # Foreclosure notices have a dedicated, parcel-aware staging review.
+                    continue
                 if str(raw0.get("parcel") or "").upper().startswith("PER-"):
                     skipped += 1
                     continue
@@ -309,6 +321,8 @@ class HamiltonAssessorBot(BotBase):
             self.logger.error("no CSV in Hamilton assessor ZIP")
             return {}
         index: Dict[str, Dict[str, Any]] = {}
+        self.duplicate_parcels = set()
+        self.herald_details = {}
         with zf.open(names[0]) as fh:
             text = io.TextIOWrapper(fh, encoding="latin-1", newline="")
             reader = csv.DictReader(text)
@@ -317,7 +331,14 @@ class HamiltonAssessorBot(BotBase):
                                      row.get("PARCEL", ""))
                 if not key:
                     continue
+                if key in index:
+                    self.duplicate_parcels.add(key)
                 index[key] = self._extract_record(row)
+                unit = (row.get("ST_ADDR_UNIT") or "").strip()
+                owners = [str(row.get(f"OWNER_NAME_{n}") or "").strip() for n in (1, 2, 3)]
+                owner = " & ".join(v.rstrip(" &") for v in owners if v)
+                if unit or owner != (index[key]["owner"] or ""):
+                    self.herald_details[key] = dict(index[key], situs_unit=unit, owner=owner)
         return index
 
     @staticmethod
@@ -440,7 +461,8 @@ class HamiltonAssessorBot(BotBase):
                     q = (
                         client.table(table)
                         .select("id, property_address, county, owner_name_records, "
-                                "property_value, property_value_source, raw_payload, phone_metadata")
+                                "property_value, property_value_source, raw_payload, phone_metadata"
+                                + (",bot_source,distress_type" if table == "homeowner_requests_staging" else ""))
                         .or_(OR_FILTER)
                         .order("id")
                         .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
