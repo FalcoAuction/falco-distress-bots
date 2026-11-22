@@ -30,9 +30,10 @@ Distress type: SUBSTITUTION_OF_TRUSTEE (the CRM labels it Pre-Foreclosure
 
 from __future__ import annotations
 
+import json
 import re
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from requests.adapters import HTTPAdapter
@@ -167,8 +168,89 @@ class ShelbySubstituteTrusteeBot(BotBase):
             if lead:
                 leads.append(lead)
         self.logger.info(f"staging {len(leads)} lead(s), {sum(1 for l in leads if l.property_address)} with an address")
-        self.backfill(self.max_backfill_per_run)
+        used = self.retry_deferred_appointment() if self.max_backfill_per_run >= 2 else 0
+        self.backfill(self.max_backfill_per_run - used)
         return leads
+
+    def _deferred_rows(self, client):
+        return (client.table("homeowner_requests_staging")
+                .select("id,raw_payload,property_address").eq("bot_source", self.name)
+                .eq("staging_status", "pending")
+                .eq("raw_payload->recovery->>source", "saved_register_APPT_index")
+                .eq("raw_payload->recovery->>present_owner_check", "pending_independent_evidence")
+                .not_.is_("raw_payload->recovery->>detail_issue", "null")
+                .is_("raw_payload->recovery->>detail_checked_at", "null")
+                .order("raw_payload->recovery->>last_detail_attempt", nullsfirst=True)
+                .order("id").limit(1).execute().data)
+
+    def _verified_detail(self, instrument, year):
+        res = self.fetch(detail_url(instrument, year), allow_redirects=False)
+        if res is None or res.status_code != 200:
+            return None
+        if not re.search(r"Information For Instrument #\s*" + re.escape(instrument) + r"\s*<", res.text, re.I):
+            return None
+        doc = parse_detail(res.text)
+        return doc if doc.get("doc_type") else None
+
+    def retry_deferred_appointment(self):
+        """One pending index-only recovery per run, using at most two detail requests."""
+        client = _supabase()
+        if client is None:
+            return 0
+        used = 0
+        try:
+            rows = self._deferred_rows(client)
+            if not rows:
+                return 0
+            row = rows[0]
+            original = row["raw_payload"]
+            raw = dict(original)
+            recovery = dict(raw["recovery"])
+            raw["recovery"] = recovery
+            now = datetime.now(timezone.utc).isoformat()
+            recovery["last_detail_attempt"] = now
+            used = 1
+            appt = self._verified_detail(raw["instrument"], raw["recorded"][:4])
+            patch = {"raw_payload": raw}
+            if appt and appt["doc_type"].upper().startswith("APPOINTMENT OF SUBSTITUTE TR"):
+                ref = deed_of_trust_ref(appt)
+                dot = None
+                if ref:
+                    used += 1
+                    dot = self._verified_detail(ref["instrument"], ref["year"])
+                if appt.get("xrefs") and not raw.get("appointment_cross_references"):
+                    raw["appointment_cross_references"] = appt["xrefs"]
+                if not raw.get("appointment_date"):
+                    raw["appointment_date"] = appt.get("instrument_date")
+                if not ref or dot:
+                    recovery["detail_checked_at"] = now
+                    recovery["detail_outcome"] = "no_linked_loan"
+                if dot and LOAN_DOC.fullmatch(dot["doc_type"]):
+                    address = address_of(dot)
+                    parcel = dot.get("parcel_id")
+                    recovery.update(detail_outcome="linked_loan", loan_reference=ref,
+                                    loan_grantors=dot["grantors"], register_address=address, register_parcel=parcel)
+                    # Keep a disagreement in source evidence for review. Never combine
+                    # a new parcel with a different address or loan from an earlier read.
+                    agrees = (raw.get("deed_of_trust") in (None, ref)
+                              and raw.get("parcel_id") in (None, parcel)
+                              and row["property_address"] in (None, address))
+                    if agrees:
+                        raw["deed_of_trust"] = ref
+                        if parcel:
+                            raw["parcel_id"] = parcel
+                        if row["property_address"] is None and address:
+                            patch["property_address"] = address
+                        raw["dot_checked_at"] = raw.get("dot_checked_at") or now[:10]
+            update = (client.table("homeowner_requests_staging").update(patch)
+                      .eq("id", row["id"]).eq("bot_source", self.name).eq("staging_status", "pending")
+                      .filter("raw_payload", "eq", json.dumps(original, separators=(",", ":"))))
+            address = row["property_address"]
+            update = update.is_("property_address", "null") if address is None else update.eq("property_address", address)
+            update.execute()
+        except Exception as exc:
+            self.logger.warning("Deferred appointment retry failed (%s)", type(exc).__name__)
+        return used
 
     def backfill(self, limit: int) -> int:
         """Read the deed of trust for staged filings that have its reference
