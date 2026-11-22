@@ -130,6 +130,9 @@ SALE_DATE_RE = re.compile(
 
 def sale_date(text: str) -> Optional[str]:
     """Return a calendar-valid date only when explicit sale dates agree."""
+    if re.search(r"\b(?:sale (?:is|has been|was) (?:hereby )?(?:cancelled|canceled|postponed|continued|withdrawn)"
+                 r"|notice of (?:cancellation|postponement) of (?:the )?(?:trustee['’]s )?sale)\b", text or "", re.I):
+        return None
     dates = set()
     for match in SALE_DATE_RE.finditer(text or ""):
         value = " ".join(match[1].replace(".", "").replace(",", "").split())
@@ -146,3 +149,14 @@ def sale_date(text: str) -> Optional[str]:
 
 def is_entity(name: str) -> bool:
     return bool(ENTITY_RE.search(name or ""))
+
+
+def property_address_text(excerpt: str) -> str:
+    """Isolate the subject property when a notice also describes the auction venue."""
+    label = re.search(r"\b(?:property address|street address of (?:the )?property|"
+                      r"property (?:is )?(?:commonly known as|located at))\s*[:\-]?\s*(?=\d)", excerpt, re.I)
+    if label:
+        return excerpt[label.end():].upper()
+    if re.search(r"\b(?:courthouse|court house|justice center|auction location|place of sale)\b", excerpt, re.I):
+        return ""
+    return excerpt

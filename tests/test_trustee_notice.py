@@ -29,6 +29,12 @@ TAX = ('TAXPAYERS The 2026 Real and Personal Property taxes are now due and paya
 
 
 class TrusteeNoticeTests(unittest.TestCase):
+    def test_auction_venue_is_not_the_distressed_property(self):
+        from src.bots._trustee_notice import property_address_text
+        venue = "At the county courthouse, 140 ADAMS AVENUE, Memphis."
+        self.assertEqual(property_address_text(venue), "")
+        self.assertEqual(property_address_text(venue + " Property address: 52 Pine Street"), "52 PINE STREET")
+
     def test_only_supported_unambiguous_auction_dates(self):
         notice = "Deed of Trust dated May 2, 2021. Will sell at public outcry on Monday, December 7, 2026."
         self.assertEqual(sale_date(notice), "2026-12-07")
@@ -37,6 +43,8 @@ class TrusteeNoticeTests(unittest.TestCase):
         self.assertIsNone(sale_date("Deed of Trust dated May 2, 2021. Appointment of Substitute Trustee."))
         self.assertEqual(sale_date("Sale at public auction will be on 12/22/2026 on or about 10:00 AM"), "2026-12-22")
         self.assertEqual(sale_date("Sale at public auction will be held Dec. 11, 2026"), "2026-12-11")
+        self.assertIsNone(sale_date(notice + " The sale has been postponed."))
+        self.assertEqual(sale_date(notice + " The sale may be postponed."), "2026-12-07")
 
     def test_grantors_in_recorded_deed_clauses(self):
         self.assertEqual(borrowers('Deed of Trust from John Roe and Jane Roe ("Grantor"), to Chris Doe, Trustee'),
