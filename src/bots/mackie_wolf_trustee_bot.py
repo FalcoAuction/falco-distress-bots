@@ -41,6 +41,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 from ._base import BotBase, LeadPayload
+from ._mackie_refresh import inspect_report, finalize_report, report_as_of, refresh_staging
 
 # pdfplumber is in requirements.txt; lazy-import for clean module-load
 # failure mode (so a missing dep doesn't break the whole bot orchestrator)
@@ -101,6 +102,7 @@ class MackieWolfTrusteeBot(BotBase):
     )
 
     def scrape(self) -> List[LeadPayload]:
+        self._report = None
         if pdfplumber is None:
             self.logger.error(
                 "pdfplumber not installed — run: pip install pdfplumber"
@@ -119,7 +121,13 @@ class MackieWolfTrusteeBot(BotBase):
         if pdf_bytes is None:
             return []
 
-        return self._parse_pdf(pdf_bytes, pdf_url, report_date)
+        self._report = inspect_report(pdf_bytes, pdf_url, getattr(self, "_linked_current", False), pdfplumber)
+        leads = self._parse_pdf(pdf_bytes, pdf_url, report_date)
+        leads = finalize_report(self._report, leads)
+        return leads if self._report["authoritative"] else []
+
+    def _write_staging(self, leads):
+        return refresh_staging(self, leads)
 
     # ── PDF discovery ───────────────────────────────────────────────────────
 
@@ -137,6 +145,7 @@ class MackieWolfTrusteeBot(BotBase):
 
         The old probe is kept as a fallback, now covering both spellings.
         """
+        self._linked_current = False
         res = self.fetch(MWZM_INVESTORS_URL, method="GET")
         if res is not None and res.status_code == 200:
             links = re.findall(
@@ -146,16 +155,13 @@ class MackieWolfTrusteeBot(BotBase):
             )
             best: Tuple[Optional[str], Optional[date]] = (None, None)
             for url in links:
-                m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", url)
-                if not m:
-                    continue
-                try:
-                    d = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
-                except ValueError:
+                d = report_as_of(url)
+                if d is None:
                     continue
                 if best[1] is None or d > best[1]:
                     best = (url, d)
             if best[0]:
+                self._linked_current = len({url for url in links if report_as_of(url) == best[1]}) == 1
                 self.logger.info(f"sale report discovered: {best[0]}")
                 return best
 
