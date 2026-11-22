@@ -1,53 +1,23 @@
-"""
-Hamilton County Herald — Chattanooga's legal-notice publication.
-
-Hamilton is one of the 9 EXTERNAL TPAD counties (no AVM coverage)
-and the 4th-largest TN county by population. Hamilton County Herald
-is a Catalis-era weekly publication carrying foreclosure +
-probate/court notices. Combined with hamilton_tax_delinquent_bot
-(which covers tax-lien delinquency), this scraper closes Hamilton's
-PRE_FORECLOSURE + PROBATE coverage gap.
-
-Index page: /PublicNotices.aspx (no date param — shows current week)
-Index page (historical): /Notices.aspx?date=M/D/YYYY  (FUTURE — same
-  pattern as the older URL format in earlier issues, but PublicNotices
-  is the current canonical landing)
-Detail page: /ViewNotice.aspx?id={NUMERIC}&date=M/D/YYYY
-
-Notable structural difference from Nashville Ledger / Memphis Daily
-News (sister Catalis-era pubs):
-  - All notices use OpenChild(id, date) NOT OpenChildFT2 — unified
-    index without ID-prefix type discrimination
-  - Notice IDs are numeric only (e.g. "53233") — no FL/CL/FN/CD prefix
-  - Section headers in the index HTML classify by type:
-      <h3>Foreclosures</h3>   -> IDs that follow are foreclosures
-      <h3>Courts</h3>          -> IDs that follow are court/probate
-      <h3>Miscellaneous</h3>   -> bid notices, ordinances, etc (skip)
-  - Detail page exposes section title via <span id="lblTitle"> and
-    body via <span id="lblBody"> (single span, not the lbl1..lbl11
-    structured fields the Nashville Ledger uses)
-
-So we walk the index, group IDs by section, then fetch detail pages
-only for Foreclosures + Courts sections. Body parsing reuses the same
-regex patterns as Nashville Ledger / Memphis Daily News.
-
-Distress types: PRE_FORECLOSURE + PROBATE (per section)
-"""
+"""Collect foreclosure and estate notices from the dated issues linked by the Herald."""
 
 from __future__ import annotations
 
+import hashlib
 import re
-from datetime import date, datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from datetime import date, datetime
+from typing import List, Optional
+from urllib.parse import parse_qs, unquote, urlsplit
+from uuid import NAMESPACE_URL, uuid5
 
 from bs4 import BeautifulSoup
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, LeadPayload, _supabase
+from ._court_notices import extract_probate, probate_review
+from ._trustee_notice import sale_date
 
 
 HCH_BASE = "https://www.hamiltoncountyherald.com"
 HCH_INDEX = HCH_BASE + "/PublicNotices.aspx"
-HCH_INDEX_DATED = HCH_BASE + "/Notices.aspx"
 HCH_DETAIL = HCH_BASE + "/ViewNotice.aspx"
 
 OPENCHILD_RE = re.compile(r"OpenChild\('(\d+)','([^']+)'\)")
@@ -61,7 +31,7 @@ PARCEL_RE = re.compile(
 )
 PRINCIPAL_RE = re.compile(r"original principal (?:amount|sum) of \$?([\d,]+(?:\.\d{2})?)", re.IGNORECASE)
 DELINQUENT_AMOUNT_RE = re.compile(r"entire amount delinquent[^$]*\$([\d,]+(?:\.\d{2})?)", re.IGNORECASE)
-COMMONLY_KNOWN_RE = re.compile(r"Commonly known as[:\s]+([^<\n]+?)(?:\.|<|\n|$)", re.IGNORECASE)
+COMMONLY_KNOWN_RE = re.compile(r"Commonly known as[:\s]+(\d[^<\n]{0,160}?\b(?:TN|Tennessee)\.?[, ]+\d{5}(?:-\d{4})?)\b", re.IGNORECASE)
 # Notices often run legal boilerplate after the address ("... TN 37404
 # Street Address: The street address ... is believed to be ..."). Keep the
 # address through the first ZIP so the assessor match can find it.
@@ -80,15 +50,50 @@ def clean_parcel(p: Optional[str]) -> Optional[str]:
     if not p:
         return p
     m = _PARCEL_ID.match(p.strip().upper())
-    return m.group(0).strip() if m else p.strip()
+    return m.group(0).strip() if m else None
 
 
 BORROWER_RE = re.compile(r"executed by\s+([A-Z][A-Za-z. ,'\-]+?),", re.IGNORECASE)
 
-# Probate body extraction
-DECEDENT_RE = re.compile(r"Estate of\s+([A-Z][A-Za-z\.\-' ]+?),\s*Deceased", re.IGNORECASE)
-DOCKET_RE = re.compile(r"(?:Probate )?Docket No\.?:?\s*([A-Z0-9\-]+)", re.IGNORECASE)
-DOD_RE = re.compile(r"who died on\s+([A-Z][a-z]+\.?\s+\d{1,2}[, ]+\d{4}|\d{1,2}/\d{1,2}/\d{4})", re.IGNORECASE)
+def _date(text, fmt="%m/%d/%Y"):
+    try:
+        return datetime.strptime(text or "", fmt).date()
+    except ValueError:
+        return None
+
+
+def _printed_date(soup, selector):
+    node = soup.select_one(selector)
+    return _date(node.get_text(strip=True), "%A, %B %d, %Y") if node else None
+
+
+# A reprint can add an issue date to the publication schedule immediately
+# before the same Fr control. Keep the control and the entire operative text.
+_PRINT_SCHEDULE = re.compile(
+    r"(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+"
+    r"\d{1,2}(?:,\s*\d{1,2})*,\s*\d{4}\s+)+(?=Fr\d+\b)", re.I)
+
+
+def _print_control(body):
+    codes = set(re.findall(r"\bFr\d{5,}\b", body, flags=re.I))
+    return codes.pop().upper() if len(codes) == 1 else None
+
+
+def _document_key(kind, body, notice_key):
+    text = _PRINT_SCHEDULE.sub("", " ".join(body.split()))
+    control = _print_control(body) or notice_key
+    return hashlib.sha256((kind + "|" + control + "|" + text).encode()).hexdigest()
+
+
+def _advertised_sale(body, summary):
+    # The standard conditional postponement clause describes a possibility;
+    # retain actual cancellation/postponement notices for the shared parser.
+    text = re.sub(r"\bif the sale is postponed\b", "if postponed", body, flags=re.I)
+    printed = sale_date(text)
+    reported = _date(summary)
+    if summary and (not reported or reported.isoformat() != printed):
+        return None
+    return printed
 
 
 class HamiltonCountyHeraldBot(BotBase):
@@ -99,123 +104,153 @@ class HamiltonCountyHeraldBot(BotBase):
 
     weeks_to_scan = 4
 
+    def _document(self, url, **params):
+        res = self.fetch(url, params=params, timeout=12)
+        if res is None or res.status_code != 200 or res.url.split("?")[0].lower() != url.lower():
+            raise RuntimeError(f"Herald document unavailable: {url} {params}")
+        query = parse_qs(urlsplit(res.url).query)
+        if any(query.get(key) != [value] for key, value in params.items()):
+            raise ValueError(f"Herald redirected to a different issue or notice: {params}")
+        return BeautifulSoup(res.content, "html.parser"), res.url
+
     def scrape(self) -> List[LeadPayload]:
-        leads: List[LeadPayload] = []
-        seen_ids: set[str] = set()
-
-        for pub_date in self._recent_friday_dates(self.weeks_to_scan):
-            sections = self._fetch_index_dated(pub_date)
-            self.logger.info(
-                f"{pub_date.isoformat()}: "
-                f"{len(sections.get('Foreclosures', []))} foreclosures, "
-                f"{len(sections.get('Courts', []))} court/probate"
-            )
-            for nid in sections.get("Foreclosures", []):
-                if nid in seen_ids:
-                    continue
-                seen_ids.add(nid)
-                lead = self._build_lead(nid, pub_date, "Foreclosures")
-                if lead is not None:
-                    leads.append(lead)
-            for nid in sections.get("Courts", []):
-                if nid in seen_ids:
-                    continue
-                seen_ids.add(nid)
-                lead = self._build_lead(nid, pub_date, "Courts")
-                if lead is not None:
-                    leads.append(lead)
-        return leads
-
-    @staticmethod
-    def _recent_friday_dates(weeks: int) -> List[date]:
+        landing, _ = self._document(HCH_INDEX)
+        latest = _printed_date(landing, "[id$=lblDate]")
+        dates = set()
+        for link in landing.select("a[href]"):
+            href = urlsplit(link["href"])
+            if href.path.lower() in ("publicnotices.aspx", "/publicnotices.aspx"):
+                values = parse_qs(href.query).get("date", [])
+                if len(values) == 1 and (issue_date := _date(values[0])):
+                    dates.add(issue_date)
         today = date.today()
-        days_since_friday = (today.weekday() - 4) % 7
-        latest_friday = today - timedelta(days=days_since_friday)
-        return [latest_friday - timedelta(days=7 * i) for i in range(weeks)]
-
-    def _fetch_index_dated(self, pub_date: date) -> Dict[str, List[str]]:
-        """GET PublicNotices.aspx (or Notices.aspx?date=...) and split notice
-        IDs by <h3> section header.
-
-        BUG-FIX 2026-05-04: HCH's `Notices.aspx?date=...` returns HTTP
-        200 with an empty 9KB shell on most queries (probably needs
-        cookies / postback state). The bot's old logic never reached the
-        fallback because it only triggered on non-200. Now we ALSO fall
-        back when the dated response parses to zero sections — recovers
-        Hamilton Herald to ~5-10 leads/week.
-        """
-        date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        # Try the dated URL first
-        res = self.fetch(HCH_INDEX_DATED, params={"date": date_param})
-        sections: Dict[str, List[str]] = {}
-        if res is not None and res.status_code == 200:
-            sections = self._parse_index_sections(res.text)
-        # If the dated query returned nothing (empty shell, often the case),
-        # fall back to the undated landing page which lists current notices.
-        if not sections:
-            res2 = self.fetch(HCH_INDEX)
-            if res2 is not None and res2.status_code == 200:
-                sections = self._parse_index_sections(res2.text)
-        return sections
-
-    @staticmethod
-    def _parse_index_sections(html: str) -> Dict[str, List[str]]:
-        """Walk the HTML, splitting OpenChild IDs by the most-recent <h3>
-        section header above them."""
-        sections: Dict[str, List[str]] = {}
-        # Approach: iterate sections by walking <h3>...</h3>...next <h3> chunks
-        # then within each chunk extract OpenChild IDs.
-        chunks = re.split(r"<h3[^>]*>([^<]+)</h3>", html)
-        # chunks pattern: [pre, header1, body1, header2, body2, ...]
-        seen_per_section: Dict[str, set] = {}
-        for i in range(1, len(chunks), 2):
-            header = chunks[i].strip()
-            body = chunks[i + 1] if i + 1 < len(chunks) else ""
-            # Normalize headers: "Foreclosures" / "Courts" / "Miscellaneous" / etc
-            section_key = header.strip()
-            ids: List[str] = []
-            seen = seen_per_section.setdefault(section_key, set())
-            for m in OPENCHILD_RE.finditer(body):
-                nid = m.group(1)
-                if nid in seen:
+        if latest not in dates or not 0 <= (today - latest).days < self.weeks_to_scan * 7:
+            raise ValueError("Unverified or stale Herald issue index")
+        leads = {}
+        for day in sorted(dates, reverse=True)[:self.weeks_to_scan]:
+            if not 0 <= (today - day).days < self.weeks_to_scan * 7:
+                continue
+            param = f"{day.month}/{day.day}/{day.year}"
+            issue = landing if day == latest else self._document(HCH_INDEX, date=param)[0]
+            if _printed_date(issue, "[id$=lblDate]") != day:
+                raise ValueError(f"Herald returned another issue for {day}")
+            visited = set()
+            for link in issue.select("a[href]"):
+                match = OPENCHILD_RE.search(link["href"])
+                if not match:
                     continue
-                seen.add(nid)
-                ids.append(nid)
-            if ids:
-                sections.setdefault(section_key, []).extend(ids)
-        return sections
+                header = link.find_previous("h3")
+                section = header.get_text(strip=True) if header else ""
+                if section not in ("Foreclosures", "Courts"):
+                    continue
+                nid = match[1]
+                if _date(unquote(match[2])) != day:
+                    raise ValueError(f"Herald notice {nid} links to another edition")
+                if nid in visited:
+                    continue
+                visited.add(nid)
+                # The Courts table also indexes unrelated juvenile and general
+                # sessions cases. Their published captions identify the court.
+                row = link.find_parent("tr")
+                if section == "Courts" and row and re.search(
+                    r"\b(?:GENERAL SESSIONS|JUVENILE) COURT\b", row.get_text(" ", strip=True), re.I
+                ) and not re.search(r"creditors|estate of|letters of", row.get_text(" ", strip=True), re.I):
+                    continue
+                lead = self._build_lead(nid, day, section)
+                if lead:
+                    digest = _document_key(lead.distress_type, lead.raw_payload["body"], lead.pipeline_lead_key)
+                    leads.setdefault(digest, lead)
+        return list(leads.values())
 
-    def _build_lead(self, nid: str, pub_date: date, section: str) -> Optional[LeadPayload]:
-        date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        res = self.fetch(HCH_DETAIL, params={"id": nid, "date": date_param})
-        if res is None or res.status_code != 200:
-            return None
-        soup = BeautifulSoup(res.text, "html.parser")
-        title_span = soup.select_one("span#lblTitle")
-        body_span = soup.select_one("span#lblBody")
-        if not body_span:
-            return None
-        title = title_span.get_text(strip=True) if title_span else section
-        body = body_span.get_text(" ", strip=True)
-        if not body:
-            return None
+    def _write_staging(self, leads):
+        # Re-reading a newspaper issue is not a fresh trustee confirmation.
+        # Match historical keys across all staging statuses and printed reissues.
+        if not leads:
+            return 0, 0
+        client = _supabase()
+        if client is None:
+            return 0, 0
+        table = client.table("homeowner_requests_staging")
+        keys, documents, print_controls = set(), set(), set()
+        cursor = None
+        while True:
+            query = table.select("id,pipeline_lead_key,distress_type,body:raw_payload->>body").eq("bot_source", self.name)
+            if cursor:
+                query = query.gt("id", cursor)
+            rows = query.order("id").limit(200).execute().data
+            for row in rows:
+                keys.add(row["pipeline_lead_key"])
+                if row.get("body"):
+                    documents.add(_document_key(row["distress_type"], row["body"], row["pipeline_lead_key"]))
+                    if control := _print_control(row["body"]):
+                        print_controls.add((row["distress_type"], control))
+            if len(rows) < 200:
+                break
+            cursor = rows[-1]["id"]
+        inserts = []
+        for lead in leads:
+            digest = _document_key(lead.distress_type, lead.raw_payload["body"], lead.pipeline_lead_key)
+            if lead.pipeline_lead_key in keys or digest in documents:
+                continue
+            control = lead.raw_payload.get("print_control")
+            if control and (lead.distress_type, control) in print_controls:
+                self.logger.warning("Held changed Herald reprint %s, notice %s for review", control,
+                                    lead.raw_payload["notice_id"])
+                continue
+            row = lead.as_db_row(scraper_run_id=self.run_id)
+            # The table has a unique id, but no unique source/lead-key index.
+            identity = control or lead.pipeline_lead_key
+            row["id"] = str(uuid5(NAMESPACE_URL, f"{self.name}|{lead.distress_type}|{identity}"))
+            inserts.append(row)
+            keys.add(lead.pipeline_lead_key)
+            documents.add(digest)
+            if control:
+                print_controls.add((lead.distress_type, control))
+        added = 0
+        for start in range(0, len(inserts), 50):
+            result = table.upsert(inserts[start:start + 50], on_conflict="id",
+                                  ignore_duplicates=True, default_to_null=False).execute()
+            added += len(result.data)
+        return added, len(leads) - added
 
-        if section == "Foreclosures":
-            return self._build_foreclosure_lead(nid, pub_date, title, body, res.url)
-        elif section == "Courts":
-            return self._build_probate_lead(nid, pub_date, title, body, res.url)
-        return None
-
-    # ── Foreclosure lead ────────────────────────────────────────────────────
+    def _build_lead(self, nid, pub_date, section):
+        param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
+        soup, url = self._document(HCH_DETAIL, id=nid, date=param)
+        span, title = soup.select_one("#lblBody"), soup.select_one("#lblTitle")
+        if (_printed_date(soup, "#lblDate") != pub_date or not title
+                or title.get_text(strip=True) != section or not span or not span.get_text(strip=True)):
+            raise ValueError(f"Unverified Herald detail {nid} in {pub_date}")
+        lines = list(span.stripped_strings)
+        if section == "Courts":
+            return self._build_probate_lead(nid, pub_date, section, lines, url)
+        fields = {}
+        for elem, label in (("lbl1", "Borrower"), ("lbl2", "Address"),
+                            ("lbl8", "Advertised Auction Date"), ("lbl9", "Date of First Public Notice"),
+                            ("lbl11", "DR No.")):
+            field = soup.find(id=elem)
+            if field and field.find_parent("tr"):
+                cells = field.find_parent("tr").find_all("td", recursive=False)
+                if len(cells) == 2 and cells[0].get_text(strip=True).rstrip(":") == label:
+                    fields[label] = field.get_text(strip=True)
+        if fields.get("DR No.") and fields["DR No."] != nid:
+            raise ValueError(f"Herald detail ID mismatch: {nid}")
+        city = soup.select_one("#lbl3")
+        if fields.get("Address") and city:
+            locality = city.get_text(strip=True)
+            if re.fullmatch(r"[A-Za-z .-]+,?\s+TN\s+\d{5}(?:-\d{4})?", locality, re.I):
+                fields["location"] = f"{fields['Address']}, {locality}"
+        return self._build_foreclosure_lead(nid, pub_date, section, " ".join(lines), url, fields)
 
     def _build_foreclosure_lead(self, nid: str, pub_date: date, title: str,
-                                  body: str, url: str) -> Optional[LeadPayload]:
+                                  body: str, url: str, fields: dict) -> Optional[LeadPayload]:
+        if not re.search(r"\bHamilton County\b", body, re.I):
+            return None
         # Borrower
         m = BORROWER_RE.search(body)
-        borrower = m.group(1).strip() if m else None
+        borrower = (m.group(1).strip() if m else None) or fields.get("Borrower")
         # Address ("Commonly known as: 7711 E. Village Lane, Hixson, TN 37343")
         m = COMMONLY_KNOWN_RE.search(body)
-        property_address = clean_address(m.group(1)) if m else None
+        property_address = fields.get("location") or (clean_address(m.group(1)) if m else None)
         if not property_address:
             return None
         # Parcel
@@ -231,6 +266,13 @@ class HamiltonCountyHeraldBot(BotBase):
         m = DELINQUENT_AMOUNT_RE.search(body)
         delinquent = float(m.group(1).replace(",", "")) if m else None
 
+        advertised = _date(fields.get("Advertised Auction Date"))
+        printed = _advertised_sale(body, fields.get("Advertised Auction Date"))
+        first = _date(fields.get("Date of First Public Notice"))
+        # A summary date preceding the first publication is not the auction
+        # advertised by this notice (some publisher fields contain defaults).
+        if first and advertised and advertised < first:
+            advertised = printed = None
         admin_parts = [f"Hamilton Co Herald {nid}", f"pub {pub_date.isoformat()}"]
         if lender:
             admin_parts.append(f"lender={lender}")
@@ -245,13 +287,18 @@ class HamiltonCountyHeraldBot(BotBase):
             property_address=property_address,
             county="hamilton",
             full_name=borrower,
-            owner_name_records=borrower,
+            trustee_sale_date=printed if printed and printed >= date.today().isoformat() else None,
             distress_type="PRE_FORECLOSURE",
             admin_notes=" · ".join(admin_parts),
             source_url=url,
             raw_payload={
                 "publication": "hamilton_county_herald",
                 "title": title,
+                "notice_id": nid,
+                "print_control": _print_control(body),
+                "first_publication_date": first.isoformat() if first and first <= pub_date else None,
+                "advertised_auction_date": advertised.isoformat() if advertised else None,
+                "notice_sale_date": printed,
                 "borrower": borrower,
                 "property_address": property_address,
                 "parcel": parcel,
@@ -266,20 +313,16 @@ class HamiltonCountyHeraldBot(BotBase):
     # ── Probate lead ────────────────────────────────────────────────────────
 
     def _build_probate_lead(self, nid: str, pub_date: date, title: str,
-                             body: str, url: str) -> Optional[LeadPayload]:
-        # Skip non-probate court notices (custody, civil suits, etc)
-        if not re.search(r"NOTICE TO CREDITORS|Letters of (?:Administration|Testamentary|Authority)",
-                          body, re.IGNORECASE):
+                                  lines: list[str], url: str) -> Optional[LeadPayload]:
+        body = " ".join(lines)
+        if not re.search(r"NOTICE TO CREDITORS|Letters of (?:Administration|Testamentary|Authority)", body, re.I):
             return None
-        m = DECEDENT_RE.search(body)
-        if not m:
+        fields = extract_probate(lines)
+        decedent = fields["decedent"]
+        if not decedent or fields["county"] != "hamilton":
             return None
-        decedent = m.group(1).strip().title()
-        m = DOCKET_RE.search(body)
-        docket = m.group(1) if m else None
-        m = DOD_RE.search(body)
-        dod_raw = m.group(1) if m else None
-
+        docket = fields["docket"]
+        dod_raw = fields["date_of_death"]
         admin_parts = [f"Hamilton Co Herald {nid}", f"pub {pub_date.isoformat()}", "court=hamilton"]
         if docket:
             admin_parts.append(f"docket={docket}")
@@ -290,7 +333,6 @@ class HamiltonCountyHeraldBot(BotBase):
             bot_source=self.name,
             pipeline_lead_key=self.make_lead_key(self.name, f"CL-{nid}"),
             full_name=decedent,
-            owner_name_records=decedent,
             county="hamilton",
             distress_type="PROBATE",
             admin_notes=" · ".join(admin_parts),
@@ -298,6 +340,10 @@ class HamiltonCountyHeraldBot(BotBase):
             raw_payload={
                 "publication": "hamilton_county_herald",
                 "title": title,
+                "notice_id": nid,
+                "print_control": _print_control(body),
+                "court_notice": fields,
+                "probate_review": probate_review(lines, fields),
                 "decedent": decedent,
                 "county": "hamilton",
                 "docket": docket,
