@@ -136,15 +136,16 @@ jobs:
         run: echo "yw=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Comptroller parcel index (86 TN counties)
-        uses: actions/cache@v4
+        id: comptroller_cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             data/comptroller/index.sqlite
             data/comptroller/refresh_state.json
           # Weekly key: the state posts new county files on Mondays, so the
           # first run of each ISO week refreshes and saves; later runs restore.
-          key: comptroller-${{ steps.week.outputs.yw }}
-          restore-keys: comptroller-
+          key: comptroller-statewide-v2-${{ steps.week.outputs.yw }}
+          restore-keys: comptroller-statewide-v2-
 
       - name: Restore debtor-match progress (small, saved every run)
         uses: actions/cache@v4
@@ -154,12 +155,22 @@ jobs:
           restore-keys: comptroller-tried-
 
       - name: Refresh Comptroller parcel index
+        id: comptroller_refresh
         # Cold build ~20 min / ~5 GB; a warm run is 86 HEAD requests. Kept
         # out of _run_new so it never eats a bot's time cap;
         # comptroller_parcels reports no_data if the index is missing.
-        run: python -m src.bots.comptroller_refresh
+        run: python -m src.bots.comptroller_refresh --verify-statewide
         timeout-minutes: 45
         continue-on-error: true
+
+      - name: Save verified statewide Comptroller index
+        if: steps.comptroller_refresh.outcome == 'success' && steps.comptroller_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            data/comptroller/index.sqlite
+            data/comptroller/refresh_state.json
+          key: ${{ steps.comptroller_cache.outputs.cache-primary-key }}
 
       - name: Run staging scrapers (-> homeowner_requests_staging)
         # Exits non-zero only when a critical bot (auto_promoter and the

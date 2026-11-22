@@ -182,6 +182,29 @@ def run(counties: Optional[List[str]] = None) -> dict:
     return out
 
 
+def verify_statewide_cache(db_path: Path, state_path: Path) -> None:
+    """Validate the two files about to be published under an immutable cache key."""
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict):
+        raise ValueError("Invalid Comptroller refresh manifest")
+    con = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        counts = dict(con.execute("SELECT county, COUNT(*) FROM parcels GROUP BY county"))
+    finally:
+        con.close()
+    missing = [name for name in COUNTIES if county_key(name) not in counts or name not in state]
+    if missing:
+        raise ValueError(f"Incomplete Comptroller cache: {', '.join(missing)}")
+    log.info("Verified statewide Comptroller cache: %s counties, %s parcel rows, %s index bytes",
+             len(COUNTIES), sum(counts.values()), db_path.stat().st_size)
+
+
 if __name__ == "__main__":
-    print(run(sys.argv[1:] or None))
-    sys.exit(0)
+    if sys.argv[1:] == ["--verify-statewide"]:
+        summary = run()
+        print(summary)
+        if summary["failed"]:
+            sys.exit(1)
+        verify_statewide_cache(DB_PATH, STATE_PATH)
+    else:
+        print(run(sys.argv[1:] or None))

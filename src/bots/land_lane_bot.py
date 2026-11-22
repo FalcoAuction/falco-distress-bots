@@ -168,13 +168,15 @@ class LandLaneBot(BotBase):
                 self._covered.add(county_key(county))
             except Exception as e:  # one county's service down must not cost the rest
                 self.logger.warning(f"{county}: parcel service failed: {e}")
-        # Use the producer's current src/data path; also accept the workflow's
-        # repo-root cache when the producer path is absent. Never create a DB.
+        # Prefer the repository cache produced by comptroller_refresh.
         path = DB_PATH if DB_PATH.exists() else Path(__file__).resolve().parents[3] / "data/comptroller/index.sqlite"
         con = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) if path.exists() else None
         self._index_path = path if con is not None else None
         if con is not None:
-            self._covered.update(r[0] for r in con.execute("SELECT DISTINCT county FROM parcels"))
+            roll_counties = {r[0] for r in con.execute("SELECT DISTINCT county FROM parcels")}
+            self._covered.update(roll_counties)
+            self.logger.info("Comptroller index opened: %s/%s expected counties at %s",
+                             len(roll_counties & {county_key(c) for c in ROLL_COUNTIES}), len(ROLL_COUNTIES), path)
             try:
                 state = json.loads(path.with_name("refresh_state.json").read_text())
                 self._source_stamps = {county_key(k): v for k, v in state.items()}
