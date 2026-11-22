@@ -12,7 +12,7 @@ from .shelby_tax_sale_bot import EXTRACT, SCHEDULE, scheduled_parcels
 
 SOURCE = "https://www.shelbycountytn.gov/DocumentCenter/View/35671"
 WARRANT = re.compile(r"[0-9]{8}")
-HEARING = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})\s*[-â€“â€”]+\s*\d")
+HEARING = re.compile(r"(\d{1,2}/\d{1,2}/\d{4})\s*[-\u2013\u2014]+\s*\d")
 PARCEL = re.compile(r"\bParcel ID\s*(\d{6})\s*([A-Z]?\d{4,5}[A-Z]?)(?=\s|$)", re.I)
 
 

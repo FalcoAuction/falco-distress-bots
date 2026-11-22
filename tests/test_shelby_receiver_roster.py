@@ -21,7 +21,7 @@ def roster(rows, text):
 
 class ShelbyReceiverTests(TestCase):
     def test_shared_warrant_uses_each_address_and_hearing_separately(self):
-        rows = [[address, "24400001", "overlapping PDF cell", "12/3/2026 -- 9:00 AM", "Tax Sale 23.02 -- 4/13/2027"]
+        rows = [[address, "24400001", "overlapping PDF cell", "12/3/2026 \u2014 9:00 AM", "Tax Sale 23.02 -- 4/13/2027"]
                 for address in ["1 MAIN ST", "2 MAIN ST"]]
         text = ("1 MAIN ST 24400001 1 Main St, Shelby County, Parcel ID 012345 00001 12/3/2026 "
                 "2 MAIN ST 24400001 2 Main St, Shelby County, Parcel ID 012345 00002 12/3/2026")
