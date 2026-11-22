@@ -7,6 +7,8 @@ import re
 import pdfplumber
 
 from ._base import BotBase, BotTimeout
+from ._owner_lookup import LegacyTLSAdapter
+from ._shelby_receiver_property import property_record
 from .shelby_tax_sale_bot import EXTRACT, SCHEDULE, scheduled_parcels
 
 
@@ -70,6 +72,8 @@ def attach_trustee_list(receipt, leads):
         raw = lead.raw_payload
         key = "".join(raw["parcel"].split()).upper()
         by_parcel.setdefault(key, []).append({
+            "parcel": raw["parcel"], "alt_parcel": raw["alt_parcel"],
+            "trustee_street": (lead.property_address or "").split(",")[0],
             "sale_id": raw["sale_id"], "advertised_date": lead.trustee_sale_date, "source_url": lead.source_url,
         })
     for case in receipt["cases"]:
@@ -83,6 +87,25 @@ def attach_trustee_list(receipt, leads):
 class ShelbyReceiverBot(BotBase):
     name = "shelby_receiver_roster"
     description = "Shelby Environmental Court receiver-eligible property research"
+
+    def __init__(self):
+        super().__init__()
+        host = "https://apps2.shelbycountytrustee.com/"
+        self.session.mount(host, LegacyTLSAdapter(max_retries=self.session.get_adapter(host).max_retries))
+
+    def attach_property_records(self, receipt, day):
+        receipt.update(receiver_appointment_verified=False, sale_authority_verified=False)
+        for case in receipt["cases"]:
+            listings = case.get("current_trustee_listings", [])
+            for listing in listings:
+                if len(listings) != 1:
+                    listing["property_review"] = {"status": "ambiguous_listing"}
+                    continue
+                response = self.fetch(listing["source_url"], timeout=15)
+                if response is None or not response.ok:
+                    listing["property_review"] = {"status": "source_unavailable", "checked_on": day.isoformat()}
+                    continue
+                listing["property_review"] = property_record(response.text, case, listing, day)
 
     def run(self):
         started = datetime.now(timezone.utc)
@@ -99,6 +122,7 @@ class ShelbyReceiverBot(BotBase):
                 raise ValueError("Trustee list unavailable for roster cross-check")
             leads = scheduled_parcels(schedule.text, extract.content.decode("utf-8-sig"), started.date())
             attach_trustee_list(receipt, leads)
+            self.attach_property_records(receipt, started.date())
         except BotTimeout as exc:
             status, error = "timed_out", str(exc)
         except Exception as exc:
