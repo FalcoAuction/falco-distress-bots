@@ -208,27 +208,9 @@ class MackieWolfTrusteeBot(BotBase):
             self.logger.warning(f"pdfplumber failed: {e}")
             return []
 
-        lines = full_text.splitlines()
-        # Find record-start indices (lines matching the header pattern)
-        record_starts = [
-            i for i, l in enumerate(lines)
-            if LISTING_HEAD_RE.match(l.strip())
-        ]
-        if not record_starts:
-            self.logger.info("no listing-header lines matched in PDF")
-            return []
+        from ._mackie_pdf import ADDRESS_HEADERS, address_columns
 
-        for j, start in enumerate(record_starts):
-            end = record_starts[j + 1] if j + 1 < len(record_starts) else len(lines)
-            record = [lines[k].strip() for k in range(start, end)]
-
-            head_m = LISTING_HEAD_RE.match(record[0])
-            if not head_m:
-                continue
-            sale_date_raw = head_m.group(1)
-            file_no = head_m.group(2)
-            header_rest = head_m.group(3).strip()
-
+        def borrower_columns(record, header_rest):
             # Find the CITY/STATE/ZIP tail line (terminates the record).
             tail_idx = None
             tail_match = None
@@ -240,8 +222,8 @@ class MackieWolfTrusteeBot(BotBase):
                     break
             if tail_idx is None or tail_match is None:
                 # Malformed record — skip rather than write bad data.
-                self.logger.debug(f"no CITY TN ZIP tail for record starting at line {start}")
-                continue
+                self.logger.debug(f"no CITY TN ZIP tail for record {record[0]}")
+                return None
 
             city = tail_match.group(1).strip()
             zip_code = tail_match.group(2)
@@ -280,9 +262,9 @@ class MackieWolfTrusteeBot(BotBase):
                         break
                 if not after_text:
                     self.logger.debug(
-                        f"no street pattern found for record at line {start}"
+                        f"no street pattern found for record {record[0]}"
                     )
-                    continue
+                    return None
 
             # Trim trailing comma/space from borrower segment (when the
             # last borrower entry ended with ", " before the address)
@@ -313,7 +295,6 @@ class MackieWolfTrusteeBot(BotBase):
                 # cleaned-up borrower-prefix from line 1 as the name.
                 if borrowers_on_header:
                     owners.append(borrowers_on_header)
-            primary_owner = ", ".join(owners) if owners else None
 
             # Split "STREET COUNTY" — county is the trailing word(s).
             # Multi-word county edge case ("Van Buren") gets explicit
@@ -343,10 +324,47 @@ class MackieWolfTrusteeBot(BotBase):
             if county is None:
                 ac_parts = after_text.rsplit(None, 1)
                 if len(ac_parts) < 2:
-                    continue
+                    return None
                 street = ac_parts[0].strip()
                 county = ac_parts[1].strip()
 
+            return street, city, zip_code, county, sale_platform, owners
+
+        lines = full_text.splitlines()
+        address_only = next((line.strip() for line in lines if line.strip()), "") in ADDRESS_HEADERS
+        # A dated test or malformed file starts its own row even when skipped.
+        start_pattern = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}\s") if address_only else LISTING_HEAD_RE
+        record_starts = [
+            i for i, l in enumerate(lines)
+            if start_pattern.match(l.strip())
+        ]
+        if not record_starts:
+            self.logger.info("no listing-header lines matched in PDF")
+            return []
+
+        for j, start in enumerate(record_starts):
+            end = record_starts[j + 1] if j + 1 < len(record_starts) else len(lines)
+            record = [lines[k].strip() for k in range(start, end)]
+
+            head_m = LISTING_HEAD_RE.match(record[0])
+            if not head_m:
+                continue
+            sale_date_raw = head_m.group(1)
+            file_no = head_m.group(2)
+            header_rest = head_m.group(3).strip()
+
+            if address_only:
+                parts = address_columns(header_rest, record[1:], SALE_PLATFORMS | {"COVIUS_REALTYBID"})
+                if parts is None:
+                    continue
+                street, city, zip_code, county, sale_platform = parts
+                owners = []
+            else:
+                parts = borrower_columns(record, header_rest)
+                if parts is None:
+                    continue
+                street, city, zip_code, county, sale_platform, owners = parts
+            primary_owner = ", ".join(owners) if owners else None
             full_addr = f"{street}, {city}, TN {zip_code}"
 
             # Stable lead key: file_no is unique per case
