@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.bots.church_closure_bot import closures  # noqa: E402
+from src.bots.church_closure_bot import ChurchClosureBot, closures  # noqa: E402
 
 DOC = (
     "Resolution to Close Port Royal United Methodist Church Tennessee-Western Kentucky Conference WHEREAS, the "
@@ -28,6 +29,21 @@ DOC = (
 
 
 class ChurchClosureTests(unittest.TestCase):
+    @patch("src.bots.church_closure_bot.CLOSURE_PDFS", [])
+    @patch("src.bots.church_closure_bot._city_index", return_value={})
+    def test_saved_resolutions_identify_church_without_claiming_a_seller(self, _index):
+        bot = ChurchClosureBot()
+        leads = bot.scrape()
+        self.assertTrue(leads)
+        for lead in leads:
+            church = lead.raw_payload["church_closure"]
+            self.assertEqual(lead.pipeline_lead_key, bot.make_lead_key(
+                bot.name, f"{church['church']}|{church['address']}"))
+            self.assertTrue(lead.source_url)
+            self.assertIsNone(lead.owner_name_records)
+            self.assertIsNone(lead.full_name)
+            self.assertNotIn("seller", lead.raw_payload)
+
     def test_parses_each_format(self):
         cs = closures(DOC)
         self.assertEqual([c["county"] for c in cs], ["montgomery", "madison", "graves"])
