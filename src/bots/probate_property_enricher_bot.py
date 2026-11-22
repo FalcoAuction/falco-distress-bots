@@ -63,16 +63,43 @@ def _decedent_from_payload(raw: Any) -> str:
     if not isinstance(raw, dict):
         return ""
     notice = raw.get("court_notice")
-    if isinstance(notice, dict) and notice.get("decedent"):
-        return str(notice["decedent"])
+    if isinstance(notice, dict) and court_notices.probate_name(notice.get("decedent")):
+        return notice["decedent"]
     excerpt = raw.get("excerpt") or ""
     if not excerpt:
         return ""
     found = court_notices.extract_probate([excerpt]).get("decedent") or ""
     # Excerpts are truncated; a "name" that runs into notice boilerplate is junk.
-    if len(found.split()) > 5 or re.search(r"notice|letters|hereby|court", found, re.I):
+    if not court_notices.probate_name(found):
         return ""
     return found
+
+
+def _lookup_subject(row):
+    raw = row.get("raw_payload") or {}
+    if row.get("distress_type") != "PROBATE":
+        return row.get("full_name") or row.get("owner_name_records") or _decedent_from_payload(raw)
+    if not isinstance(raw, dict) or str(raw.get("state") or "TN").upper() not in ("TN", "TENNESSEE"):
+        return None
+    if (raw.get("probate_review") or {}).get("stage") == "estate_inactive_reported":
+        return None
+    if row.get("bot_source") in {"tn_public_notice", "court_notices"}:
+        # Paper location can differ from the court venue. Generic names on old
+        # staging rows can be signers, creditors or attorneys.
+        notice = raw.get("court_notice") or court_notices.extract_probate([raw.get("excerpt") or ""])
+        if not isinstance(notice, dict) or not notice.get("county") or notice["county"] != _tpad_norm_county(row.get("county") or ""):
+            return None
+        return _decedent_from_payload(raw)
+    candidate = _decedent_from_payload(raw) or row.get("full_name")
+    return candidate if court_notices.probate_name(candidate) else None
+
+
+def _ambiguous_probate_match(row, match):
+    if row.get("distress_type") != "PROBATE" or match.get("confidence") != "name_only":
+        return False
+    parcels = {str(p.get("parcel") or p.get("address") or "").strip().casefold()
+               for p in match.get("parcels") or []}
+    return len(parcels) > 1
 
 
 def _decedent_to_owner_query(decedent: str) -> Optional[str]:
@@ -168,7 +195,7 @@ class ProbatePropertyEnricherBot(BotBase):
             )
 
             for row in candidates[:self.max_leads_per_run]:
-                decedent = row.get("full_name") or row.get("owner_name_records") or _decedent_from_payload(row.get("raw_payload"))
+                decedent = _lookup_subject(row)
                 query = _decedent_to_owner_query(decedent)
                 if not query:
                     skipped += 1
@@ -261,6 +288,11 @@ class ProbatePropertyEnricherBot(BotBase):
                     unsupported += 1
                     self._park(client, row, "unsupported_county")
                     continue
+                match = hit.get("owner_match") or {}
+                if _ambiguous_probate_match(row, match):
+                    ambiguous += 1
+                    self._park(client, row, "ambiguous", detail={"query": query})
+                    continue
                 update: Dict[str, Any] = {}
                 if hit.get("property_address") and not row.get("property_address"):
                     update["property_address"] = hit["property_address"]
@@ -273,7 +305,7 @@ class ProbatePropertyEnricherBot(BotBase):
                     value_source = "probate_assessor"
 
                 # Merge into raw_payload for audit
-                existing_raw = row.get("raw_payload") or {}
+                existing_raw = dict(row["raw_payload"]) if isinstance(row.get("raw_payload"), dict) else {}
                 if not isinstance(existing_raw, dict):
                     existing_raw = {}
                 existing_raw["padctn_owner_match"] = {
@@ -302,8 +334,8 @@ class ProbatePropertyEnricherBot(BotBase):
                     continue
 
                 try:
-                    client.table("homeowner_requests_staging").update(update).eq("id", row["id"]).execute()
-                    enriched += 1
+                    if self._update(client, row, update):
+                        enriched += 1
                 except Exception as e:
                     self.logger.warning(f"  update failed id={row['id']}: {e}")
 
@@ -344,16 +376,23 @@ class ProbatePropertyEnricherBot(BotBase):
 
     # ── Internal ────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _update(client, row, patch):
+        query = client.table("homeowner_requests_staging").update(patch).eq("id", row["id"])
+        if row.get("distress_type") == "PROBATE":
+            from ._probate_staging import guard_raw
+            query = guard_raw(query.eq("staging_status", "pending").is_("property_address", "null"),
+                              row.get("raw_payload"))
+        return query.execute().data
+
     def _park(self, client, row: Dict[str, Any], result: str, detail: Optional[Dict[str, Any]] = None) -> None:
         """Record an unsuccessful match so _candidates skips the row until
         retry_after_days pass. Best-effort: a failed write only means the row
         is tried again next run."""
-        raw = row.get("raw_payload") or {}
-        if not isinstance(raw, dict):
-            raw = {}
+        raw = dict(row["raw_payload"]) if isinstance(row.get("raw_payload"), dict) else {}
         raw["probate_match_attempt"] = {"at": datetime.now(timezone.utc).isoformat(), "result": result, **(detail or {})}
         try:
-            client.table("homeowner_requests_staging").update({"raw_payload": raw}).eq("id", row["id"]).execute()
+            self._update(client, row, {"raw_payload": raw})
         except Exception as e:
             self.logger.warning(f"  park failed id={row['id']}: {e}")
 
@@ -409,16 +448,19 @@ class ProbatePropertyEnricherBot(BotBase):
         and the borrower owns the house, so the same strict owner match
         applies."""
         out: List[Dict[str, Any]] = []
-        for distress in ("PRE_FORECLOSURE", "COURT_SALE", "PARTITION", "DIVORCE", "CONSERVATORSHIP", "PROBATE"):
+        probate = self._candidates_of(client, "PROBATE")
+        # A permanently full foreclosure queue otherwise starves ordinary estates.
+        reserved = min(len(probate), max(1, self.max_leads_per_run // 5))
+        for distress in ("PRE_FORECLOSURE", "COURT_SALE", "PARTITION", "DIVORCE", "CONSERVATORSHIP"):
             out.extend(self._candidates_of(client, distress))
-        return out
+        return out[:self.max_leads_per_run - reserved] + probate
 
     def _candidates_of(self, client, distress: str) -> List[Dict[str, Any]]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=self.retry_after_days)).isoformat()
         try:
             q = (
                 client.table("homeowner_requests_staging")
-                .select("id, full_name, owner_name_records, county, property_address, property_value, raw_payload")
+                .select("id, bot_source, distress_type, full_name, owner_name_records, county, property_address, property_value, raw_payload")
                 .eq("distress_type", distress)
                 # Davidson-only was a v1 guard while the PADCTN pattern was
                 # being validated. It is why Knox (822 leads) and Shelby (599)
@@ -435,7 +477,9 @@ class ProbatePropertyEnricherBot(BotBase):
                     f"raw_payload->probate_match_attempt->>at.lt.{cutoff}"
                 )
             )
-            if distress != "PROBATE":
+            if distress == "PROBATE":
+                q = q.eq("staging_status", "pending")
+            else:
                 q = q.not_.is_("full_name", "null")
             q = q.order("staged_at", desc=True).limit(2000).execute()
             return getattr(q, "data", None) or []

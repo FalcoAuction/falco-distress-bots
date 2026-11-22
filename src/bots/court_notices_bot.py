@@ -32,6 +32,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ._base import BotBase, LeadPayload
+from ._probate_staging import ProbateNoticeBot, remember_notice
 from . import _court_notices as cn
 from ._court_order import PARTITION_ACTION_RE
 
@@ -60,6 +61,13 @@ def lead_key(kind: str, county: Optional[str], docket: Optional[str], notice_id:
 def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
                row: Dict[str, Any], source_url: Optional[str] = None) -> Optional[LeadPayload]:
     kind = cn.classify(row["lines"])
+    estate_fields = None
+    estate_review = None
+    if kind == cn.KIND_PROBATE or re.search(r"\bestate of\b", " ".join(row["lines"]), re.I):
+        estate_fields = cn.extract_probate(row["lines"])
+        estate_review = cn.probate_review(row["lines"], estate_fields)
+        if kind == cn.KIND_OTHER and estate_fields["decedent"] and estate_review["stage"] == "appointment_reported":
+            kind = cn.KIND_PROBATE
     if kind == cn.KIND_OTHER:
         return None
     if source_url is None:
@@ -73,13 +81,14 @@ def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
         "text": "\n".join(row["lines"]),
     }
     if kind == cn.KIND_PROBATE:
-        fields = cn.extract_probate(row["lines"])
+        fields = estate_fields
         if not fields["decedent"]:
             return None  # a probate lead without a decedent can't be matched to property
         raw["court_notice"] = fields
+        raw["probate_review"] = estate_review
         reps = ", ".join(f"{r['name']} ({r['role']})" for r in fields["representatives"]) or "none parsed"
         attorney = (", ".join(fields["attorney"]["names"]) or "none parsed").rstrip(".")
-        source, ident = lead_key(kind, fields["county"], fields["docket"], row["notice_id"])
+        source, ident = lead_key(kind, fields["county"], cn.historic_probate_docket(row["lines"]), row["notice_id"])
         return LeadPayload(
             bot_source=bot_name,
             pipeline_lead_key=BotBase.make_lead_key(source, ident),
@@ -102,6 +111,9 @@ def build_lead(bot_name: str, publication: str, base: str, pub_date: date,
     if review.get("docket"):
         fields = {**fields, "reviewed_docket": review["docket"]}
     raw["court_notice"] = fields
+    if estate_review and estate_fields["decedent"] and not partition:
+        raw["probate_review"] = estate_review
+        raw["court_notice"] = {**estate_fields, **fields, "docket": fields["docket"] or estate_fields["docket"]}
     source, ident = lead_key(kind, fields["county"], fields["docket"], row["notice_id"])
     return LeadPayload(
         bot_source=bot_name,
@@ -154,7 +166,7 @@ def cheatham_tax_tracts(row, pub_date, today):
     return leads
 
 
-class CourtNoticesBot(BotBase):
+class CourtNoticesBot(ProbateNoticeBot):
     name = "court_notices"
     description = "Probate and court-ordered-sale notices from the Nashville Ledger and Memphis Daily News"
     throttle_seconds = 1.5
@@ -186,8 +198,8 @@ class CourtNoticesBot(BotBase):
                                 leads.setdefault(tract.pipeline_lead_key, tract)
                             continue
                     lead = build_lead(self.name, pub["key"], pub["base"], d, row)
-                    if lead and lead.pipeline_lead_key not in leads:
-                        leads[lead.pipeline_lead_key] = lead
+                    if lead:
+                        remember_notice(leads, lead)
         if empty_editions:
             # A publication day with no court grid at all is either a quiet day
             # or a layout change; the frozen/zero-yield health checks catch a

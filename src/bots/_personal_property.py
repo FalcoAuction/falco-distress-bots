@@ -31,6 +31,9 @@ appraisals; `signals` says what each one rests on.
 from __future__ import annotations
 
 import re
+import json
+import math
+from datetime import date
 from typing import Any, Dict, List, Optional, Tuple
 
 ESTATE_HOME_MIN = 1_000_000       # proxy only; contents signals qualify an estate at any home value
@@ -86,7 +89,7 @@ def _num(v: Any) -> Optional[float]:
         n = float(str(v).replace(",", "").replace("$", "")) if v not in (None, "") else None
     except ValueError:
         return None
-    return n if n is not None and n >= 0 else None
+    return n if n is not None and math.isfinite(n) and n >= 0 else None
 
 
 def category_of(name: Optional[str]) -> Optional[str]:
@@ -114,7 +117,7 @@ def implied_equipment_value(cumulative_owed: Any, years: Any) -> Optional[float]
 
 def _aircraft(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
     a = raw.get("aircraft")
-    return a if isinstance(a, list) else []
+    return [p for p in a if isinstance(p, dict)] if isinstance(a, list) else []
 
 
 def _aircraft_signal(planes: List[Dict[str, Any]]) -> str:
@@ -211,6 +214,9 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
            else None)
     if tag:
         return routing(tag, lead, raw, dt)
+    if isinstance(raw.get("personal_property_evidence"), dict) and raw["personal_property_evidence"].get("assets"):
+        return routing(_result("owner_asset", "B", ["documented_assets"], None,
+                               ["Documented personal-property inventory requires review"], raw), lead, raw, dt)
     # Any distressed owner (an individual bankruptcy, a small tax account, a
     # foreclosure) who holds a TN aircraft: sell the plane, not the house.
     if planes:
@@ -288,14 +294,137 @@ def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: 
         "deadline": lead.get("trustee_sale_date") or raw.get("sale_date"),
         "primary_contact": primary, "policy": "pp-v2",
     })
+    return qualify_routing(tag, lead, raw)
+
+
+def _fresh(value: Any) -> bool:
+    try:
+        return 0 <= (date.today() - date.fromisoformat(str(value))).days <= 7
+    except ValueError:
+        return False
+
+
+def qualify_routing(tag, lead, raw):
+    """Signals are research candidates. Routing requires a dated asset review.
+
+    personal_property_evidence is an explicit review, never inferred from a
+    house value, industry, license, tax roll or FAA registration alone.
+    Each conclusion must carry its own source URL and verification date.
+    """
+    ev = raw.get("personal_property_evidence")
+    ev = ev if isinstance(ev, dict) else {}
+    holds = [] if tag["routable"] else [tag["not_routable_reason"]]
+    subject = str(ev.get("subject_name") or "").strip().casefold()
+    if not subject or subject not in {str(lead.get(k) or "").strip().casefold()
+                                     for k in ("owner_name_records", "full_name")}:
+        holds.append("Asset review subject does not match current lead owner")
+    assets = ev.get("assets")
+    assets = assets if isinstance(assets, list) else []
+    documented = [a for a in assets if isinstance(a, dict) and a.get("asset_id") and a.get("kind")
+                  and a.get("description") and a.get("source_url") and _fresh(a.get("verified_on"))]
+    if not documented or len(documented) != len(assets):
+        holds.append("Specific assets need current documented inventory")
+    controller = ev.get("controller")
+    controller = controller if isinstance(controller, dict) else {}
+    if not (controller.get("name") and controller.get("role") and controller.get("source_url")
+            and controller.get("authority") == "verified" and _fresh(controller.get("verified_on"))):
+        holds.append("Named controller and authority need current evidence")
+    court_controlled = lead.get("distress_type") in ("BANKRUPTCY", "PROBATE", "VESSEL_ARREST")
+    for key in (("availability", "liens", "court") if court_controlled else ("availability", "liens")):
+        fact = ev.get(key)
+        fact = fact if isinstance(fact, dict) else {}
+        if not (fact.get("status") in {"availability": ("available",), "liens": ("reviewed", "not_applicable"),
+                                       "court": ("permitted", "not_applicable")}[key]
+                and fact.get("source_url") and _fresh(fact.get("verified_on"))):
+            holds.append(f"{key.title()} unresolved or stale")
+    value = ev.get("valuation")
+    value = value if isinstance(value, dict) else {}
+    deadline = ev.get("deadline")
+    deadline = deadline if isinstance(deadline, dict) else {}
+    try:
+        future = date.fromisoformat(str(deadline.get("date"))) > date.today()
+    except ValueError:
+        future = False
+    if not (deadline.get("source_url") and _fresh(deadline.get("verified_on"))
+            and (future or (not deadline.get("date") and deadline.get("status") == "none_documented"))):
+        holds.append("Asset sale deadline unresolved or passed")
+    # A changed/removed registry match invalidates a previously reviewed plane.
+    planes = {p.get("n_number"): p for p in _aircraft(raw)}
+    prospects = [p for p in planes.values() if p.get("n_number") and p.get("serial")
+                 and p.get("registrant") and p.get("identity_verified") is True
+                 and p.get("registration_status") == "V" and p.get("value_band") in ("A", "B")
+                 and _fresh(p.get("verified_on")) and _fresh(p.get("registry_date"))]
+    for asset in documented:
+        if asset.get("kind") != "aircraft":
+            continue
+        plane = planes.get(asset["asset_id"], {})
+        if not (plane.get("serial") == asset.get("serial") and plane.get("serial")
+                and plane.get("registrant") == asset.get("registrant")
+                and plane.get("identity_verified") is True
+                and plane.get("registration_status") == "V"
+                and _fresh(plane.get("verified_on")) and _fresh(plane.get("registry_date"))):
+            holds.append("Aircraft identity or current registry status requires review")
+    qualified = bool(prospects and lead.get("distress_type")) or bool(documented and subject and not any(
+        "subject does not match" in h for h in holds))
+    tag.update(policy="pp-v3", qualification=("qualified_prospect" if qualified else "research") if holds else "reviewed",
+               holds=list(dict.fromkeys(holds)), routable=not holds,
+               route_to=ROUTE_TO if not holds else None,
+               not_routable_reason="; ".join(dict.fromkeys(holds)) or None,
+               title_status="not_established", availability=ev.get("availability"),
+               asset_evidence=documented, registry_assets=prospects, authority_review=ev,
+               next_action="Resolve referral holds" if qualified else "Identify assets and corroborate owner")
+    # Do not represent an unrelated mortgage sale date as the asset's deadline.
+    tag["deadline"] = deadline.get("date")
+    availability = ev.get("availability") if isinstance(ev.get("availability"), dict) else {}
+    if availability.get("status") in ("sold", "unavailable") or (deadline.get("date") and not future):
+        tag.update(qualification="hold", next_action="Revalidate disposition or expired asset deadline")
+    if not holds:
+        tag.update(controller=controller["name"], primary_contact=controller["name"],
+                   est_value_min=value.get("amount") or tag.get("est_value_min"),
+                   value_basis=value.get("source_url") or tag.get("value_basis"))
+    tag["prospect"] = tag["qualification"] in ("qualified_prospect", "reviewed")
     return tag
 
 
-def dedupe_key(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any]) -> str:
-    """Same opportunity filed twice (two newspapers, two notices)."""
-    ident = (raw.get("docket_number") or raw.get("case_number") or lead.get("owner_name_records")
-             or lead.get("full_name") or "")
-    return tag["lane"] + "|" + re.sub(r"[^A-Z0-9]", "", str(ident).upper())
+def dedupe_key(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any]) -> Optional[str]:
+    """Only suppress proven repeat opportunities, never an owner or blank alone.
+
+    Asset sets are part of case keys too: one case can contain separate lots.
+    Missing identity returns None, which the caller must not deduplicate.
+    """
+    def norm(value):
+        return re.sub(r"\s+", " ", str(value or "").strip().upper())
+    owner = norm(lead.get("owner_name_records") or lead.get("full_name"))
+    if owner in ("UNKNOWN", "UNKNOWN OWNER", "UNNAMED", "N/A"):
+        owner = ""
+    assets = set()
+    for p in _aircraft(raw):
+        if not (p.get("n_number") and p.get("serial")):
+            return None  # An unidentified lot must not disappear behind its case.
+        if p.get("n_number") and p.get("serial"):
+            assets.add(("AIRCRAFT", norm(p["n_number"]), norm(p["serial"])))
+    evidence = raw.get("personal_property_evidence")
+    for a in (evidence.get("assets") or []) if isinstance(evidence, dict) else []:
+        if not (isinstance(a, dict) and a.get("kind") and a.get("asset_id")):
+            return None
+        if isinstance(a, dict) and a.get("kind") and a.get("asset_id"):
+            assets.add((norm(a["kind"]), norm(a["asset_id"]), norm(a.get("serial"))))
+    vessel = raw.get("vessel")
+    if isinstance(vessel, dict) and vessel.get("hin"):
+        assets.add(("VESSEL", norm(vessel["hin"]), ""))
+    notice = raw.get("court_notice")
+    notice = notice if isinstance(notice, dict) else {}
+    case = norm(raw.get("docket_number") or raw.get("case_number") or notice.get("docket"))
+    state = norm(raw.get("state") or lead.get("state") or notice.get("state"))
+    county = norm(notice.get("county") or lead.get("county"))
+    jurisdiction = norm(raw.get("court_id")) or ([state, county, norm(notice.get("court"))]
+                                                if state and county else None)
+    if case and re.search(r"\d", case) and jurisdiction:
+        return json.dumps([tag["lane"], "case", jurisdiction, norm(lead.get("distress_type")),
+                           case, sorted(assets)], separators=(",", ":"))
+    if assets and owner:
+        return json.dumps([tag["lane"], "assets", owner, sorted(assets)], separators=(",", ":"))
+    return None
 
 
 def _vessel_arrest(raw: Dict[str, Any]) -> Optional[Dict[str, Any]]:

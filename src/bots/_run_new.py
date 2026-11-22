@@ -278,10 +278,7 @@ NEW_BOTS = [
     ("owner_classifier", owner_classifier_bot.run),
     ("xref_avm_enricher", xref_avm_enricher_bot.run),
     ("continuance_reaper", continuance_reaper_bot.run),
-    # Docket-diff reaper: auto-flag foreclosure leads as cancelled when
-    # their notice stops appearing in the daily scrape (typically means
-    # the homeowner reinstated / paid off / the sale was withdrawn).
-    # Runs after the scrapers so it sees today's last_seen_at touches.
+    # Review stale notices after scrapers record their latest sightings.
     ("trustee_status_reaper", trustee_status_reaper_bot.run),
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
@@ -340,7 +337,7 @@ NEW_BOTS = [
 # Bots the run MUST reach. When the budget runs short, everything not on
 # this list is skipped so these still fire. auto_promoter is the only gate
 # between staging and the dialer; the two skip-trace bots feed it; the
-# reaper keeps withdrawn sales out of the queue; decision_engine grades.
+# reaper tracks notice freshness; decision_engine grades.
 # Before the budget gate existed, ~40% of runs were killed by the job
 # timeout before reaching any of them.
 CRITICAL_BOTS = {

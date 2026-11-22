@@ -153,7 +153,9 @@ class LeadTests(unittest.TestCase):
         row = {"instrument": "26000003", "code": "APPT", "grantors": ["ACME BANK", "ACME MORTGAGE LLC"],
                "grantees": ["SMITH LAW PLLC S TR"], "recorded": "2026-11-16", "detail_url": None}
         lead = build_lead(bot, row, None, None)
-        self.assertEqual(lead.full_name, "ACME MORTGAGE LLC")
+        self.assertIsNone(lead.full_name)
+        self.assertIsNone(lead.owner_name_records)
+        self.assertEqual(lead.raw_payload["borrowers"], [])
         self.assertEqual(lead.raw_payload["party_basis"], "unidentified")
         self.assertIn("Borrower not identified", lead.admin_notes)
 

@@ -25,6 +25,7 @@ import sys
 import time
 import uuid
 import hashlib
+import json
 import logging
 import traceback
 from dataclasses import dataclass, field, asdict
@@ -47,6 +48,41 @@ try:
 except ImportError:
     print("[bot-base] ERROR: requests not installed. Run: pip install requests", file=sys.stderr)
     raise
+
+
+def guard_phone_metadata(query, original):
+    """Compare the entire JSON snapshot before replacing it, including manual edits."""
+    if original is None:
+        return query.is_("phone_metadata", "null")
+    return query.filter("phone_metadata", "eq", json.dumps(original, separators=(",", ":")))
+
+
+def _brock_listing_matches(lead, row):
+    """Require the same property and protect a manual status on either copy."""
+    from ._address import normalize_address
+
+    address = (row.get("property_address") or "").strip().casefold()
+    incoming = (lead.property_address or "").strip()
+    normalized = normalize_address(incoming).normalized or ""
+    county = (row.get("county") or "").strip().casefold()
+    pm = row.get("phone_metadata")
+    if pm is not None and not isinstance(pm, dict):
+        return False
+    tracking = (pm or {}).get("notice_tracking") or {}
+    if not isinstance(tracking, dict):
+        return False
+    try:
+        observed = datetime.fromisoformat(lead.raw_payload["scraped_at"].replace("Z", "+00:00"))
+        for previous in (tracking.get("last_seen_at"), row.get("sale_date_last_seen_at")):
+            if previous and datetime.fromisoformat(previous.replace("Z", "+00:00")) > observed:
+                return False
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return False
+    status = (pm or {}).get("sale_status")
+    legacy = (isinstance(status, dict) and status.get("updated_by") == "trustee_status_reaper"
+              and status.get("status") == "cancelled")
+    return (bool(address and county) and address in (incoming.casefold(), normalized.casefold())
+            and county == (lead.county or "").strip().casefold() and (not status or legacy))
 
 
 class BotTimeout(Exception):
@@ -370,10 +406,7 @@ class BotBase:
 
         Also TOUCHES phone_metadata.notice_tracking.last_seen_at on both
         the staging row (if it exists as a dupe) AND the live
-        homeowner_requests row (if it exists). This gives the trustee-
-        status reaper a reliable "is this notice still being
-        republished?" signal — when a sale gets withdrawn, the notice
-        stops re-appearing in our scrapes and last_seen_at goes stale.
+        homeowner_requests row (if it exists). This records a scrape sighting for freshness review.
 
         Lookups and inserts are chunked (one round trip per CHUNK keys)
         rather than one select per lead. The per-lead version cost a
@@ -392,17 +425,54 @@ class BotBase:
         dupes = 0
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        def _touch_last_seen(table: str, row_id: str, existing_pm: Any) -> None:
-            """Update phone_metadata.notice_tracking on a single row."""
+        def _touch_last_seen(table: str, row: dict, lead: LeadPayload) -> None:
+            """Record a sighting; direct trustee dates require the same case and property."""
             try:
-                pm = existing_pm if isinstance(existing_pm, dict) else {}
-                tracking = pm.get("notice_tracking") if isinstance(pm.get("notice_tracking"), dict) else {}
-                tracking["last_seen_at"] = now_iso
-                tracking["last_seen_by"] = self.name
-                pm["notice_tracking"] = tracking
-                client.table(table).update({"phone_metadata": pm}).eq("id", row_id).execute()
-            except Exception as e:
-                self.logger.warning(f"notice_tracking touch failed for {table}/{row_id}: {e}")
+                existing_pm = row.get("phone_metadata")
+                if existing_pm is not None and not isinstance(existing_pm, dict):
+                    return
+                pm = dict(existing_pm or {})
+                tracking = pm.get("notice_tracking")
+                if tracking is not None and not isinstance(tracking, dict):
+                    return
+                tracking = dict(tracking or {})
+                seen_at = now_iso
+                patch = {"phone_metadata": pm}
+                guards = {"id": row["id"], "pipeline_lead_key": lead.pipeline_lead_key}
+                if table == "homeowner_requests":
+                    guards["source"] = "bot"
+                else:
+                    guards["bot_source"] = lead.bot_source
+
+                if self.name == lead.bot_source == "brock_scott_trustee":
+                    for key in ("county", "property_address", "trustee_sale_date"):
+                        guards[key] = row[key]
+                    if table == "homeowner_requests_staging":
+                        guards["staging_status"] = row["staging_status"]
+                    raw = lead.raw_payload or {}
+                    case = (raw.get("fields") or {}).get("case #", "").strip()
+                    if (not case or self.make_lead_key("brock_scott", case) != lead.pipeline_lead_key
+                            or not lead.trustee_sale_date):
+                        # The site also regards a staging sighting as confirmation
+                        # of its stored date. Do not refresh an unsupported date.
+                        return
+                    seen_at = raw["scraped_at"]
+                    if table == "homeowner_requests":
+                        guards["sale_date_last_seen_at"] = row.get("sale_date_last_seen_at")
+                        patch["sale_date_last_seen_at"] = seen_at
+                    if lead.trustee_sale_date != row["trustee_sale_date"]:
+                        patch["trustee_sale_date"] = lead.trustee_sale_date
+                    tracking["published_sale_date"] = lead.trustee_sale_date
+                    tracking["case_number"] = case
+
+                pm["notice_tracking"] = {**tracking, "last_seen_at": seen_at, "last_seen_by": self.name}
+                update = client.table(table).update(patch)
+                for key, value in guards.items():
+                    update = update.is_(key, "null") if value is None else update.eq(key, value)
+                if not guard_phone_metadata(update, existing_pm).execute().data:
+                    self.logger.debug("Concurrent notice update skipped for %s/%s", table, row["id"])
+            except Exception as exc:
+                self.logger.warning("Notice update failed for %s/%s (%s)", table, row["id"], type(exc).__name__)
 
         # A source can list the same notice twice in one run (republished
         # in two sections). Keep the first; the old per-lead path would
@@ -426,17 +496,27 @@ class BotBase:
                 chunk = group[i:i + CHUNK]
                 keys = [l.pipeline_lead_key for l in chunk]
 
-                # Which of these are already pending in staging?
+                by_key = {lead.pipeline_lead_key: lead for lead in chunk}
+                direct_list = self.name == source == "brock_scott_trustee"
+                columns = "id,pipeline_lead_key,phone_metadata"
+                if direct_list:
+                    columns += ",property_address,county,trustee_sale_date"
+
+                # Promoted direct listings still need their staging date refreshed.
                 try:
-                    res = (
+                    lookup = (
                         client.table("homeowner_requests_staging")
-                        .select("id, pipeline_lead_key, phone_metadata")
+                        .select(columns + ",staging_status" if direct_list else columns)
                         .eq("bot_source", source)
                         .in_("pipeline_lead_key", keys)
-                        .eq("staging_status", "pending")
-                        .execute()
                     )
-                    pending = {r["pipeline_lead_key"]: r for r in (getattr(res, "data", None) or [])}
+                    if direct_list:
+                        lookup = lookup.in_("staging_status", ["pending", "promoted"])
+                    else:
+                        lookup = lookup.eq("staging_status", "pending")
+                    pending = {}
+                    for record in lookup.execute().data or []:
+                        pending.setdefault(record["pipeline_lead_key"], []).append(record)
                 except Exception as e:
                     # Can't tell what's new. Skip the chunk rather than
                     # blindly inserting 200 possible duplicates; the next
@@ -444,11 +524,35 @@ class BotBase:
                     self.logger.warning(f"staging dedupe lookup failed, skipping {len(chunk)} leads: {e}")
                     continue
 
+                def live_matches():
+                    return (client.table("homeowner_requests")
+                            .select(columns + ",sale_date_last_seen_at" if direct_list else columns)
+                            .eq("source", "bot").in_("pipeline_lead_key", keys).execute().data or [])
+
+                blocked = set()
+                if direct_list:
+                    # The site sync also consumes staging dates. A collision or a
+                    # manual decision on either copy must protect both copies.
+                    try:
+                        live_rows = live_matches()
+                    except Exception as exc:
+                        self.logger.warning("Trustee live identity check failed (%s)", type(exc).__name__)
+                        continue
+                    existing = [row for matches in pending.values() for row in matches]
+                    for record in existing + live_rows:
+                        key = record["pipeline_lead_key"]
+                        if not _brock_listing_matches(by_key[key], record):
+                            blocked.add(key)
+
                 new_rows = []
                 for lead in chunk:
+                    if lead.pipeline_lead_key in blocked:
+                        dupes += 1
+                        continue
                     hit = pending.get(lead.pipeline_lead_key)
                     if hit:
-                        _touch_last_seen("homeowner_requests_staging", hit["id"], hit.get("phone_metadata"))
+                        for record in hit:
+                            _touch_last_seen("homeowner_requests_staging", record, lead)
                         dupes += 1
                     else:
                         new_rows.append(lead.as_db_row(scraper_run_id=self.run_id))
@@ -471,19 +575,14 @@ class BotBase:
                 # Touch live homeowner_requests rows for any lead already
                 # promoted, so the reaper sees today's sighting.
                 try:
-                    live = (
-                        client.table("homeowner_requests")
-                        .select("id, pipeline_lead_key, phone_metadata")
-                        .eq("source", "bot")
-                        .in_("pipeline_lead_key", keys)
-                        .execute()
-                    )
-                    for r in (getattr(live, "data", None) or []):
-                        _touch_last_seen("homeowner_requests", r["id"], r.get("phone_metadata"))
+                    for record in live_rows if direct_list else live_matches():
+                        key = record["pipeline_lead_key"]
+                        if key not in blocked:
+                            _touch_last_seen("homeowner_requests", record, by_key[key])
                 except Exception as e:
                     self.logger.warning(f"live touch lookup failed for chunk: {e}")
 
-        self.logger.info(f"staged {staged} new leads, {dupes} dupes skipped (last_seen_at touched on all)")
+        self.logger.info(f"staged {staged} new leads, {dupes} dupes skipped")
         return (staged, dupes)
 
     @staticmethod

@@ -45,7 +45,7 @@ HOME = BASE + "/index.php"
 CODE = "APPT"
 # The register files most deeds of trust under doc type "MORTGAGE"; checking
 # for "TRUST" alone threw away the page with the address and loan.
-LOAN_DOC = re.compile(r"TRUST|MORTGAGE", re.I)
+LOAN_DOC = re.compile(r"^\s*(?:MORTGAGE|(?:CORRECTED )?DEED OF TRUST)\s*$", re.I)
 
 
 def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Optional[Dict[str, Any]],
@@ -57,7 +57,7 @@ def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Opt
         # re-read on every run and would eat the per-run budget forever.
         if not row["grantors"]:
             return None
-        parties = {**parties, "borrowers": [row["grantors"][-1]], "basis": "unidentified"}
+        parties = {**parties, "basis": "unidentified"}
     lender = parties["lenders"][0] if parties["lenders"] else None
     loan: Dict[str, Any] = {}
     balance = None
@@ -86,8 +86,8 @@ def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Opt
         distress_type="SUBSTITUTION_OF_TRUSTEE",
         county="Shelby",
         property_address=address,
-        full_name=parties["borrowers"][0],
-        owner_name_records="; ".join(parties["borrowers"]),
+        full_name=parties["borrowers"][0] if borrower_found else None,
+        owner_name_records="; ".join(parties["borrowers"]) or None,
         mortgage_balance=balance,
         source_url=row.get("detail_url"),
         admin_notes=note,
@@ -140,6 +140,8 @@ class ShelbySubstituteTrusteeBot(BotBase):
         leads: List[LeadPayload] = []
         for row in fresh[: self.max_new_per_run]:
             appt = self._detail(row["detail_url"]) if row.get("detail_url") else None
+            if row.get("detail_url") and appt is None:
+                continue  # Retry the appointment before marking this instrument as collected.
             ref = deed_of_trust_ref(appt) if appt else None
             dot = self._detail(detail_url(ref["instrument"], ref["year"])) if ref else None
             if dot and not LOAN_DOC.search(dot.get("doc_type") or ""):
