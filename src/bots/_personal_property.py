@@ -219,20 +219,18 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if isinstance(raw.get("personal_property_evidence"), dict) and raw["personal_property_evidence"].get("assets"):
         return routing(_result("owner_asset", "B", ["documented_assets"], None,
                                ["Documented personal-property inventory requires review"], raw), lead, raw, dt)
-    # Any distressed owner (an individual bankruptcy, a small tax account, a
-    # foreclosure) who holds a TN aircraft: sell the plane, not the house.
+    # The registry identifies an aircraft for research; model bands are not valuations.
     if planes:
         grade = "A" if "A" in plane_bands else "B"
-        return routing(_result("owner_asset", grade, ["aircraft"], 300_000 if grade == "A" else 100_000,
-                               ["owner's aircraft: " + _aircraft_signal(planes)], raw,
-                               ["owner-direct: pitch selling the plane to cure the distress"]), lead, raw, dt)
+        return routing(_result("owner_asset", grade, ["aircraft"], None,
+                               ["FAA registry overlap: " + _aircraft_signal(planes)], raw), lead, raw, dt)
     return None
 
 
 ROUTE_TO = "McLemore Auction Company"
 _VALUE_BASIS = {
     "estate": "home value used as a proxy for the contents (no inventory yet)",
-    "owner_asset": "FAA registry value band for the aircraft",
+    "owner_asset": "Aircraft appraisal unverified",
     "vessel_arrest": "unknown until the docket or listing is checked",
     "vessel_lien": "estimated from make, year and size",
 }
@@ -589,7 +587,7 @@ def _estate(lead, raw, planes, plane_bands):
     signals, cats, caveats = [], [], []
     strong = 0
     if planes:
-        signals.append("decedent's aircraft: " + _aircraft_signal(planes))
+        signals.append("FAA registry overlap: " + _aircraft_signal(planes))
         cats.append("aircraft")
         strong += "A" in plane_bands
     lic = _ffl_people(raw)
@@ -615,8 +613,7 @@ def _estate(lead, raw, planes, plane_bands):
     if not lic and not planes:
         caveats.append("contents are unseen: ask the executor about vehicles, guns, collections and equipment")
     grade = "A" if (strong or len(signals) >= 2) else "B"
-    est = 300_000 if "A" in plane_bands else 100_000 if planes else None
-    return _result("estate", grade, cats, est, signals, raw, caveats)
+    return _result("estate", grade, cats, None, signals, raw, caveats)
 
 
 def _liquidation(lead, raw, planes, dt):
@@ -654,7 +651,7 @@ def _liquidation(lead, raw, planes, dt):
     cats = [cat]
     if planes:
         cats.append("aircraft")
-        signals.append("entity aircraft: " + _aircraft_signal(planes))
+        signals.append("FAA registry overlap: " + _aircraft_signal(planes))
         grade = "A"
     return _result("business_liquidation", grade, cats, equip if big else None, signals, raw, caveats)
 

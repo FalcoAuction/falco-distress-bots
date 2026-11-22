@@ -66,7 +66,7 @@ class EstateTests(unittest.TestCase):
 
     def test_decedent_jet_is_a(self):
         t = classify(lead("PROBATE", {"aircraft": [JET]}, property_value=0))
-        self.assertEqual((t["grade"], t["categories"], t["est_value_min"]), ("A", ["aircraft"], 300000))
+        self.assertEqual((t["grade"], t["categories"], t["est_value_min"]), ("A", ["aircraft"], None))
 
 
 class LiquidationTests(unittest.TestCase):
@@ -142,6 +142,8 @@ class OwnerAssetTests(unittest.TestCase):
     def test_foreclosure_owner_with_jet(self):
         t = classify(lead("PRE_FORECLOSURE", {"aircraft": [JET]}))
         self.assertEqual((t["lane"], t["grade"]), ("owner_asset", "A"))
+        self.assertIsNone(t["est_value_min"])
+        self.assertIn("FAA registry overlap", t["signals"][0])
 
     def test_bankrupt_individual_with_baron_is_owner_asset_b(self):
         t = classify(lead("BANKRUPTCY", {"chapter": "13", "aircraft": [BARON]}, full_name="Chad E Conner"))

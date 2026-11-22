@@ -33,7 +33,7 @@ import zipfile
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ._aircraft_match import AircraftIndex, build_index_from_zip
+from ._aircraft_match import AircraftIndex, ENTITY_RE, build_index_from_zip, clean
 from ._base import BotBase, _supabase
 
 FAA_ZIP_URL = "https://registry.faa.gov/database/ReleasableAircraft.zip"
@@ -46,16 +46,24 @@ _INDEX_CACHE: Dict[str, Any] = {}
 
 def evidence_tags(index, lead):
     """Retain weak matches for research; never confuse shared address with identity."""
-    def identity(name):
-        return sorted(re.findall(r"[A-Z0-9]+", str(name or "").upper()))
-    names = [identity(lead.get(k)) for k in
-             ("owner_name_records", "full_name", "subject", "owner_name_1", "owner_name_2")]
+    names = {clean(lead.get(k)) for k in
+             ("owner_name_records", "full_name", "subject", "owner_name_1", "owner_name_2")}
+    names.discard("")
     tags = index.match(lead)
     for tag in tags:
         registrants = [tag.get("registrant")] + (tag.get("co_owners") or [])
+        forms = set()
+        for registrant in registrants:
+            name = clean(registrant)
+            forms.add(name)
+            # FAA person names are surname first. Never permute entity tokens
+            # or move a middle name into the surname position to force a match.
+            if name and not ENTITY_RE.search(name):
+                tokens = name.split()
+                forms.add(" ".join(tokens[1:] + tokens[:1]))
         tag.update(verified_on=date.today().isoformat(),
                    registry_date=getattr(index, "registry_date", None), source_url=FAA_ZIP_URL,
-                   identity_verified=any(identity(n) in names for n in registrants if identity(n)),
+                   identity_verified=bool(names & forms) and tag.get("registration_status") == "V",
                    title_status="not_established", availability="unknown")
         try:
             expiry = datetime.strptime(tag.get("registration_expires", ""), "%Y%m%d").date()
@@ -63,13 +71,17 @@ def evidence_tags(index, lead):
                 tag["identity_verified"] = False
         except (ValueError, TypeError):
             tag["identity_verified"] = False
+        if tag.get("match_type") == "address":
+            tag["confidence"] = "high" if tag["identity_verified"] else "low"
+            if tag["identity_verified"]:
+                tag["match_type"] = "address_and_name"
     return sorted(tags, key=lambda t: (t["confidence"] != "high", t["n_number"]))
 
 # Flattened raw_payload fields the matcher reads. PostgREST JSON-path
 # selects keep the page small; the full raw_payload is fetched only for
 # rows that need a write.
 _RAW_FIELDS = ("subject", "owner_name_1", "owner_name_2", "case_name", "mailing_address",
-               "city", "court_id", "excerpt", "state")
+               "city", "court_id", "excerpt", "state", "source")
 _SELECT = {
     "homeowner_requests_staging": "id, distress_type, full_name, owner_name_records, property_address, county",
     "homeowner_requests": "id, distress_type, full_name, owner_name_records, property_address, county",
