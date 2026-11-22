@@ -39,7 +39,7 @@ EXPECTED_BOTS = {
     "chattanooga_codes":         {"max_silent_days": 14, "min_total": 50},
     "memphis_daily_news":        {"max_silent_days": 14, "min_total": 30},
     "nashville_ledger":          {"max_silent_days": 14, "min_total": 30},
-    "hud_reo":                   {"max_silent_days": 14, "min_total": 30},
+    "hud_reo":                   {"max_silent_days": 14, "inventory_only": True},
     "tn_probate":                {"max_silent_days": 30, "min_total": 0},
     # Dozens of TN dismissals a week; a silent week means the feed or the
     # entry labels changed.
@@ -123,6 +123,8 @@ class BotHealthMonitor(BotBase):
             # Evaluate alerts
             now = datetime.now(timezone.utc)
             for src, expectations in EXPECTED_BOTS.items():
+                if expectations.get("inventory_only"):
+                    continue  # Run receipts are monitored by _alert, independently of staging.
                 stats = per_bot_stats.get(src)
                 if not stats:
                     alerts.append({

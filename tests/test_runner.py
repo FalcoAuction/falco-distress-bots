@@ -401,6 +401,13 @@ class AlertRuleTests(unittest.TestCase):
         a = build_alerts(rows, summary, now=self.NOW, acknowledged={}, expected={"hud_reo": {"max_silent_days": 14}})
         self.assertEqual(alert_count(a), 0, a)
 
+    def test_inventory_receipt_health(self):
+        expected = {"hud_reo": {"max_silent_days": 14, "inventory_only": True}}
+        for age, silent in ((2, False), (15 * 24, True)):
+            alerts = build_alerts([self._row("hud_reo", "ok", age)], None, now=self.NOW,
+                                  acknowledged={}, expected=expected)
+            self.assertEqual(bool(alerts.get("silent")), silent)
+
     def test_missing_summary_and_unfinished_summary(self):
         a = build_alerts([], None, now=self.NOW, acknowledged={}, expected={})
         self.assertIn("runner_incomplete", a)
