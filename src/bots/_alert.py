@@ -210,10 +210,15 @@ def build_alerts(
 
         cfg = exp.get(bot)
         if cfg:
+            limit = timedelta(days=cfg.get("max_silent_days", 14))
+            if cfg.get("inventory_only"):
+                last_ok = next((_parse_ts(r.get("started_at")) for r in runs if r.get("status") == "ok"), None)
+                if last_ok is None or now - last_ok > limit:
+                    out["silent"].append(f"{bot}: no successful inventory read within {limit.days}d")
+                continue
             last_yield = next(
                 (_parse_ts(r.get("started_at")) for r in runs if (r.get("staged_count") or 0) > 0), None
             )
-            limit = timedelta(days=cfg.get("max_silent_days", 14))
             if last_yield is None:
                 out["silent"].append(f"{bot}: nothing staged in {LOOKBACK_DAYS}d (limit {limit.days}d)")
             elif now - last_yield > limit:
