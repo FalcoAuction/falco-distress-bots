@@ -26,10 +26,13 @@ Distress type: PRE_FORECLOSURE (Shelby + West TN counties)
 from __future__ import annotations
 
 import re
+import time
 from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional
+from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
 
 from ._base import BotBase, LeadPayload
 
@@ -75,26 +78,84 @@ class MemphisDailyNewsBot(BotBase):
     expected_min_yield = 5
 
     days_to_scan = 14  # walk last two weeks (MDN publishes daily, not weekly)
+    acquisition_seconds = 420  # leave 180s of the runner cap for staging/health
+
+    def __init__(self):
+        super().__init__()
+        # A single slow page must not consume four 30s attempts plus backoff.
+        # Keep the existing UA and throttle; retry on the next scheduled run.
+        self.session.mount(MDN_BASE + "/", HTTPAdapter(max_retries=0))
+
+    def _source_fetch(self, url, **kwargs):
+        response = self.fetch(url, timeout=(5, 15), **kwargs)
+        if response is not None and response.status_code in (403, 429):
+            self._source_blocked = True
+        return response
+
+    def _report_health(self, **kwargs):
+        if kwargs.get("finished_at") is not None:
+            kwargs["notes"] = {**(kwargs.get("notes") or {}),
+                               "notice_collection": getattr(self, "collection_stats", {})}
+        return super()._report_health(**kwargs)
 
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
         seen_ids: set[str] = set()
+        candidates = []
+        started = time.monotonic()
+        self._source_blocked = False
+        self.collection_stats = dict(indexes=0, detail_attempts=0, past=0,
+                                     invalid=0, failed=0, partial=False)
+        # Reserve a full request before starting it, not after it has overrun.
+        def exhausted():
+            return self._source_blocked or time.monotonic() - started >= self.acquisition_seconds - 22
 
         for pub_date in self._recent_dates(self.days_to_scan):
-            ids = self._fetch_index(pub_date)
-            if ids:
-                self.logger.info(f"{pub_date.isoformat()}: {len(ids)} foreclosure IDs")
-            for fid in ids:
-                if fid in seen_ids:
-                    continue
-                seen_ids.add(fid)
-                detail = self._fetch_detail(fid, pub_date)
-                if detail is None:
-                    continue
-                lead = self._build_lead(detail, fid, pub_date)
-                if lead is not None:
-                    leads.append(lead)
+            if exhausted():
+                self.collection_stats["partial"] = True
+                break
+            entries = self._fetch_index(pub_date)
+            self.collection_stats["indexes"] += 1
+            for entry in entries:
+                if entry["id"] not in seen_ids:
+                    seen_ids.add(entry["id"])
+                    candidates.append((entry, pub_date))
+        # Deduplicate newest issue first, then rotate daily so a slow source
+        # cannot repeatedly consume the budget on the same detail-page prefix.
+        if candidates:
+            offset = date.today().toordinal() % len(candidates)
+            candidates = candidates[offset:] + candidates[:offset]
+        for entry, pub_date in candidates:
+            if exhausted():
+                self.collection_stats["partial"] = True
+                break
+            fid = entry["id"]
+            if entry["sale_date"] and entry["sale_date"] < date.today().isoformat():
+                self.collection_stats["past"] += 1
+                continue
+            self.collection_stats["detail_attempts"] += 1
+            detail = self._fetch_detail(fid, pub_date)
+            if detail is None:
+                self.collection_stats["failed"] += 1
+                continue
+            # A stale/default detail page must never refresh another notice.
+            if (detail.get("tdn_no") != fid
+                    or self._identity(detail.get("borrower")) != self._identity(entry["borrower"])
+                    or self._identity(detail.get("address")) != self._identity(entry["address"])
+                    or self._iso_date(detail.get("advertised_auction_date")) != entry["sale_date"]):
+                self.collection_stats["invalid"] += 1
+                continue
+            lead = self._build_lead(detail, fid, pub_date)
+            if lead is not None:
+                leads.append(lead)
+        self.collection_stats["unique_notices"] = len(candidates)
+        self.collection_stats["partial"] |= bool(self.collection_stats["failed"] or self.collection_stats["invalid"])
+        self.logger.info("Collection coverage: %s; returned=%s", self.collection_stats, len(leads))
         return leads
+
+    @staticmethod
+    def _identity(value):
+        return " ".join((value or "").casefold().split())
 
     @staticmethod
     def _recent_dates(days: int) -> List[date]:
@@ -103,27 +164,43 @@ class MemphisDailyNewsBot(BotBase):
         return [today - timedelta(days=i) for i in range(days)
                 if (today - timedelta(days=i)).weekday() != 6]
 
-    def _fetch_index(self, pub_date: date) -> List[str]:
+    def _fetch_index(self, pub_date: date) -> List[Dict]:
         url = INDEX_URL_TEMPLATE.format(
             year=pub_date.year,
             month=MONTH_ABBR[pub_date.month - 1],
             day=pub_date.day,
         )
-        res = self.fetch(url)
+        res = self._source_fetch(url)
         if res is None or res.status_code != 200:
+            self.collection_stats["failed"] += 1
             return []
-        ids: List[str] = []
+        return self._parse_index(res.text, pub_date)
+
+    @classmethod
+    def _parse_index(cls, html: str, pub_date: date) -> List[Dict]:
+        entries: List[Dict] = []
         seen: set[str] = set()
-        for m in FORECLOSURE_ID_RE.finditer(res.text):
+        for row in BeautifulSoup(html, "html.parser").select("tr"):
+            m = FORECLOSURE_ID_RE.search(str(row))
+            if not m:
+                continue
+            # The URL may silently serve another issue. Bind to the actual link.
+            if cls._iso_date(unquote(m.group(2))) != pub_date.isoformat():
+                continue
+            cells = row.find_all("td")
+            if len(cells) != 5:
+                continue
             fid = m.group(1)
             if fid not in seen:
                 seen.add(fid)
-                ids.append(fid)
-        return ids
+                entries.append({"id": fid, "borrower": cells[1].get_text(" ", strip=True),
+                                "address": cells[2].get_text(" ", strip=True),
+                                "sale_date": cls._iso_date(cells[3].get_text(strip=True))})
+        return entries
 
     def _fetch_detail(self, fid: str, pub_date: date) -> Optional[Dict]:
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
-        res = self.fetch(DETAIL_URL, params={"id": fid, "date": date_param})
+        res = self._source_fetch(DETAIL_URL, params={"id": fid, "date": date_param})
         if res is None or res.status_code != 200:
             return None
         return self._parse_detail(res.text)
@@ -209,6 +286,9 @@ class MemphisDailyNewsBot(BotBase):
                 "dot_recording": dot_recording,
             },
             "publication_date": pub_date.isoformat(),
+            "notice_id": fid,
+            "observed_on": date.today().isoformat(),
+            "evidence_type": "published_notice",  # not trustee confirmation or sale outcome
         }
 
         return LeadPayload(
