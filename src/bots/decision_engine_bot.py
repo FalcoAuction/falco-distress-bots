@@ -69,6 +69,7 @@ import traceback as tb
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ._free_data import johnson_board_research
 from ._warn_gate import is_tn_warn
 from ._land_qualification import land_gate
 from ._base import BotBase, _supabase
@@ -532,6 +533,8 @@ class DecisionEngineBot(BotBase):
     def _fast_rules(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Apply the explicit safety rails. Returns a decision dict if a
         rule matches, None if the lead is gray-area and needs LLM."""
+        if johnson_board_research(row):
+            return self._mk_decision("HOLD_FOR_DATA", 0, "Municipal board record; sale authority unverified", "none", 1.0)
         if is_tn_warn(row):
             return self._mk_decision("HOLD_FOR_DATA", 0, "Employment notice; review asset evidence separately", "none", 1.0)
         if not land_gate(row):
