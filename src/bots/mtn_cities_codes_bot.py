@@ -1,64 +1,17 @@
+"""Mt. Juliet municipal Codes Enforcement complaint research.
+
+The city links SeeClickFix from https://www.mtjuliet-tn.gov/152/Code-Enforcement-Division.
+Open and Acknowledged describe an intake request. A verified property violation,
+ownership or sale authority requires independent records.
 """
-Middle Tennessee secondary cities — code-enforcement scraper.
-
-Six target cities were investigated; only Mt. Juliet exposes a public,
-no-auth, no-JS data feed for active code-enforcement issues. The rest
-require auth, only ship a citizen-reporter UI, or do not publish
-case-level data online at all. Findings:
-
-  Murfreesboro (Rutherford Co.) — SKIP
-      Building & Codes runs the City Court for citations; no public
-      case search portal. ArcGIS Online has a "Blight Problems" Web
-      Map (item id f27231f1de2948d0a2fe601d52ac5caa) backed by a
-      public CitizenProblems_blight FeatureService. As of probe date
-      it has 1 record total — citizen-reporter app, not a real case
-      database. Not worth scraping.
-
-  Franklin (Williamson Co.) — SKIP
-      Property Maintenance Codes are handled inside Building &
-      Neighborhood Services. Site is Cloudflare-fronted (HTTP 403
-      to non-browser UAs). No public case-search portal advertised.
-      No franklintn-energovweb.tylerhost.net deployment found.
-
-  Brentwood (Williamson Co.) — SKIP (auth required)
-      OneStop "OnLama" portal at brentwood.onlama.com. /AdvancedSearch.aspx
-      redirects to Login.aspx?ReturnURL=%2fAdvancedSearch.aspx — case
-      lookup is not anonymous despite city FAQ claiming otherwise.
-
-  Hendersonville (Sumner Co.) — SKIP
-      Tyler EnerGov SelfService at hendersonvilletn-energovweb.tylerhost.net.
-      Page loads (200) but is a SPA; the /api/energov/search/search
-      endpoint returns HTTP 500 to anonymous clients across every
-      SearchModule value (0-8). SeeClickFix slug `hendersonville` is
-      tied to Public Works (flooding, street signs) not Codes — only
-      ~2 entries, no code-enforcement request types. No code-case
-      data is publicly addressable.
-
-  Mt. Juliet (Wilson Co.) — SCRAPED
-      Code Enforcement Division publishes its intake on the
-      SeeClickFix v2 public API:
-        https://seeclickfix.com/api/v2/issues?place_url=mount-juliet
-      ~80 pages of issues; request_types include "Property
-      maintenance issue" (39286), "Zoning violation" (39287), "Debris
-      or trash on private property" (39282). No auth, no JS rendering.
-
-  Lebanon (Wilson Co.) — SKIP
-      Codes Department directs complaints through an email form.
-      OnBase guest login (GUEST / OnBase4321~) is for City Documents,
-      not a code-enforcement case database. No public ArcGIS feature
-      service for code cases. No SeeClickFix presence.
-
-Distress type for the one ingested city: CODE_VIOLATION
-"""
-
 from __future__ import annotations
 
 import re
-from datetime import datetime
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
 
-from ._base import BotBase, LeadPayload
-from ._cv_filter import is_auctionable_cv
+from ._base import BotBase, LeadPayload, _supabase, guard_phone_metadata
+from ._address import normalize_address
 
 
 # ─────────────────────────── Mt. Juliet config ──────────────────────────────
@@ -67,185 +20,143 @@ MTJULIET_SCF_PLACE = "mount-juliet"
 MTJULIET_SCF_BASE = "https://seeclickfix.com/api/v2/issues"
 MTJULIET_HTML_BASE = "https://seeclickfix.com/issues/{id}"
 
-# SeeClickFix request_type titles that map to actual code-enforcement
-# work. Filters out Public Works noise (street signs, dead animals,
-# trees) so we only stage things that could become deals.
-MTJULIET_CV_REQUEST_TYPES = {
-    "Property maintenance issue",
-    "Zoning violation",
-    "Debris or trash on private property",
-    "Dilapidated building",
-    "Dilapidated structure",
-    "Abandoned vehicle on private property",
-    "Code violation",
-    "Code enforcement",
-}
-
-# "Open" + "Acknowledged" mean staff has the case but it isn't closed.
-# Closed ("Closed", "Archived") cases are not actionable for us.
-ACTIVE_SCF_STATUSES = {"Open", "Acknowledged"}
-
-
-# ───────────────────────────── Bot class ────────────────────────────────────
+CODES_ORG = "Mt. Juliet, TN - Codes Enforcement"
+REVIEW = "mt_juliet_issue_review"
+# Require an allegation about a building in the narrative. Intake category names,
+# commas in prose, abandoned vehicles and general maintenance are not citations.
+BUILDING_CONDITION = re.compile(
+    r"\b(?:dilapidated|condemned|fire[- ]damaged) (?:house|home|building|structure)\b"
+    r"|\b(?:house|home|building|structure)\b[^.!?\n]{0,65}\b(?:condemned|severely damaged|collapsing|torn down)\b"
+    r"|\b(?:roof|foundation|ceilings?|walls?) (?:is |are |has |have )?(?:caving in|collapsing|detaching|collapsed)\b"
+    r"|\b(?:house|home|building|structure) (?:was |is )?(?:declared|found) (?:unsafe|dangerous)\b"
+    r"|\b(?:structural damage|structural failure|unfit for habitation)\b", re.I,
+)
 
 
 class MtnCitiesCodesBot(BotBase):
-    """Middle TN secondary cities — code-enforcement leads.
-
-    Currently only Mt. Juliet is wired (others are auth/JS-locked or
-    don't publish online). Adding a new city is a matter of writing
-    one more `_scrape_<city>()` and appending its results to `leads`
-    in `scrape()`.
-    """
-
     name = "mtn_cities_codes"
-    description = "Middle TN secondary cities — open code-enforcement cases (Mt. Juliet only as of 2026-05)"
+    description = "Mt. Juliet Codes Enforcement public complaint research"
     throttle_seconds = 1.5
-    expected_min_yield = 5  # SeeClickFix flow is small per city; alert if dry
+    expected_min_yield = 1
 
-    # ── entry point ────────────────────────────────────────────────────────
-
-    def scrape(self) -> List[LeadPayload]:
-        leads: List[LeadPayload] = []
-        leads.extend(self._scrape_mtjuliet())
-        # Future: Murfreesboro / Franklin / Brentwood / Hendersonville /
-        # Lebanon — see module docstring for blockers.
-        self.logger.info(f"total leads built: {len(leads)}")
-        return leads
-
-    # ── Mt. Juliet (SeeClickFix) ───────────────────────────────────────────
-
-    def _scrape_mtjuliet(self) -> List[LeadPayload]:
-        """Pull active code-enforcement issues from Mt. Juliet's SeeClickFix
-        feed. SeeClickFix returns paginated JSON; we walk pages until empty
-        or we hit a hard page cap."""
-        leads: List[LeadPayload] = []
+    def scrape(self):
+        self.feed_complete = False
+        self.issues = {}
         page = 1
-        max_pages = 40       # safety cap (~1000 issues)
-        per_page = 50
-
-        while page <= max_pages:
-            params = {
-                "place_url": MTJULIET_SCF_PLACE,
-                "per_page": str(per_page),
-                "page": str(page),
-                "status": "Open,Acknowledged",
-                "sort": "created_at",
-                "sort_direction": "DESC",
-            }
-            res = self.fetch(MTJULIET_SCF_BASE, params=params, timeout=30)
-            if res is None or res.status_code != 200:
-                self.logger.error(
-                    f"mt-juliet page {page} fetch failed: "
-                    f"{res.status_code if res else 'none'}"
-                )
+        while page <= 40:
+            response = self.fetch(MTJULIET_SCF_BASE, params={
+                "place_url": MTJULIET_SCF_PLACE, "per_page": 20, "page": page,
+                "status": "Open,Acknowledged", "sort": "created_at", "sort_direction": "DESC",
+            })
+            if response is None or response.status_code != 200:
+                raise RuntimeError(f"Mt. Juliet feed unavailable on page {page}")
+            data = response.json()
+            pagination = data["metadata"]["pagination"]
+            if pagination["page"] != page or not isinstance(data["issues"], list):
+                raise ValueError("Unexpected Mt. Juliet feed page")
+            for issue in data["issues"]:
+                self.issues[issue["id"]] = issue
+            if pagination["next_page"] is None:
+                if len(self.issues) != pagination["entries"]:
+                    raise ValueError("Mt. Juliet feed changed during pagination")
                 break
-
-            try:
-                data = res.json()
-            except Exception as e:
-                self.logger.error(f"mt-juliet page {page} JSON parse failed: {e}")
-                break
-
-            issues = data.get("issues") or []
-            self.logger.info(f"mt-juliet page {page}: {len(issues)} issues")
-            if not issues:
-                break
-
-            for issue in issues:
-                lead = self._build_mtjuliet_lead(issue)
-                if lead is not None:
-                    leads.append(lead)
-
-            # Stop when SeeClickFix says no next page
-            pagination = (data.get("metadata") or {}).get("pagination") or {}
-            if not pagination.get("next_page"):
-                break
+            if pagination["next_page"] != page + 1:
+                raise ValueError("Unexpected Mt. Juliet next page")
             page += 1
-
-        self.logger.info(f"mt-juliet leads built: {len(leads)}")
+        else:
+            raise RuntimeError("Incomplete Mt. Juliet feed")
+        leads = []
+        for issue in self.issues.values():
+            review = self.review(issue)
+            if review and review["finding"] == "reported_building_condition":
+                leads.append(LeadPayload(
+                    bot_source=self.name, pipeline_lead_key=self.make_lead_key(self.name, f"MJ-SCF-{issue['id']}"),
+                    property_address=review["reported_address"], county="Wilson County", distress_type="CODE_VIOLATION",
+                    source_url=review["source_url"], admin_notes="Citizen-reported building condition; enforcement unverified.",
+                    raw_payload={"city": "Mt. Juliet", "platform": "seeclickfix", "issue": {"id": issue["id"]}, REVIEW: review},
+                ))
+        self.feed_complete = True
         return leads
 
-    def _build_mtjuliet_lead(self, issue: Dict[str, Any]) -> Optional[LeadPayload]:
-        # Status gate — SeeClickFix sometimes returns stale Closed even
-        # when status filter is set, so re-check defensively.
-        status = (issue.get("status") or "").strip()
-        if status not in ACTIVE_SCF_STATUSES:
-            return None
-
-        # Request-type gate — keep only code-enforcement-flavored types.
-        # Public Works categories (street signs, potholes, dead animal)
-        # are never our deal.
+    def review(self, issue):
         rt = issue.get("request_type") or {}
-        rt_title = (rt.get("title") or "").strip()
-        if rt_title not in MTJULIET_CV_REQUEST_TYPES:
+        org = rt.get("organization")
+        if org not in (CODES_ORG, "Mt. Juliet, TN") or type(issue.get("id")) is not int:
             return None
+        status = issue.get("status")
+        address = self._normalize_address(issue.get("address") or "")
+        narrative = issue.get("description") or ""
+        match = next((m for m in BUILDING_CONDITION.finditer(narrative)
+                      if not re.search(r"\b(?:no(?: evidence of)?|not|without)\s+(?:an?\s+)?$", narrative[:m.start()], re.I)), None)
+        finding = "unverified"
+        if org != CODES_ORG:
+            finding = "outside_codes"
+        elif status in ("Closed", "Archived"):
+            finding = "closed_request"
+        elif status in ("Open", "Acknowledged"):
+            finding = "other_request"
+            if match and address and re.match(r"^[1-9]\d*\s+[A-Za-z]", address) and re.search(
+                    r"\b(?:Mt\.?|Mount) Juliet,? (?:TN|Tennessee)\b", address, re.I):
+                finding = "reported_building_condition"
+        return {"issue_id": issue["id"], "reported_address": address, "request_type": rt.get("title"), "organization": org,
+                "source_url": MTJULIET_HTML_BASE.format(id=issue["id"]), "checked_on": datetime.now(timezone.utc).date().isoformat(),
+                "reported_on": self._iso_date(issue.get("created_at")), "status": status, "finding": finding,
+                "condition_excerpt": match.group() if finding == "reported_building_condition" else None,
+                "enforcement_verified": False, "sale_authority_verified": False}
 
-        # Confirm the issue actually belongs to Mt. Juliet's org. SeeClickFix
-        # `place_url` matching is loose; the request_type's organization
-        # field is the truth.
-        rt_org = (rt.get("organization") or "").lower()
-        if "juliet" not in rt_org:
+    def existing_review(self, row):
+        ident = str(row.get("issue_id") or "")
+        if not ident.isdigit() or self.make_lead_key(self.name, "MJ-SCF-" + ident) != row["pipeline_lead_key"]:
             return None
-
-        issue_id = issue.get("id")
-        if issue_id is None:
+        issue = self.issues.get(int(ident))
+        if issue is None:
+            response = self.fetch(f"{MTJULIET_SCF_BASE}/{ident}")
+            if response is None or response.status_code != 200:
+                return None
+            issue = response.json()
+        review = self.review(issue)
+        if not review or str(review["issue_id"]) != ident or row["county"] != "Wilson County":
             return None
-        case_num = f"MJ-SCF-{issue_id}"
-
-        address = self._normalize_address(str(issue.get("address") or ""))
-        if not address:
+        address = review["reported_address"]
+        if not address or row["property_address"] not in (address, normalize_address(address).normalized):
             return None
+        return review
 
-        # Reuse the shared CV filter on whatever description text we
-        # have. SeeClickFix doesn't have a structured violation-code
-        # field, so we feed it `summary + description + request type`
-        # and let the filter cite-by-cite split.
-        violation_blob = " | ".join(
-            p for p in [
-                rt_title,
-                str(issue.get("summary") or "").strip(),
-                str(issue.get("description") or "").strip(),
-            ] if p
-        )
-        keep, reason = is_auctionable_cv(violation_blob)
-        if not keep:
-            return None
-
-        date_iso = self._iso_date(issue.get("created_at"))
-        notes_parts = [f"case {case_num}"]
-        if rt_title:
-            notes_parts.append(f"type: {rt_title}")
-        summary = (issue.get("summary") or "").strip()
-        if summary:
-            notes_parts.append(f"summary: {summary[:160]}")
-        if date_iso:
-            notes_parts.append(f"received: {date_iso}")
-        notes_parts.append(f"status: {status}")
-        notes_parts.append(f"filter: {reason}")
-
-        source_url = (
-            issue.get("html_url")
-            or MTJULIET_HTML_BASE.format(id=issue_id)
-        )
-
-        return LeadPayload(
-            bot_source=self.name,
-            pipeline_lead_key=self.make_lead_key(self.name, case_num),
-            property_address=address,
-            county="Wilson County",
-            owner_name_records=None,  # SeeClickFix doesn't expose owner of record
-            distress_type="CODE_VIOLATION",
-            admin_notes=" · ".join(notes_parts),
-            source_url=source_url,
-            raw_payload={
-                "city": "Mt. Juliet",
-                "platform": "seeclickfix",
-                "issue": issue,
-            },
-        )
-
-    # ── helpers ────────────────────────────────────────────────────────────
+    def _write_staging(self, leads):
+        if not getattr(self, "feed_complete", False):
+            return 0, 0
+        client = _supabase()
+        if client is None:
+            return 0, 0
+        known = set()
+        cursor = None
+        while True:
+            table = client.table("homeowner_requests_staging")
+            query = table.select("id,bot_source,pipeline_lead_key,county,property_address,phone_metadata,issue_id:raw_payload->issue->>id").eq("bot_source", self.name)
+            if cursor:
+                query = query.gt("id", cursor)
+            rows = query.order("id").limit(100).execute().data
+            for row in rows:
+                known.add(row["pipeline_lead_key"])
+                review = self.existing_review(row)
+                old = row["phone_metadata"]
+                if not review or (old is not None and not isinstance(old, dict)):
+                    self.logger.warning("Unverified Mt. Juliet request on staging row %s", row["id"])
+                    continue
+                if (old or {}).get(REVIEW) == review:
+                    continue
+                update = table.update({"phone_metadata": {**(old or {}), REVIEW: review}})
+                for field in ("id", "pipeline_lead_key", "bot_source", "county", "property_address"):
+                    update = update.eq(field, row[field])
+                update = update.eq("raw_payload->issue->>id", str(review["issue_id"]))
+                if not guard_phone_metadata(update, old).execute().data:
+                    self.logger.warning("Concurrent Mt. Juliet update skipped for %s", row["id"])
+            if len(rows) < 100:
+                break
+            cursor = rows[-1]["id"]
+        fresh = [lead for lead in leads if lead.pipeline_lead_key not in known]
+        staged, dupes = super()._write_staging(fresh) if fresh else (0, 0)
+        return staged, dupes + len(leads) - len(fresh)
 
     @staticmethod
     def _normalize_address(addr: str) -> Optional[str]:
@@ -274,7 +185,7 @@ class MtnCitiesCodesBot(BotBase):
             # Python 3.11+ accepts the offset directly.
             return datetime.fromisoformat(s).date().isoformat()
         except ValueError:
-            return s[:10] if len(s) >= 10 else None
+            return None
 
 
 def run() -> dict:
