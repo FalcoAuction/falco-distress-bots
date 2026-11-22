@@ -24,11 +24,13 @@ Distress type: N/A — utility enricher.
 from __future__ import annotations
 
 import os
+import json
+import re
 import sys
 import tempfile
 import traceback as tb
 import zipfile
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._aircraft_match import AircraftIndex, build_index_from_zip
@@ -39,7 +41,29 @@ FAA_ZIP_URL = "https://registry.faa.gov/database/ReleasableAircraft.zip"
 # otherwise (the court-feed bot stages FL leads with state=FL).
 STATES = ("TN", "FL")
 # One download per process: the court-feed bot and this bot share it.
-_INDEX_CACHE: Dict[str, AircraftIndex] = {}
+_INDEX_CACHE: Dict[str, Any] = {}
+
+
+def evidence_tags(index, lead):
+    """Retain weak matches for research; never confuse shared address with identity."""
+    def identity(name):
+        return sorted(re.findall(r"[A-Z0-9]+", str(name or "").upper()))
+    names = [identity(lead.get(k)) for k in
+             ("owner_name_records", "full_name", "subject", "owner_name_1", "owner_name_2")]
+    tags = index.match(lead)
+    for tag in tags:
+        registrants = [tag.get("registrant")] + (tag.get("co_owners") or [])
+        tag.update(verified_on=date.today().isoformat(),
+                   registry_date=getattr(index, "registry_date", None), source_url=FAA_ZIP_URL,
+                   identity_verified=any(identity(n) in names for n in registrants if identity(n)),
+                   title_status="not_established", availability="unknown")
+        try:
+            expiry = datetime.strptime(tag.get("registration_expires", ""), "%Y%m%d").date()
+            if expiry <= date.today():
+                tag["identity_verified"] = False
+        except (ValueError, TypeError):
+            tag["identity_verified"] = False
+    return sorted(tags, key=lambda t: (t["confidence"] != "high", t["n_number"]))
 
 # Flattened raw_payload fields the matcher reads. PostgREST JSON-path
 # selects keep the page small; the full raw_payload is fetched only for
@@ -94,7 +118,7 @@ class FaaAircraftBot(BotBase):
             for table in ("homeowner_requests", "homeowner_requests_staging"):
                 for lead in self._leads(client, table):
                     scanned += 1
-                    tags = sorted(index.match(lead), key=lambda t: (t["confidence"] != "high", t["n_number"]))
+                    tags = evidence_tags(index, lead)
                     had = lead.get("_aircraft")
                     if tags:
                         matched += 1
@@ -104,12 +128,16 @@ class FaaAircraftBot(BotBase):
                     raw = self._raw_payload(client, table, lead["id"])
                     if raw is None:
                         continue  # raw_payload holds a non-object; never clobber it
+                    original = dict(raw)
                     if tags:
                         raw["aircraft"] = tags
                     else:
                         raw.pop("aircraft", None)
                     try:
-                        client.table(table).update({"raw_payload": raw}).eq("id", lead["id"]).execute()
+                        result = client.table(table).update({"raw_payload": raw}).eq("id", lead["id"]) \
+                            .eq("raw_payload", json.dumps(original)).execute()
+                        if not getattr(result, "data", None):
+                            raise RuntimeError("concurrent change or missing row; retry next run")
                         if tags:
                             tagged += 1
                             self.logger.info(
@@ -118,6 +146,7 @@ class FaaAircraftBot(BotBase):
                         else:
                             cleared += 1
                     except Exception as e:
+                        error_message = "aircraft_update_failed"
                         self.logger.warning(f"  update failed {table} id={lead['id']}: {e}")
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{tb.format_exc()}"
@@ -140,11 +169,13 @@ class FaaAircraftBot(BotBase):
     # ── FAA registry ────────────────────────────────────────────────────
 
     def _load_index(self) -> Optional[AircraftIndex]:
-        if "index" in _INDEX_CACHE:
+        cache_key = (date.today().isoformat(), os.environ.get("FALCO_FAA_ZIP"))
+        if _INDEX_CACHE.get("key") == cache_key:
             return _INDEX_CACHE["index"]
         index = self._build_index()
         if index is not None:
             _INDEX_CACHE["index"] = index
+            _INDEX_CACHE["key"] = cache_key
         return index
 
     def _build_index(self) -> Optional[AircraftIndex]:
@@ -152,7 +183,7 @@ class FaaAircraftBot(BotBase):
         local = os.environ.get("FALCO_FAA_ZIP")
         if local and os.path.exists(local):
             with zipfile.ZipFile(local) as zf:
-                return build_index_from_zip(zf, STATES)
+                return self._validated_index(zf)
         fd, path = tempfile.mkstemp(suffix=".zip")
         os.close(fd)
         try:
@@ -164,12 +195,23 @@ class FaaAircraftBot(BotBase):
                 for chunk in res.iter_content(1 << 20):
                     f.write(chunk)
             with zipfile.ZipFile(path) as zf:
-                return build_index_from_zip(zf, STATES)
+                return self._validated_index(zf)
         finally:
             try:
                 os.remove(path)
             except OSError:
                 pass
+
+    @staticmethod
+    def _validated_index(zf):
+        registry_date = date(*zf.getinfo("MASTER.txt").date_time[:3])
+        if not 0 <= (date.today() - registry_date).days <= 7:
+            raise ValueError("FAA snapshot stale or future-dated; retain existing evidence")
+        index = build_index_from_zip(zf, STATES)
+        if not index.by_addr:
+            raise ValueError("FAA snapshot empty; refuse mass removal")
+        index.registry_date = registry_date.isoformat()
+        return index
 
     # ── Supabase I/O ────────────────────────────────────────────────────
 

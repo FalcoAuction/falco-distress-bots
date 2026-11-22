@@ -88,8 +88,8 @@ class LiquidationTests(unittest.TestCase):
         self.assertEqual(t["categories"], ["business_assets"])
         self.assertEqual(t["controller"], "chapter 7 trustee")
         self.assertEqual(t["primary_contact"], "Trustee Eva M Lemeh")
-        self.assertTrue(t["routable"])
-        self.assertEqual(t["route_to"], "McLemore Auction Company")
+        self.assertFalse(t["routable"])
+        self.assertIsNone(t["route_to"])
 
     def test_chapter_11_business_not_tagged(self):
         self.assertIsNone(classify(lead("BANKRUPTCY", {"chapter": "11"}, full_name="MyEyeris, Inc.")))
@@ -147,6 +147,171 @@ class OwnerAssetTests(unittest.TestCase):
 
     def test_no_signal_no_tag(self):
         self.assertIsNone(classify(lead("PRE_FORECLOSURE", property_value=2_500_000)))
+
+
+
+class EvidenceRoutingTests(unittest.TestCase):
+    def fixture(self):
+        from datetime import date
+        today = date.today().isoformat()
+        fact = {'verified_on': today, 'source_url': 'https://example.org/record'}
+        ev = {'subject_name': 'Jane Doe',
+              'assets': [dict(fact, asset_id='N722AP', kind='aircraft', serial='123',
+                              registrant='DOE JANE', description='SF50')],
+              'controller': dict(fact, name='Jane Doe', role='owner', authority='verified'),
+              'availability': dict(fact, status='available'),
+              'liens': dict(fact, status='reviewed'), 'court': dict(fact, status='permitted'),
+              'valuation': dict(fact, amount=300000),
+              'deadline': dict(fact, status='none_documented')}
+        plane = dict(JET, serial='123', registrant='DOE JANE', identity_verified=True,
+                     verified_on=today, registry_date=today, registration_status='V')
+        return lead('TAX_LIEN', {'aircraft': [plane], 'personal_property_evidence': ev}, full_name='Jane Doe')
+
+    def test_documented_asset_routes_without_title_assumption(self):
+        t = classify(self.fixture())
+        self.assertTrue(t['routable'])
+        self.assertEqual(t['controller'], 'Jane Doe')
+        self.assertEqual(t['title_status'], 'not_established')
+
+    def test_changes_and_unknowns_revoke_routing(self):
+        for key in ('availability', 'liens', 'controller', 'deadline'):
+            with self.subTest(key=key):
+                row = self.fixture()
+                row['raw_payload']['personal_property_evidence'][key]['verified_on'] = '2000-01-01'
+                self.assertFalse(classify(row)['routable'])
+        row = self.fixture()
+        row['distress_type'] = 'BANKRUPTCY'
+        row['raw_payload']['personal_property_evidence']['court']['verified_on'] = '2000-01-01'
+        self.assertFalse(classify(row)['routable'])
+        for key, value in [('serial', 'other'), ('registrant', 'OTHER'), ('identity_verified', False),
+                           ('registration_status', 'D'), ('registry_date', '2000-01-01')]:
+            row = self.fixture()
+            row['raw_payload']['aircraft'][0][key] = value
+            self.assertFalse(classify(row)['routable'])
+        row = self.fixture()
+        row['raw_payload']['aircraft'] = []
+        self.assertFalse(classify(row)['routable'])
+        row = self.fixture()
+        row['full_name'] = 'Someone Else'
+        self.assertFalse(classify(row)['routable'])
+
+    def test_proxies_remain_research(self):
+        rows = [lead('PROBATE', property_value=3000000),
+                lead('BANKRUPTCY', {'chapter': '7'}, full_name='Construction LLC'),
+                lead('PROBATE', {'aircraft': [JET]}),
+                lead('PROBATE', {'outbuildings': [{'type': 'detached garage', 'area': 900}]})]
+        for row in rows:
+            t = classify(row)
+            self.assertFalse(t['routable'])
+            self.assertEqual(t['qualification'], 'research')
+
+    def test_asset_deadline_not_mortgage_date(self):
+        row = self.fixture()
+        row['trustee_sale_date'] = '2000-01-01'
+        self.assertIsNone(classify(row)['deadline'])
+        row['raw_payload']['personal_property_evidence']['deadline']['date'] = '2000-01-01'
+        self.assertFalse(classify(row)['routable'])
+
+class FaaRefreshTests(unittest.TestCase):
+    def test_current_identity_produces_visible_prospect(self):
+        from datetime import date
+        from types import SimpleNamespace
+        from src.bots.faa_aircraft_bot import evidence_tags
+        today = date.today().isoformat()
+        index = SimpleNamespace(registry_date=today, match=lambda row: [dict(
+            JET, serial='123', registrant='DOE JANE', registration_status='V',
+            registration_expires='20990101')])
+        row = lead('TAX_LIEN', full_name='Jane Doe')
+        row['raw_payload']['aircraft'] = evidence_tags(index, row)
+        tag = classify(row)
+        self.assertEqual(tag['qualification'], 'qualified_prospect')
+        self.assertFalse(tag['routable'])
+        self.assertTrue(tag['holds'])
+        self.assertEqual(tag['registry_assets'][0]['serial'], '123')
+        row['full_name'] = 'Other Person'
+        row['raw_payload']['aircraft'] = evidence_tags(index, row)
+        self.assertEqual(classify(row)['qualification'], 'research')
+
+    def test_cache_refreshes_next_day_and_rejects_stale_zip(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from src.bots.faa_aircraft_bot import FaaAircraftBot, _INDEX_CACHE
+        bot = FaaAircraftBot()
+        _INDEX_CACHE.clear()
+        try:
+            with patch.object(bot, '_build_index', return_value=SimpleNamespace()) as build:
+                bot._load_index()
+                bot._load_index()
+                self.assertEqual(build.call_count, 1)
+                _INDEX_CACHE['key'] = ('2000-01-01', None)
+                bot._load_index()
+                self.assertEqual(build.call_count, 2)
+            zf = SimpleNamespace(getinfo=lambda name: SimpleNamespace(date_time=(2000, 1, 1)))
+            with self.assertRaises(ValueError):
+                bot._validated_index(zf)
+        finally:
+            _INDEX_CACHE.clear()
+
+class ScheduledLaneTests(unittest.TestCase):
+    def test_overlay_then_lane_changed_and_removed_registry(self):
+        import json
+        from copy import deepcopy
+        from datetime import date
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from src.bots.faa_aircraft_bot import FaaAircraftBot
+        from src.bots.personal_property_lane_bot import PersonalPropertyLaneBot, _RAW_TEXT, _RAW_JSON
+        stored = {'id': '1', 'distress_type': 'TAX_LIEN', 'full_name': 'Jane Doe',
+                  'raw_payload': {'unrelated': {'keep': True}}}
+        class Client:
+            def table(self, table):
+                self.expected = None
+                return self
+            def update(self, values):
+                self.values = values
+                return self
+            def eq(self, key, value):
+                if key == 'raw_payload':
+                    self.expected = json.loads(value)
+                return self
+            def execute(self):
+                if self.expected != stored['raw_payload']:
+                    return SimpleNamespace(data=[])
+                stored.update(deepcopy(self.values))
+                return SimpleNamespace(data=[stored])
+        client = Client()
+        planes = [dict(JET, serial='123', registrant='DOE JANE', registration_status='V',
+                       registration_expires='20990101')]
+        index = SimpleNamespace(registry_date=date.today().isoformat(), by_addr={},
+                                match=lambda row: deepcopy(planes))
+        faa, lane = FaaAircraftBot(), PersonalPropertyLaneBot()
+        def faa_rows(client, table):
+            return [{**stored, '_aircraft': stored['raw_payload'].get('aircraft')}] if table == 'homeowner_requests' else []
+        def lane_rows(client, table):
+            if table != 'homeowner_requests':
+                return []
+            raw = stored['raw_payload']
+            return [{**stored, **{k: raw.get(k) for k in _RAW_TEXT + _RAW_JSON}, '_pp': raw.get('personal_property')}]
+        with patch('src.bots.faa_aircraft_bot._supabase', return_value=client), \
+             patch('src.bots.personal_property_lane_bot._supabase', return_value=client), \
+             patch.object(faa, '_load_index', return_value=index), \
+             patch.object(faa, '_leads', side_effect=faa_rows), \
+             patch.object(lane, '_rows', side_effect=lane_rows), \
+             patch.object(faa, '_raw_payload', side_effect=lambda *a: deepcopy(stored['raw_payload'])), \
+             patch.object(lane, '_raw_payload', side_effect=lambda *a: deepcopy(stored['raw_payload'])), \
+             patch.object(faa, '_report_health'), patch.object(lane, '_report_health'):
+            self.assertEqual(faa.run()['status'], 'ok')
+            self.assertEqual(lane.run()['status'], 'ok')
+            self.assertEqual(stored['raw_payload']['personal_property']['qualification'], 'qualified_prospect')
+            planes[0]['registrant'] = 'SOMEONE ELSE'
+            faa.run()
+            lane.run()
+            self.assertEqual(stored['raw_payload']['personal_property']['qualification'], 'research')
+            planes.clear()
+            faa.run()
+            lane.run()
+            self.assertNotIn('personal_property', stored['raw_payload'])
+            self.assertEqual(stored['raw_payload']['unrelated'], {'keep': True})
 
 
 if __name__ == "__main__":

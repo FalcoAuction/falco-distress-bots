@@ -18,6 +18,7 @@ Distress type: N/A — utility enricher.
 from __future__ import annotations
 
 import sys
+import json
 import traceback as tb
 from collections import Counter
 from datetime import datetime, timezone
@@ -32,7 +33,7 @@ _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "c
              "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor",
              "trustee", "sale_date")
 _RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
-             "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts")
+             "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts", "personal_property_evidence")
 _BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value, trustee_sale_date"
 
 
@@ -86,12 +87,22 @@ class PersonalPropertyLaneBot(BotBase):
                     full = self._raw_payload(client, table, row["id"])
                     if full is None:
                         continue  # raw_payload holds a non-object; never clobber it
+                    original = dict(full)
+                    # The projection may have changed while this page was processed.
+                    # Defer rather than attach a decision to different evidence.
+                    if (any(full.get(k) != raw.get(k) for k in _RAW_JSON)
+                            or any(str(full.get(k)) != str(raw.get(k)) for k in _RAW_TEXT)):
+                        error_message = "personal_property_evidence_changed; retry next run"
+                        continue
                     if tag:
                         full["personal_property"] = tag
                     else:
                         full.pop("personal_property", None)
                     try:
-                        client.table(table).update({"raw_payload": full}).eq("id", row["id"]).execute()
+                        result = client.table(table).update({"raw_payload": full}).eq("id", row["id"]) \
+                            .eq("raw_payload", json.dumps(original)).execute()
+                        if not getattr(result, "data", None):
+                            raise RuntimeError("concurrent change or missing row; retry next run")
                         if tag:
                             tagged += 1
                             self.logger.info(f"  {table} {row['id']} {tag['lane']}/{tag['grade']}: "
@@ -99,6 +110,7 @@ class PersonalPropertyLaneBot(BotBase):
                         else:
                             cleared += 1
                     except Exception as e:
+                        error_message = "personal_property_update_failed"
                         self.logger.warning(f"  update failed {table} id={row['id']}: {e}")
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{tb.format_exc()}"
