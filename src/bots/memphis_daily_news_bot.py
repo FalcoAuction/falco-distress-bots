@@ -35,6 +35,7 @@ from bs4 import BeautifulSoup
 from requests.adapters import HTTPAdapter
 
 from ._base import BotBase, LeadPayload
+from ._memphis_notice_evidence import publisher_evidence
 
 
 MDN_BASE = "https://www.memphisdailynews.com"
@@ -141,12 +142,18 @@ class MemphisDailyNewsBot(BotBase):
             # A stale/default detail page must never refresh another notice.
             if (detail.get("tdn_no") != fid
                     or self._identity(detail.get("borrower")) != self._identity(entry["borrower"])
-                    or self._identity(detail.get("address")) != self._identity(entry["address"])
-                    or self._iso_date(detail.get("advertised_auction_date")) != entry["sale_date"]):
+                    or self._identity(detail.get("address")) != self._identity(entry["address"])):
                 self.collection_stats["invalid"] += 1
                 continue
             lead = self._build_lead(detail, fid, pub_date)
             if lead is not None:
+                clause = (lead.raw_payload or {}).get("published_sale_clause")
+                if lead.trustee_sale_date != entry["sale_date"] and not (clause and entry["sale_date"] is None):
+                    self.collection_stats["invalid"] += 1
+                    continue
+                if lead.trustee_sale_date and lead.trustee_sale_date < date.today().isoformat():
+                    self.collection_stats["past"] += 1
+                    continue
                 leads.append(lead)
         self.collection_stats["unique_notices"] = len(candidates)
         self.collection_stats["partial"] |= bool(self.collection_stats["failed"] or self.collection_stats["invalid"])
@@ -272,7 +279,12 @@ class MemphisDailyNewsBot(BotBase):
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"
         source_url = f"{DETAIL_URL}?id={fid}&date={date_param}"
 
+        evidence = publisher_evidence(detail, county, fid, source_url)
+        if "published_sale_clause" in evidence:
+            sale_date = evidence["published_sale_clause"]["date"]
+
         raw = {
+            **evidence,
             "structured": {k: detail.get(k) for k in (
                 "borrower", "address", "original_trustee", "attorney",
                 "instrument_no", "substitute_trustee", "advertised_auction_date",
