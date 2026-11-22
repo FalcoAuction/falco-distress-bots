@@ -130,27 +130,23 @@ _DECEDENT_RES = [
 _DIED_RE = re.compile(r"who died(?: on)?\s+([A-Za-z]{3,9}\.? \d{1,2},? \d{4}|\d{1,2}/\d{1,2}/\d{2,4})", re.I)
 _LETTERS_RE = re.compile(r"on the (\d{1,2})(?:st|nd|rd|th)? day of ([A-Za-z]+),?\s*(\d{4})?", re.I)
 _LETTERS_TYPE_RE = re.compile(r"Letters\s+(?:of\s+)?(Testamentary|Administration|Authority)", re.I)
-_ROLE_RE = re.compile(
-    r"^(?:co[- ]?)?(executor|executrix|executors|administrator|administratrix|administrators|personal representative)",
-    re.I,
-)
-_ROLE_TAIL_RE = re.compile(
-    r"\s*,?\s*((?:co-?)?(?:executor|executrix|executors|administrator|administratrix|administrator\(s\)|administrators"
-    r"|personal representative(?:\(s\))?)s?)\b.*$",
-    re.I,
-)
+_SIGNER_ROLE = (r"(?:co[- ]?)?(?:executors?|executrix|administrators?|administratrix|personal representatives?)"
+                r"(?:\(s\))?")
+_ROLE_END = r"(?:\s+of (?:the )?estate(?:\s+of\s+.+)?)?\s*[:.,]?\s*$"
+_ROLE_RE = re.compile(r"^(" + _SIGNER_ROLE + ")" + _ROLE_END, re.I)
+_ROLE_TAIL_RE = re.compile(r"(?:\s*[,–—]\s*|\s+-\s+|\s+)(" + _SIGNER_ROLE + ")" + _ROLE_END, re.I)
 _ATTORNEY_INLINE_RE = re.compile(r"^(?:Estate\s+)?Attorney(?: for [A-Za-z ()]+)?\s*:\s*(.+)$", re.I)
 _ATTORNEY_MARK_RE = re.compile(r"^(?:Estate\s+)?Attorney(?: for [A-Za-z ()]+)?\s*:?\s*$", re.I)
 # "Attorney for Kirsten E. Feinberg, Executrix": names the client and her role;
 # the attorney is the name on the line above.
 _ATTORNEY_FOR_PERSON_RE = re.compile(
-    r"^Attorney for (.+?),\s*((?:co-?)?(?:executor|executrix|administrator|administratrix|personal representative))\b", re.I)
+    r"^Attorney for (.+?),\s*(" + _SIGNER_ROLE + ")" + _ROLE_END, re.I)
 # A docket line: "Case No.: MC CH CV PB-26-417", "Probate Docket No.: P-4289".
 _DOCKET_LINE_RE = re.compile(r"^(?:Probate\s+)?(?:Docket|Case|File)\s*(?:No\.?|Number|#)?\s*:?\s*([A-Za-z0-9][A-Za-z0-9 \-]{2,40})$", re.I)
 _ATTORNEY_AFTER_RE = re.compile(r"^Attorney for (?:the )?(?:Personal Representative|Estate|Executor|Administrator)", re.I)
 # "Dickson, TN 37055" and, in Main Street Media papers, "Dickson TN 37055".
 _CITY_ZIP_RE = re.compile(r"^[A-Za-z .']+?,?\s+(?:TN|Tennessee|[A-Z]{2})\.?,?\s+\d{5}(?:-\d{4})?$")
-_STREET_RE = re.compile(r"^\d+[A-Za-z]?\s+\S+|^(?:P\.?\s?O\.?\s+Box|Suite|Ste\.?|Room)\b", re.I)
+_STREET_RE = re.compile(r"^\d+(?:-?[A-Za-z]|-\d+)?\s+\S+|^(?:P\.?\s?O\.?\s+Box|Suite|Ste\.?|Room)\b", re.I)
 _STOP_RE = re.compile(r"clerk|deputy|^(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.? \d", re.I)
 _SIGNED_RE = re.compile(r"^This\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?\s+day of", re.I)
 
@@ -234,8 +230,8 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
     label_role: Optional[str] = None  # set by "Personal Representative:" style labels
 
     def role_name(word: str) -> str:
-        word = word.lower()
-        return "executor" if word.startswith(("exec", "co-exec", "coexec")) else \
+        word = re.sub(r"^co[- ]?", "", word.lower())
+        return "executor" if word.startswith("exec") else \
             "administrator" if "admin" in word else "personal_representative"
 
     def flush_reps(role: Optional[str] = None) -> None:
@@ -253,6 +249,16 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
         pending_address.clear()
 
     for line in block:
+        # An explicit client other than the estate/representative ends the estate signature block.
+        client = re.search(r"(?:^|,\s*)Attorney for\s+([^:]+)", line, re.I)
+        if (client and not _ATTORNEY_FOR_PERSON_RE.match(line)
+                and not re.fullmatch(r"(?:the )?(?:estate(?: of .+)?|" + _SIGNER_ROLE + r")", client[1].strip(), re.I)):
+            if mode == "attorney" and ":" not in line and line.lower().startswith("attorney for"):
+                # A following client label makes the preceding unlabelled counsel ambiguous.
+                attorney = {"names": [], "address": []}
+            pending_names.clear()
+            pending_address.clear()
+            break
         if mode == "attorney":
             if _is_address(line):
                 attorney["address"].append(line)
@@ -276,7 +282,7 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
             attorney["names"].append(_name(trailing.group(1)))
             continue
         inline = _ATTORNEY_INLINE_RE.match(line)
-        if inline and not _ATTORNEY_AFTER_RE.match(line):
+        if inline:
             if pending_names:
                 flush_reps()
             attorney["names"].append(_name(inline.group(1)))
@@ -335,7 +341,7 @@ def _parse_signers(block: List[str]) -> Dict[str, Any]:
     if pending_names and mode == "reps":
         # Names with no role line: treat as representatives, never guess an attorney.
         flush_reps()
-    attorney["names"] = [n for n in attorney["names"] if n and len(n) < 80]
+    attorney["names"] = [n for n in attorney["names"] if probate_name(n)]
     return {"representatives": reps, "attorney": attorney}
 
 

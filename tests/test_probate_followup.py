@@ -27,6 +27,35 @@ class ProbateFollowupTests(unittest.TestCase):
         self.assertEqual(review["attorney_draft_hold_reasons"], [])
         self.assertFalse(review["sale_authority_verified"])
 
+    def test_printed_roles_are_distinct_from_property_authority(self):
+        lines = DAVIDSON[:DAVIDSON.index("Fay Fictional")] + [
+            "Robin Lane - Administratrix", "Attorney for the Estate:", "Jordan Jones",
+            "233-A Example Road", "Clarksville, TN 37041", "Attorney for creditor: Riley Claims",
+        ]
+        lead = notice(lines)
+        fields = lead.raw_payload["court_notice"]
+        self.assertEqual([(r["name"], r["role"]) for r in fields["representatives"]],
+                         [("Robin Lane", "administrator")])
+        self.assertEqual(fields["attorney"], {"names": ["Jordan Jones"],
+                                              "address": ["233-A Example Road", "Clarksville, TN 37041"]})
+        self.assertIsNone(lead.property_address)
+        self.assertFalse(lead.raw_payload["probate_review"]["sale_authority_verified"])
+        self.assertTrue(lead.raw_payload["probate_review"]["contact_hold"])
+        prior = {**lead.raw_payload, "court_notice": {**fields, "representatives": []}}
+        patch = refresh_patch({"raw_payload": prior}, lead)
+        self.assertEqual(patch["raw_payload"]["court_notice"], fields)
+        self.assertIsNone(refresh_patch({"raw_payload": patch["raw_payload"]}, lead))
+
+    def test_other_signers_do_not_supply_estate_roles(self):
+        for lines in (["Morgan Example", "Attorney for the Estate: Riley Counsel"],
+                      ["Morgan Example, Executor's agent", "Attorney for the Estate: Riley Counsel"]):
+            parsed = cn._parse_signers(lines)
+            self.assertEqual(parsed["representatives"], [])
+            self.assertEqual(parsed["attorney"]["names"], ["Riley Counsel"])
+        for lines in (["Riley Claims, Attorney for Creditor"], ["Attorney for Creditor:", "Riley Claims"],
+                      ["Riley Claims", "Attorney for Morgan Example, Executor's agent"]):
+            self.assertEqual(cn._parse_signers(lines), {"representatives": [], "attorney": {"names": [], "address": []}})
+
     def test_actual_closed_expired_and_removed_clauses(self):
         for clause in ("the estate has been closed", "Letters Testamentary were revoked",
                        "the case was dismissed", "Letters of Authority expired", "the executor was discharged"):
