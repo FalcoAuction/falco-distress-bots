@@ -425,7 +425,7 @@ class BotBase:
         dupes = 0
         now_iso = datetime.now(timezone.utc).isoformat()
 
-        def _touch_last_seen(table: str, row: dict, lead: LeadPayload) -> None:
+        def _touch_last_seen(table: str, row: dict, lead: LeadPayload, *, unique=True) -> None:
             """Record a sighting; direct trustee dates require the same case and property."""
             try:
                 existing_pm = row.get("phone_metadata")
@@ -465,6 +465,10 @@ class BotBase:
                     tracking["published_sale_date"] = lead.trustee_sale_date
                     tracking["case_number"] = case
 
+                if unique and self.name == lead.bot_source == "memphis_daily_news" and table == "homeowner_requests_staging":
+                    from ._memphis_notice_evidence import repeat_evidence
+                    repeat_evidence(lead, row, tracking, guards, patch)
+
                 pm["notice_tracking"] = {**tracking, "last_seen_at": seen_at, "last_seen_by": self.name}
                 update = client.table(table).update(patch)
                 for key, value in guards.items():
@@ -502,11 +506,18 @@ class BotBase:
                 if direct_list:
                     columns += ",property_address,county,trustee_sale_date"
 
+                staging_columns = columns + ",staging_status" if direct_list else columns
+                if self.name == source == "memphis_daily_news":
+                    staging_columns += (",county,property_address,trustee_sale_date,tdn:raw_payload->structured->>tdn_no,"
+                                        "loan:raw_payload->structured->>instrument_no,"
+                                        "substitute_trustee_appointment:raw_payload->substitute_trustee_appointment,"
+                                        "published_sale_clause:raw_payload->published_sale_clause")
+
                 # Promoted direct listings still need their staging date refreshed.
                 try:
                     lookup = (
                         client.table("homeowner_requests_staging")
-                        .select(columns + ",staging_status" if direct_list else columns)
+                        .select(staging_columns)
                         .eq("bot_source", source)
                         .in_("pipeline_lead_key", keys)
                     )
@@ -552,7 +563,7 @@ class BotBase:
                     hit = pending.get(lead.pipeline_lead_key)
                     if hit:
                         for record in hit:
-                            _touch_last_seen("homeowner_requests_staging", record, lead)
+                            _touch_last_seen("homeowner_requests_staging", record, lead, unique=len(hit) == 1)
                         dupes += 1
                     else:
                         new_rows.append(lead.as_db_row(scraper_run_id=self.run_id))
