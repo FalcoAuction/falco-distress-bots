@@ -142,6 +142,11 @@ class LeadTests(unittest.TestCase):
         bot = ShelbySubstituteTrusteeBot()
         row = parse_results(RESULTS)[1]
         lead = build_lead(bot, row, parse_detail(APPT_OLD_BOOK), None)
+        self.assertEqual(lead.raw_payload["appointment_cross_references"],
+                         [{"instrument": "LM6983", "year": "2001"}])
+        self.assertIsNone(lead.raw_payload["deed_of_trust"])
+        self.assertIsNone(lead.raw_payload["parcel_id"])
+        self.assertEqual(lead.raw_payload["party_basis"], "lender_words")
         self.assertIsNone(lead.property_address)
         self.assertIsNone(lead.mortgage_balance)
         self.assertEqual(lead.owner_name_records, "ROE RICHARD; ROE RITA")

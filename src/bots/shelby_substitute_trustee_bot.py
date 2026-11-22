@@ -96,6 +96,9 @@ def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Opt
             "recorded": row["recorded"], "appointment_date": (appt or {}).get("instrument_date"),
             "lenders": parties["lenders"], "borrowers": parties["borrowers"], "party_basis": parties["basis"],
             "substitute_trustees": sub_trustees, "deed_of_trust": (appt and deed_of_trust_ref(appt)) or None,
+            # Preserve the index evidence even when a legacy reference cannot
+            # be resolved by the numeric deed-of-trust lookup.
+            **({"appointment_cross_references": appt["xrefs"]} if appt and appt.get("xrefs") else {}),
             "parcel_id": (dot or {}).get("parcel_id"), "subdivision": (dot or {}).get("subdivision"),
             "loan": loan or None,
         },
