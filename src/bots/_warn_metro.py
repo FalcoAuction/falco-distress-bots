@@ -31,10 +31,10 @@ def worksite_parcel(worksite, fetch):
     if not isinstance(page, dict) or page.get("error") or page.get("exceededTransferLimit"):
         return None
     features = page.get("features")
-    if not isinstance(features, list) or len(features) != 1:
+    if not isinstance(features, list) or len(features) != 1 or not isinstance(features[0], dict):
         return None
     record = features[0].get("attributes") or {}
-    if (str(record.get("PropAddr") or "").strip().upper() != target
+    if (not isinstance(record, dict) or str(record.get("PropAddr") or "").strip().upper() != target
             or not record.get("APN") or not record.get("Owner")):
         return None
     return {"county": "davidson", "parcel_id": record["APN"], "property_address": record["PropAddr"],
