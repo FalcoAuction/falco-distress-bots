@@ -29,6 +29,7 @@ except ImportError:
     pdfplumber = None
 
 from ._base import BotBase, LeadPayload, _supabase, guard_phone_metadata
+from ._knoxville_case_status import attach_city_records
 
 
 KNOXVILLE_HEARINGS_URL = "https://www.knoxvilletn.gov/173/Better-Building-Board-Public-Officer-Hea"
@@ -159,6 +160,7 @@ class KnoxvillePohBot(BotBase):
         client = _supabase()
         if client is None:
             return 0, 0
+        attach_city_records(self._reviews.values(), self.logger)
         keys = list(self._reviews)
         existing = []
         for offset in range(0, len(keys), 80):
