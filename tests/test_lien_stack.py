@@ -147,6 +147,19 @@ class ShortlistTests(unittest.TestCase):
         self.assertEqual(register_system("Robertson County"), "titlesearcher")
         self.assertEqual(register_system("sumner"), "ustitlesearch")
 
+    def test_mackie_uses_current_date_and_honors_missing_file_review(self):
+        row = self.opp(bot_source="mackie_wolf_trustee", sale_date="2026-12-01",
+                       trustee_sale_date="2027-03-02")
+        ok, detail = screen(row, {}, TODAY)
+        self.assertTrue(ok)
+        self.assertEqual(detail["days_to_sale"], (date(2027, 3, 2) - TODAY).days)
+        row["phone_metadata"] = {"trustee_notice_review": {"reason": "stale_notice"}}
+        self.assertFalse(screen(row, {}, TODAY)[0])
+        row["phone_metadata"] = {"sale_status": {"status": "ran"}}
+        self.assertFalse(screen(row, {}, TODAY)[0])
+        row.update(phone_metadata={}, trustee_sale_date=None)
+        self.assertFalse(screen(row, {}, TODAY)[0])
+
 
 if __name__ == "__main__":
     unittest.main()
