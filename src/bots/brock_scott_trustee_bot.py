@@ -91,7 +91,8 @@ class BrockScottTrusteeBot(BotBase):
 
     def scrape(self) -> List[LeadPayload]:
         leads: List[LeadPayload] = []
-        seen_keys: set[str] = set()
+        listings = {}
+        conflicts = set()
 
         for page in range(1, self.max_pages + 1):
             url = BS_INDEX if page == 1 else f"{BS_INDEX}page/{page}/"
@@ -114,9 +115,13 @@ class BrockScottTrusteeBot(BotBase):
                 lead = self._lead_from_fields(fields)
                 if lead is None:
                     continue
-                if lead.pipeline_lead_key in seen_keys:
+                key = lead.pipeline_lead_key
+                signature = (lead.county, lead.property_address, lead.trustee_sale_date)
+                if key in listings:
+                    if listings[key] != signature:
+                        conflicts.add(key)
                     continue
-                seen_keys.add(lead.pipeline_lead_key)
+                listings[key] = signature
                 leads.append(lead)
                 new_this_page += 1
 
@@ -126,6 +131,9 @@ class BrockScottTrusteeBot(BotBase):
                 self.logger.info(f"page {page}: 0 new — stopping pagination")
                 break
 
+        if conflicts:
+            self.logger.warning("Withheld %s conflicting trustee listing keys", len(conflicts))
+            leads = [lead for lead in leads if lead.pipeline_lead_key not in conflicts]
         self.logger.info(f"parsed {len(leads)} TN listings across {page} page(s)")
         return leads
 
