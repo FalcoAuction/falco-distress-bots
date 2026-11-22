@@ -20,7 +20,7 @@ distress type, not the category.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import datetime
 from typing import Dict, List, Optional
 
 TRUSTEE_SALE_RE = re.compile(
@@ -45,6 +45,10 @@ EXECUTED_BY_RE = re.compile(
     re.IGNORECASE | re.DOTALL)
 BOOK_PAGE_RE = re.compile(r"\bBook\s+(\d{1,6})\s*,?\s*Pages?(?:\s*\(s\))?\s+(\d{1,5})", re.IGNORECASE)
 INSTRUMENT_RE = re.compile(r"\bInstrument\s+(?:Number|No\.?|#)\s*:?\s*([0-9][0-9\-]{3,})", re.IGNORECASE)
+FROM_GRANTOR_RE = re.compile(
+    r"\bdeed of trust from ([A-Za-z][A-Za-z .&'\-]{2,110}?)\s*\(.?grantors?\b", re.I)
+CONVEYED_RE = re.compile(
+    r"\bCounty,\s*Tennessee,\s*([A-Za-z][A-Za-z .&'\-]{2,110}?)\s+conveyed the\b", re.I)
 ENTITY_RE = re.compile(r"\b(LLC|L\.L\.C|INC|CORP|CORPORATION|COMPANY|LP|LLP|TRUST|TRUSTEE|PARTNERSHIP|HOLDINGS|PROPERTIES)\b",
                        re.IGNORECASE)
 
@@ -94,7 +98,7 @@ def borrowers(text: str) -> List[str]:
     are kept whole."""
     t = re.sub(r"\s+", " ", text or "")
     raw = ""
-    for rx in (WHEREAS_RE, EXECUTED_BY_RE):
+    for rx in (WHEREAS_RE, EXECUTED_BY_RE, FROM_GRANTOR_RE, CONVEYED_RE):
         m = rx.search(t)
         if m and _plausible(_clean(m.group(1))):
             raw = _clean(m.group(1))
@@ -116,24 +120,26 @@ def deed_ref(text: str) -> Dict[str, Optional[str]]:
 
 
 SALE_DATE_RE = re.compile(
-    r"\b(?:sale\s+at\s+public\s+auction\s+will\s+be\s+(?:held\s+)?on|"
+    r"\b(?:sale\s+at\s+public\s+auction\s+will\s+be\s+(?:held(?:\s+on)?|on)|"
     r"will\s+(?:sell|offer\s+for\s+sale)\s+at\s+public\s+(?:auction|outcry)\s+on|"
     r"(?:foreclosure|trustee['’]s)\s+sale\s+(?:will\s+be\s+held\s+on|date\s*:))"
     r"\s+(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+)?"
-    r"([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})\b",
+    r"([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}|\d{1,2}/\d{1,2}/\d{4})\b",
     re.IGNORECASE)
-_MONTHS = {m: i for i, m in enumerate(
-    ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"], 1)}
 
 
 def sale_date(text: str) -> Optional[str]:
-    """ISO date from 'Sale at public auction will be on October 28, 2026'."""
+    """Return a calendar-valid date only when explicit sale dates agree."""
     dates = set()
     for match in SALE_DATE_RE.finditer(text or ""):
-        month = _MONTHS.get(match[1][:3].lower())
-        try:
-            dates.add(date(int(match[3]), month or 0, int(match[2])).isoformat())
-        except ValueError:
+        value = " ".join(match[1].replace(".", "").replace(",", "").split())
+        for fmt in ("%B %d %Y", "%b %d %Y", "%m/%d/%Y"):
+            try:
+                dates.add(datetime.strptime(value, fmt).date().isoformat())
+                break
+            except ValueError:
+                continue
+        else:
             return None
     return dates.pop() if len(dates) == 1 else None
 

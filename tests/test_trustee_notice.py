@@ -35,6 +35,14 @@ class TrusteeNoticeTests(unittest.TestCase):
         self.assertIsNone(sale_date(notice + " Foreclosure sale date: January 4, 2027."))
         self.assertIsNone(sale_date("Foreclosure sale date: February 30, 2027"))
         self.assertIsNone(sale_date("Deed of Trust dated May 2, 2021. Appointment of Substitute Trustee."))
+        self.assertEqual(sale_date("Sale at public auction will be on 12/22/2026 on or about 10:00 AM"), "2026-12-22")
+        self.assertEqual(sale_date("Sale at public auction will be held Dec. 11, 2026"), "2026-12-11")
+
+    def test_grantors_in_recorded_deed_clauses(self):
+        self.assertEqual(borrowers('Deed of Trust from John Roe and Jane Roe ("Grantor"), to Chris Doe, Trustee'),
+                         ["John Roe", "Jane Roe"])
+        self.assertEqual(borrowers("recorded in Knox County, Tennessee, Jane Roe conveyed the described property to John Doe"),
+                         ["Jane Roe"])
 
     def test_classify(self):
         self.assertEqual(classify(SUB), "foreclosure")
