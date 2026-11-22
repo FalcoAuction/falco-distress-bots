@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 from src.bots.knoxville_poh_bot import KnoxvillePohBot,discover_documents,hearing_date,review_patch,REVIEW_KEY
+from src.bots._knoxville_case_status import read_status
 
 HTML='''<a href="/DocumentCenter/View/1255">View Current Public Officer Hearing Agenda (PDF)</a><a href="/DocumentCenter/View/1253">View Current Better Building Board Agenda (PDF)</a>'''
 TEXT='''PUBLIC OFFICER HEARING
@@ -109,7 +110,19 @@ class Query:
   return SimpleNamespace(data=[self.db.row])
 
 class WriterTests(unittest.TestCase):
- def test_recurring_exact_key_refresh_live_and_staging_fail_isolated(self):
+ def test_city_complaint_requires_same_case_street_and_consistent_parcel(self):
+  _,leads=scrape(); review=leads[0].raw_payload[REVIEW_KEY]
+  addresses=[["2208 ADAIR AVE",""]]
+  row=[review["case_number"],"", "CE Structure Complaint", "Parcel=070PK007", "", "In Violation", "10/21/2026"]
+  status=read_status(review,addresses,[row])
+  self.assertEqual(status["status_date"],"2026-10-21")
+  self.assertNotIn("outcome",status)
+  self.assertIsNone(read_status(review,addresses,[row,row]))
+  self.assertIsNone(read_status(review,[["2208 ADAIR ST",""]],[row]))
+  self.assertIsNone(read_status(review,addresses,[row[:3]+["Parcel=WRONG"]+row[4:]]))
+
+ @patch("src.bots.knoxville_poh_bot.attach_city_records")
+ def test_recurring_exact_key_refresh_live_and_staging_fail_isolated(self, attach):
   bot,leads=scrape();lead=leads[0];bot._reviews={lead.pipeline_lead_key:lead.raw_payload[REVIEW_KEY]}
   db=SimpleNamespace(row=stored(lead),writes=[]);db.table=lambda table:Query(db,table)
   with patch('src.bots.knoxville_poh_bot._supabase',return_value=db):bot._write_staging([lead])
