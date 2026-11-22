@@ -1,126 +1,87 @@
-"""
-HUD REO bot — pulls FHA-insured foreclosed properties currently held by
-HUD for resale, statewide TN.
+"""Observe Tennessee HUD HomeStore inventory already marketed through HUD.
 
-Source: HUD's public ArcGIS REST endpoint. No auth, no captcha, no rate
-limit. Returns ~160 active TN properties at any given time.
-
-Filter: case_step_number IN (1, 2, 3) — these are active/early-lifecycle
-listings. Step 4-6 are conveyed/sold.
-
-Limitations of v1:
-  - No list price (the price lives on the SPA storefront, would need
-    Playwright/Selenium to extract). For homeowner outreach this is
-    fine — the property is bank-owned, NOT a homeowner we'd contact.
-  - REO leads are different from our typical homeowner-distress flow.
-    They go to the AUCTION-PARTNER-ROUTING bucket: Parks could potentially
-    bid on or list these for the bank. We stage them so Patrick can
-    decide what to do with them.
-
-Distress type: REO
+The public search contains structured listings. A buyer bid opening is not a
+trustee sale or an invitation to provide auction services. Keep observations
+in the run receipt so no homeowner or partner lead is staged.
 """
 
-from __future__ import annotations
+import json
+import re
+from datetime import datetime, timezone
 
-from typing import List, Optional
+from bs4 import BeautifulSoup
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, BotTimeout
 
 
-HUD_REO_ENDPOINT = (
-    "https://egis.hud.gov/arcgis/rest/services/gotit/REOProperties/MapServer/0/query"
-)
+TN_SEARCH = "https://www.hudhomestore.gov/searchresult?citystate=TN"
+DETAIL = "https://www.hudhomestore.gov/propertydetails?caseNumber="
 
 
 class HudReoBot(BotBase):
     name = "hud_reo"
-    description = "HUD-owned FHA REO properties statewide TN"
-    throttle_seconds = 0.5  # public ArcGIS, no rate limit issues
-    expected_min_yield = 50  # we typically see 80-100 active TN; alert if <50
+    description = "TN HUD HomeStore inventory under agency marketing"
 
-    def scrape(self) -> List[LeadPayload]:
-        leads: List[LeadPayload] = []
+    def inventory(self) -> list[dict]:
+        response = self.fetch(TN_SEARCH)
+        if response is None or response.status_code != 200:
+            raise ValueError("HUD HomeStore search unavailable")
+        page = BeautifulSoup(response.content, "html.parser")
+        if not page.select_one('input#cityStateZip[value="TN"]'):
+            raise ValueError("HUD search did not confirm Tennessee")
+        data = page.select_one("input#available_prop[value]")
+        if data is None:
+            raise ValueError("HUD listing data missing")
+        listings = json.loads(data["value"])
+        if not isinstance(listings, list):
+            raise ValueError("Invalid HUD listing collection")
 
-        params = {
-            "where": "STATE_CODE='TN'",
-            "outFields": "OBJECTID,CASE_NUM,CASE_STEP_NUMBER,STREET_NUM,DIRECTION_PREFIX,STREET_NAME,CITY,STATE_CODE,DISPLAY_ZIP_CODE,REVITE_NAME",
-            "returnGeometry": "false",
-            "f": "json",
-            "resultRecordCount": "1000",
-        }
+        cases = {}
+        for row in listings:
+            if not isinstance(row, dict):
+                raise ValueError("Invalid HUD listing")
+            case = row.get("propertyCaseNumber")
+            if not isinstance(case, str) or not re.fullmatch(r"[0-9]{3}-[0-9]{6}", case):
+                raise ValueError("Invalid HUD case number")
+            if row.get("propertyState") != "TN" or not all(
+                isinstance(row.get(field), str) and row[field].strip()
+                for field in ("propertyAddress", "propertyCity")
+            ):
+                raise ValueError(f"Invalid Tennessee property identity for {case}")
+            if case in cases:
+                raise ValueError(f"Duplicate HUD case {case}")
+            cases[case] = {
+                "case": case, "street": row["propertyAddress"], "city": row["propertyCity"],
+                "county": row.get("propertyCounty"), "list_price": row.get("listPrice"),
+                "listing_period": row.get("listingPeriod"), "listed": row.get("listDate"),
+                "bid_open_date": row.get("bidOpenDate"), "source_url": DETAIL + case,
+            }
+        return list(cases.values())
 
-        res = self.fetch(HUD_REO_ENDPOINT, params=params)
-        if res is None or res.status_code != 200:
-            self.logger.error(f"HUD ArcGIS endpoint returned {res.status_code if res else 'no-response'}")
-            return leads
-
+    def run(self) -> dict:
+        started = datetime.now(timezone.utc)
+        self._report_health("running", started, None, 0, 0, 0, 0)
+        cases = []
+        status = "ok"
+        error = None
         try:
-            data = res.json()
-        except Exception as e:
-            self.logger.error(f"failed to parse JSON: {e}")
-            return leads
-
-        features = data.get("features") or []
-        self.logger.info(f"ArcGIS returned {len(features)} TN records")
-
-        for feat in features:
-            attrs = feat.get("attributes") or {}
-            case_num = (attrs.get("CASE_NUM") or "").strip()
-            if not case_num:
-                continue
-
-            step = attrs.get("CASE_STEP_NUMBER")
-            # Filter to active lifecycle stages — skip step 4+ (conveyed/sold)
-            if step is None or step > 3:
-                continue
-
-            address = self._build_address(attrs)
-            if not address:
-                continue
-
-            city = str(attrs.get("CITY") or "").strip().title()
-            zip_code = str(attrs.get("DISPLAY_ZIP_CODE") or "").strip()
-            full_address = address
-            if city:
-                full_address = f"{full_address}, {city}, TN"
-                if zip_code:
-                    full_address = f"{full_address} {zip_code}"
-
-            lead_key = self.make_lead_key(self.name, case_num)
-
-            leads.append(LeadPayload(
-                bot_source=self.name,
-                pipeline_lead_key=lead_key,
-                property_address=full_address,
-                county=None,  # not in ArcGIS feed; can be cross-referenced later
-                distress_type="REO",
-                admin_notes=f"HUD case {case_num} · step {step} · revite={attrs.get('REVITE_NAME') or 'none'}",
-                source_url=f"https://www.hudhomestore.gov/propertydetails?caseNumber={case_num}",
-                raw_payload={"hud_arcgis": attrs},
-            ))
-
-        return leads
-
-    @staticmethod
-    def _build_address(attrs: dict) -> Optional[str]:
-        street_num = str(attrs.get("STREET_NUM") or "").strip()
-        direction = str(attrs.get("DIRECTION_PREFIX") or "").strip()
-        street_name = str(attrs.get("STREET_NAME") or "").strip()
-        if not street_num or not street_name:
-            return None
-        parts = [street_num]
-        if direction:
-            parts.append(direction)
-        parts.append(street_name.title())
-        return " ".join(parts)
+            cases = self.inventory()
+        except BotTimeout as exc:
+            status, error = "timed_out", str(exc)
+        except Exception as exc:
+            status, error = "failed", str(exc)
+        notes = None
+        if status == "ok":
+            notes = {"source_url": TN_SEARCH, "listings": cases, "disposition": "agency_marketed"}
+        self._report_health(status, started, datetime.now(timezone.utc), len(cases),
+                            len(cases), 0, 0, error_message=error, notes=notes)
+        return {"name": self.name, "run_id": self.run_id, "status": status,
+                "fetched": len(cases), "staged": 0, "duplicates": 0, "error": error}
 
 
 def run() -> dict:
-    """Entry point matching the existing bot convention. Called from run_all.py."""
-    bot = HudReoBot()
-    return bot.run()
+    return HudReoBot().run()
 
 
 if __name__ == "__main__":
-    result = run()
-    print(f"\nResult: {result}")
+    print(run())
