@@ -36,6 +36,7 @@ import traceback as tb
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._warn_gate import is_tn_warn
 from ._land_qualification import GATE_FIELDS, land_gate
 from ._base import BotBase, _supabase
 from ._provenance import record_field
@@ -399,7 +400,7 @@ class BatchDataSkipTraceBot(BotBase):
                     if not rows:
                         break
                     for r in rows:
-                        if not land_gate(r, client=client):
+                        if is_tn_warn(r) or not land_gate(r, client=client):
                             continue
                         # Commercial and land leads are traced only once they
                         # carry every data point (property-lane readiness).

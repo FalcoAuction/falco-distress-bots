@@ -42,7 +42,7 @@ PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
 RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "davidson_tax_sale", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address",
-            "parcel", "church_review", "land",
+            "parcel", "church_review", "land", "warn",
             # readiness (2026-11-20): condition tags and source/link fields
             "condition", "source", "docket_url", "source_url")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
@@ -159,7 +159,7 @@ class PropertyLaneBot(BotBase):
                 if lane["owner_type"] in ("entity", "religious") and lane["lane"] == "unknown":
                     c["entity_owner_no_land_use"] += 1
                 if table == "homeowner_requests_staging" and (
-                        lane["lane"] in ("commercial", "land") or "land_qualification" in lane):
+                        lane["lane"] in ("commercial", "land") or "land_qualification" in lane or lane.get("exclude_reason") == "employment_notice"):
                     tag = _tag(lane)
                     if row.get("lane_tag") != tag:
                         to_tag.append({"id": row["id"], "tag": tag})

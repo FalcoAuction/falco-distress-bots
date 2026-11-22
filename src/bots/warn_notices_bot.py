@@ -17,6 +17,7 @@ Tennessee worksites are staged statewide. A worksite alone does not establish ow
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import re
 from urllib.parse import urljoin, urlsplit
@@ -25,7 +26,9 @@ from typing import Any, Dict, List, Optional
 
 from bs4 import BeautifulSoup
 
-from ._base import BotBase, LeadPayload
+from ._base import BotBase, LeadPayload, _supabase
+from ._warn_letter import letter_facts, review
+from ._warn_refresh import refresh
 
 WARN_URL = "https://www.tn.gov/workforce/general-resources/major-publications0/major-publications-redirect/reports.html"
 from ._regions import TN_COUNTIES as FOCUS_COUNTIES  # noqa: E402
@@ -67,13 +70,13 @@ def parse_warn(page_html: str) -> List[Dict[str, Any]]:
             url = urljoin(WARN_URL, anchor["href"]) if anchor else ""
             letter = urlsplit(url)
             letter_url = url if letter.scheme == "https" and letter.hostname == "www.tn.gov" and letter.path.lower().endswith(".pdf") else None
-            workers = re.sub(r"[^\d]", "", rec.get("affected workers", ""))
+            workers = rec.get("affected workers", "").replace(",", "").strip()
             out.append({
                 "letter_url": letter_url,
                 "posted": _date(rec.get("date of posting", "")),
                 "company": rec.get("company", "").strip(),
                 "county": rec.get("county", "").strip(),
-                "workers": int(workers) if workers else None,
+                "workers": int(workers) if workers.isdigit() else None,
                 "effective": _date(rec.get("closure/layoff date", "")),
                 "effective_raw": rec.get("closure/layoff date", ""),
                 "notice": rec.get("notice/type", "").strip(),
@@ -83,15 +86,10 @@ def parse_warn(page_html: str) -> List[Dict[str, Any]]:
 
 def letter_review(text: str) -> Dict[str, Any]:
     """Extract employer event and worksite from the state memo, excluding its letterhead."""
-    body = " ".join(text.split())
-    event = re.search(r"notifying the agency (?:of|that)\s+([^.]{3,350})", body, re.I)
-    sentence = event[1] if event else ""
-    event_type = ("closure" if re.search(r"\bclos(?:ure|ing)\b", sentence, re.I)
-                  else "layoff" if re.search(r"layoff|lay-off|reduction in force", sentence, re.I)
-                  else "review")
-    site = re.search(r"(?:company is located at|affected location is(?: located at)?)\s+(\d[^;]{3,150}?,?\s+(?:TN|Tennessee)\s+\d{5})\b", body, re.I)
-    return {"event_type": event_type, "event_statement": sentence or None,
-            "worksite": site[1] if site else None, "asset_disposition": "unverified"}
+    statement, event_type, sites, _ = letter_facts(text)
+    category = "closure" if event_type.endswith("closure") else "layoff" if event_type.endswith("layoff") else "review"
+    return {"event_type": category, "event_statement": statement,
+            "worksite": sites[0] if len(sites) == 1 else None, "asset_disposition": "unverified"}
 
 
 def _counties(value: str) -> List[str]:
@@ -108,40 +106,72 @@ class WarnNoticesBot(BotBase):
     frozen_after_runs = 60
 
     def scrape(self) -> List[LeadPayload]:
-        res = self.fetch(WARN_URL)
+        self._complete = False
+        res = self.fetch(WARN_URL, allow_redirects=False)
         if res is None or res.status_code != 200:
-            self.logger.warning(f"WARN fetch failed: {getattr(res, 'status_code', None)}")
-            return []
-        cutoff = (datetime.now(timezone.utc).date() - timedelta(days=LOOKBACK_DAYS)).isoformat()
-        leads: List[LeadPayload] = []
-        for rec in parse_warn(res.text):
-            if rec["posted"] and rec["posted"] < cutoff:
+            raise RuntimeError("WARN index unavailable")
+        records = parse_warn(res.text)
+        today = datetime.now(timezone.utc).date()
+        cutoff = (today - timedelta(days=LOOKBACK_DAYS)).isoformat()
+        groups = {}
+        for rec in records:
+            if not rec["posted"] or not cutoff <= rec["posted"] <= today.isoformat():
                 continue
-            counties = [c for c in _counties(rec["county"]) if c in FOCUS_COUNTIES]
-            if counties and rec.get("letter_url"):
-                import pdfplumber
-                response = self.fetch(rec["letter_url"], timeout=30)
-                if response is not None and response.status_code == 200 and response.content.startswith(b"%PDF"):
-                    try:
-                        with pdfplumber.open(io.BytesIO(response.content)) as document:
-                            rec.update(letter_review(" ".join(page.extract_text() or "" for page in document.pages)))
-                    except Exception as exc:
-                        self.logger.warning("Unreadable WARN letter %s: %s", rec["notice"], type(exc).__name__)
-            for county in counties:
+            for county in _counties(rec["county"]):
+                if county not in FOCUS_COUNTIES:
+                    continue
                 ident = rec["notice"] or f"{rec['company']}|{rec['posted']}"
-                leads.append(LeadPayload(
-                    bot_source=self.name,
-                    pipeline_lead_key=self.make_lead_key("warn", f"{ident}|{county}"),
-                    county=county,
-                    full_name=rec["company"],
-                    distress_type="BUSINESS_CLOSURE",
-                    admin_notes=f"WARN notice {rec['notice'] or '?'}: {rec['company']}, {rec['workers'] or '?'} workers, "
-                                f"effective {rec['effective'] or rec['effective_raw'] or '?'} (posted {rec['posted'] or '?'}).",
-                    raw_payload={"warn": rec, "source": "tn_dol_warn"},
-                    source_url=rec.get("letter_url") or WARN_URL,
-                ))
+                group = groups.setdefault((ident, county), [])
+                if rec not in group:
+                    group.append(rec)
+        if not groups:
+            raise RuntimeError("WARN index returned no dated Tennessee notices")
+        import pdfplumber
+        letters = {}
+        leads = []
+        for (ident, county), group in groups.items():
+            rec = dict(group[0])
+            url = rec["letter_url"]
+            if len(group) == 1 and url and url not in letters:
+                text, digest = "", None
+                response = self.fetch(url, timeout=30, allow_redirects=False)
+                if response is not None and response.status_code == 200:
+                    data = response.content
+                    if data.startswith(b"%PDF") and len(data) <= 5_000_000:
+                        digest = hashlib.sha256(data).hexdigest()
+                        try:
+                            with pdfplumber.open(io.BytesIO(data)) as doc:
+                                if len(doc.pages) <= 15:
+                                    text = " ".join(page.extract_text() or "" for page in doc.pages)
+                        except Exception as exc:
+                            self.logger.warning("Unreadable WARN letter %s (%s)", ident, type(exc).__name__)
+                letters[url] = text, digest
+            text, digest = letters.get(url, ("", None)) if len(group) == 1 else ("", None)
+            result = review(rec, text, digest, today.isoformat())
+            if len(group) > 1:
+                result.update(verification="ambiguous_index", index_observations=group)
+            category = result["event_type"]
+            rec.update(event_type="closure" if category.endswith("closure") else
+                       "layoff" if category.endswith("layoff") else "review",
+                       event_statement=result["event_statement"], worksite=result["worksite"],
+                       asset_disposition="unverified")
+            leads.append(LeadPayload(
+                bot_source=self.name, pipeline_lead_key=self.make_lead_key("warn", f"{ident}|{county}"),
+                county=county, full_name=rec["company"], distress_type="BUSINESS_CLOSURE",
+                admin_notes=f"WARN {ident} · {rec['company']} · employment notice posted {rec['posted']}",
+                raw_payload={"warn": rec, "warn_review": result, "source": "tn_dol_warn"},
+                source_url=url or WARN_URL))
+        self._complete = True
         self.logger.info(f"{len(leads)} Tennessee WARN notices in the last {LOOKBACK_DAYS} days")
         return leads
+
+    def _write_staging(self, leads):
+        if not getattr(self, "_complete", False):
+            return 0, 0
+        client = _supabase()
+        if client is None:
+            raise RuntimeError("WARN staging unavailable")
+        return refresh(client, leads, self.fetch, datetime.now(timezone.utc).date(), LOOKBACK_DAYS, self.run_id)
 
 
 def run() -> dict:

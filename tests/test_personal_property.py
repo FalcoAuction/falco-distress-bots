@@ -99,15 +99,17 @@ class LiquidationTests(unittest.TestCase):
         self.assertFalse(fl["routable"])
         self.assertIn("Florida", fl["not_routable_reason"])
 
-    def test_big_warn_without_hard_assets_not_tagged(self):
+    def test_big_warn_without_hard_assets_remains_research(self):
         warn = {"company": "Kroger Fulfillment Network LLC", "workers": 132}
-        self.assertIsNone(classify(lead("BUSINESS_CLOSURE", {"warn": warn})))
+        tag = classify(lead("BUSINESS_CLOSURE", {"warn": warn}))
+        self.assertEqual(tag["qualification"], "research")
+        self.assertFalse(tag["prospect"])
 
     def test_large_warn_is_research_only(self):
         warn = {"company": "Smoky Mountain Logistics, LLC", "workers": 100}
         t = classify(lead("BUSINESS_CLOSURE", {"warn": warn}))
         self.assertFalse(t["routable"])
-        self.assertEqual((t["lane"], t["grade"]), ("business_liquidation", "B"))
+        self.assertEqual((t["lane"], t["grade"]), ("warn_research", None))
 
 
 class SeizureTests(unittest.TestCase):
