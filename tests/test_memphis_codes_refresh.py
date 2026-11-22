@@ -81,13 +81,17 @@ class MemphisTests(unittest.TestCase):
         row = {"id": "a", "pipeline_lead_key": key, "number": "123", "checked": None}
         table.select.return_value.eq.return_value.gt.return_value.order.return_value.limit.return_value.execute.return_value.data = [row]
         old = {"memphis_311": case(REQUEST_TYPE="CE-Code Miscellaneous"), "assessor": {"keep": True}}
-        table.select.return_value.eq.return_value.in_.return_value.execute.return_value.data = [{**row, "raw_payload": old}]
+        table.select.return_value.eq.return_value.in_.return_value.execute.return_value.data = [{**row, "prior": old["memphis_311"]}]
         self.bot._complete = True
         self.bot.fetch = Mock(return_value=response([case(REQUEST_STATUS="Closed")]))
+        connect.return_value.rpc.return_value.execute.return_value.data = 1
         self.bot._write_staging([])
-        payload = table.update.call_args.args[0]
-        self.assertEqual(set(payload), {"raw_payload"})
-        self.assertEqual(payload["raw_payload"]["assessor"], old["assessor"])
-        self.assertEqual(payload["raw_payload"]["memphis_311"], old["memphis_311"])
-        self.assertEqual(payload["raw_payload"]["memphis_codes_review"]["finding"], "terminal_request")
+        rpc, params = connect.return_value.rpc.call_args.args
+        self.assertEqual(rpc, "apply_staging_enrichment")
+        payload, = params["p_rows"]
+        self.assertEqual(set(payload), {"id", "raw_patch"})
+        self.assertEqual(payload["id"], row["id"])
+        self.assertEqual(set(payload["raw_patch"]), {"memphis_codes_review"})
+        self.assertEqual(payload["raw_patch"]["memphis_codes_review"]["finding"], "terminal_request")
+        table.update.assert_not_called()
         connect.return_value.table.assert_called_once_with("homeowner_requests_staging")

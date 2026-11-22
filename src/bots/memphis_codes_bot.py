@@ -7,7 +7,6 @@ from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from ._base import BotBase, LeadPayload, _supabase
-from ._probate_staging import guard_raw
 
 MEMPHIS_311_ENDPOINT = (
     "https://311.memphistn.gov/server/rest/services/311/"
@@ -187,19 +186,24 @@ class MemphisCodesBot(BotBase):
             chunk = selected[start:start + 40]
             numbers = {r["number"] for r in chunk}
             cases = self._cases("INCIDENT_NUMBER IN (" + sql_list(numbers) + ")")
-            current = (table.select("id,pipeline_lead_key,raw_payload").eq("bot_source", self.name)
+            current = (table.select("id,pipeline_lead_key,prior:raw_payload->memphis_311,checked:raw_payload->memphis_codes_review->>checked_on").eq("bot_source", self.name)
                        .in_("id", [r["id"] for r in chunk]).execute().data)
+            patches = []
             for row in current:
-                raw = row["raw_payload"] or {}
-                prior = raw.get("memphis_311") or {}
+                if (row["checked"] or "") >= today:
+                    continue
+                prior = row["prior"] or {}
                 number = clean(prior.get("INCIDENT_NUMBER"))
                 if number not in numbers or row["pipeline_lead_key"] != self.make_lead_key(self.name, number):
                     continue
                 review = evidence(number, cases.get(number, []), today, prior)
-                update = (table.update({"raw_payload": {**raw, "memphis_codes_review": review}})
-                          .eq("id", row["id"]).eq("bot_source", self.name).eq("pipeline_lead_key", row["pipeline_lead_key"]))
-                if not guard_raw(update, raw).execute().data:
-                    self.logger.warning("Concurrent Memphis review deferred: %s", number)
+                patches.append({"id": row["id"], "raw_patch": {"memphis_codes_review": review}})
+            # Merge only this collector's field under the DB row lock. Full-payload
+            # equality filters put historical JSON in URLs and exceed gateway limits.
+            if patches:
+                count = client.rpc("apply_staging_enrichment", {"p_rows": patches}).execute().data
+                if count != len(patches):
+                    raise RuntimeError(f"Memphis review updated {count} of {len(patches)} rows")
         return staged, dupes + len(leads) - len(fresh)
 
 
