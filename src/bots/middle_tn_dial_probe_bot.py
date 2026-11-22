@@ -45,6 +45,7 @@ import traceback as tb
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from ._land_qualification import GATE_FIELDS, land_gate
 from ._base import BotBase, _supabase
 
 try:
@@ -332,7 +333,8 @@ class MiddleTnDialProbeBot(BotBase):
                         .select(
                             "id, county, phone, phone_metadata, "
                             "mortgage_balance, "
-                            "priority_score, owner_name_records, full_name"
+                            "priority_score, owner_name_records, full_name,distress_type," + GATE_FIELDS
+                            + (",staging_status" if table == "homeowner_requests_staging" else "")
                         )
                         .not_.is_("phone", "null")
                         .order("priority_score", desc=True)
@@ -343,6 +345,8 @@ class MiddleTnDialProbeBot(BotBase):
                     if not rows:
                         break
                     for row in rows:
+                        if not land_gate(row, client=client):
+                            continue
                         if _normalize_county(row.get("county")) not in FOCUS_COUNTIES:
                             continue
                         if not _normalize_phone(row.get("phone")):

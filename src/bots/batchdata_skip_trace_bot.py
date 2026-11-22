@@ -36,6 +36,7 @@ import traceback as tb
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._land_qualification import GATE_FIELDS, land_gate
 from ._base import BotBase, _supabase
 from ._provenance import record_field
 
@@ -385,8 +386,8 @@ class BatchDataSkipTraceBot(BotBase):
                         client.table(table)
                         .select("id, property_address, owner_name_records, "
                                 "full_name, county, priority_score, "
-                                "phone_metadata, distress_type, "
-                                "lane_tag:raw_payload->property_lane")
+                                "phone_metadata, distress_type, " + GATE_FIELDS
+                            + (",staging_status" if table == "homeowner_requests_staging" else ""))
                         .is_("phone", "null")
                         .not_.is_("owner_name_records", "null")
                         .not_.is_("property_address", "null")
@@ -398,6 +399,8 @@ class BatchDataSkipTraceBot(BotBase):
                     if not rows:
                         break
                     for r in rows:
+                        if not land_gate(r, client=client):
+                            continue
                         # Commercial and land leads are traced only once they
                         # carry every data point (property-lane readiness).
                         lane = r.get("lane_tag") or {}

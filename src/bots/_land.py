@@ -1,15 +1,14 @@
-"""Land lane: Middle Tennessee tracts with a reason to sell.
+"""Land lane: Tennessee tracts with ownership research signals.
 
 Middle Tennessee farm and timber land has sold at auction for generations,
-and the parcel roll shows which tracts are likely to change hands soon:
+and the parcel roll supplies candidates for independent evidence matching:
 
   heirs        the owner of record is an estate or heirs ("ESTATE OF",
-               "HEIRS", "DECD"): someone has to divide or sell it
+               "HEIRS", "DECD"): succession and control remain unverified
   family_etal  several co-owners ("ETAL") on land held 20+ years: inherited
-               shares, the classic partition and auction case
+               interests may exist; inheritance and partition are unverified
   absentee     an owner living outside Tennessee who has held the land 25+
-               years: managing farm ground from away is the common reason
-               to sell
+               years: this records mailing geography, not seller intent
 
 Every tract must be 20+ acres, valued $150,000 to $5,000,000 (FALCO's fee
 floor and the ranking's ceiling), farm, forest or residential class, and
@@ -24,6 +23,7 @@ index column names).
 from __future__ import annotations
 
 import re
+import math
 from datetime import date
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -43,29 +43,37 @@ ENTITY_RE = re.compile(
     r"PROPERTIES|INVESTMENTS?|CHURCH|MINISTRIES|BANK|ASSOCIATION|ASSN|COUNTY|CITY|STATE|TOWN|"
     r"UNITED STATES|USA|TVA|AUTHORITY|DEVELOPMENT|FARMS INC|CEMETERY|SCHOOL|BOARD)\b")
 LAND_CLASSES = ("AGRICULTURAL", "FARM", "FOREST", "RESIDENTIAL")
+US_STATES = set("AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split())
 
 
 def _f(v: Any) -> float:
     try:
-        return float(v or 0)
+        n = float(v or 0)
+        return n if math.isfinite(n) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
 
 def _sale_year(v: Any) -> Optional[int]:
-    s = str(v or "")
-    return int(s[:4]) if len(s) >= 4 and s[:4].isdigit() and int(s[:4]) > 1800 else None
+    s = str(v or "").strip()
+    if re.fullmatch(r"\d{4}", s):
+        return int(s) if int(s) > 1800 and int(s) != 1900 else None
+    try:
+        parsed = date.fromisoformat(s)
+        return parsed.year if parsed.year > 1800 and parsed.year != 1900 else None
+    except ValueError:
+        return None
 
 
 def signals(row: Mapping[str, Any], today: date) -> List[str]:
-    """Reasons to sell, strongest first; [] if the tract does not qualify."""
+    """Ownership research signals; these do not establish heirs or intent to sell."""
     owner = " ".join(str(row[k] or "") for k in ("owner", "owner2")).upper()
     if not owner.strip() or _f(row["calcac"]) < MIN_ACRES:
         return []
     value = _f(row["appraisal"])
     if not (MIN_VALUE <= value <= MAX_VALUE):
         return []
-    if not any(c in str(row["class"] or "").upper() for c in LAND_CLASSES):
+    if not any(re.search(r"\b" + c + r"\b", str(row["class"] or "").upper()) for c in LAND_CLASSES):
         return []
     # Companies first: "FOX FAMILY REAL ESTATE LLC" is not an estate.
     if ENTITY_RE.search(owner):
@@ -73,7 +81,7 @@ def signals(row: Mapping[str, Any], today: date) -> List[str]:
     heirs = bool(HEIRS_RE.search(owner))
     held = None
     year = _sale_year(row["saledate"])
-    if year:
+    if year and year <= today.year:
         held = today.year - year
     out: List[str] = []
     if heirs:
@@ -81,7 +89,7 @@ def signals(row: Mapping[str, Any], today: date) -> List[str]:
     if ETAL_RE.search(owner) and held is not None and held >= FAMILY_HOLD_YEARS:
         out.append("family_etal")
     state = str(row["state"] or "").strip().upper()
-    if state and state != "TN" and held is not None and held >= ABSENTEE_HOLD_YEARS:
+    if state in US_STATES - {"TN"} and held is not None and held >= ABSENTEE_HOLD_YEARS:
         out.append("absentee")
     return out
 
@@ -95,7 +103,7 @@ def person_name(owner: str) -> str:
     o = re.sub(r"\s+", " ", o).strip(" ,&()")
     if not o:
         return ""
-    if HEIRS_RE.search(o):
+    if HEIRS_RE.search(o) or ENTITY_RE.search(o):
         return o.title()
     if "," in o:   # Metro style "TANG, TIANLAI" / "WALLER, ROBIN DEWAYNE REVOCABLE TRUST"
         last, _, rest = o.partition(",")
@@ -127,6 +135,13 @@ def lane_record(row: Mapping[str, Any], sigs: List[str], county: str) -> Dict[st
         "acres": _f(row["calcac"]),
         "class": row["class"],
         "land_use": row["landuse"] or None,
-        "held_since": str(row["saledate"] or "")[:4] or None,
+        "held_since": str(_sale_year(row["saledate"])) if _sale_year(row["saledate"]) else None,
         "county": county,
+        "ownership_signals": list(sigs),
+        "owner_of_record": " & ".join(str(row[k] or "").strip() for k in ("owner", "owner2") if row[k]),
+        "parcel_id": str(row["parcelid"] or ""),
+        "mailing_state": str(row["state"] or "").strip().upper(),
+        "reason_to_sell": "unverified",
+        "sale_authority": "unverified",
+        "title_status": "not_established",
     }

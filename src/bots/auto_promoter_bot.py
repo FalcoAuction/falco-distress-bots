@@ -45,6 +45,7 @@ from ._provenance import record_field
 from ._address import is_natural_person
 from ._paid import paid_data_enabled
 from ._field_confidence import phone_trust
+from ._land_qualification import land_gate
 from ._free_data import entity_eligible, professional_contact_ready
 from ._twilio_lookup import (
     get_twilio_client,
@@ -263,6 +264,9 @@ class AutoPromoterBot(BotBase):
                         continue
                     source_label = f"non_foreclosure_{dt.lower()}"
 
+                if not land_gate(row, client=client):
+                    skipped_missing_field += 1
+                    continue
                 attempted += 1
 
                 # Duplicate check

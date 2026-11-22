@@ -21,6 +21,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
 
+from ..bots._land_qualification import land_gate
+
 MIDDLE_TN = {
     "bedford", "cannon", "cheatham", "clay", "coffee", "davidson", "dekalb", "dickson", "fentress",
     "franklin", "giles", "grundy", "hickman", "houston", "humphreys", "jackson", "lawrence", "lewis",
@@ -74,6 +76,8 @@ def _as_date(v: Any) -> Optional[date]:
 def screen(opportunity: Dict[str, Any], raw_payload: Optional[Dict[str, Any]], today: date) -> Tuple[bool, Dict[str, Any]]:
     """(eligible, detail). `opportunity` is a lead_opportunities row; the
     detail says why a lead was left out, or how urgent it is."""
+    if not land_gate({**opportunity, "raw_payload": raw_payload}, today):
+        return False, {"reason": "land_research_only"}
     county = county_key(opportunity.get("county"))
     if county not in IN_SCOPE:
         return False, {"reason": "outside_tennessee"}

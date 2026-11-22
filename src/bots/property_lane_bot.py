@@ -22,6 +22,7 @@ already stored; no network beyond Supabase.
 """
 from __future__ import annotations
 
+import json
 import argparse
 import csv
 import os
@@ -33,13 +34,15 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ._base import BotBase, _supabase
+from ._land_qualification import collect_events, obj, qualify
+from ._land_identity import parcel_control
 from ._property_lane import property_lane
 
 PAGE = 1000
 OUT_DIR = Path(__file__).resolve().parents[2] / "out" / "lanes"
 RAW_KEYS = ("padctn", "metro_parcel", "hamilton_assessor", "comptroller_parcel", "davidson_tax_sale", "tpad", "shelby_arcgis", "rutherford_arcgis", "williamson_inigo",
             "padctn_owner_match", "owner_match", "asset_profile", "land_use", "county", "mailing_address",
-            "parcel", "church_review",
+            "parcel", "church_review", "land",
             # readiness (2026-11-20): condition tags and source/link fields
             "condition", "source", "docket_url", "source_url")
 _BASE_FIELDS = ("id,county,distress_type,property_address,property_value,owner_name_records,full_name,"
@@ -91,6 +94,10 @@ def _dedupe(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     best: Dict[str, Dict[str, Any]] = {}
     for it in items:
         addr = " ".join(str(it["row"].get("property_address") or it["row"]["id"]).upper().replace(",", " ").split())
+        raw = obj(it["row"].get("raw_payload"))
+        if "land_qualification" in it["lane"]:
+            addr = parcel_control(raw.get("source"), it["row"].get("county"),
+                                  obj(raw.get("comptroller_parcel")).get("parcelid")) or it["row"]["id"]
         cur = best.get(addr)
         if cur is None or it["lane"]["grade"] < cur["lane"]["grade"]:
             best[addr] = it
@@ -112,6 +119,8 @@ def _tag(lane: Dict[str, Any]) -> Dict[str, Any]:
     tag["email"] = c["email"]
     if "land_flip" in lane:
         tag["land_flip"] = lane["land_flip"]
+    if "land_qualification" in lane:
+        tag["land_qualification"] = lane["land_qualification"]
     if "readiness" in lane:
         tag["readiness"] = lane["readiness"]
     return tag
@@ -135,10 +144,13 @@ class PropertyLaneBot(BotBase):
         commercial: List[Dict[str, Any]] = []
         land: List[Dict[str, Any]] = []
         to_tag: List[Dict[str, Any]] = []
+        events = collect_events(client)
         for table, fields in TABLES.items():
             for row in _rows(client, table, fields):
                 src = row.get("bot_source") or "unknown"
-                lane = property_lane(row)
+                parcel = obj(row["raw_payload"].get("comptroller_parcel")).get("parcelid")
+                matches = events.get(parcel_control(row["raw_payload"].get("source"), row.get("county"), parcel), ())
+                lane = property_lane(row, matches)
                 c = counts[src]
                 c["total"] += 1
                 c[f"lane_{lane['lane']}"] += 1
@@ -146,6 +158,11 @@ class PropertyLaneBot(BotBase):
                     c["dialer_promoted"] += 1
                 if lane["owner_type"] in ("entity", "religious") and lane["lane"] == "unknown":
                     c["entity_owner_no_land_use"] += 1
+                if table == "homeowner_requests_staging" and (
+                        lane["lane"] in ("commercial", "land") or "land_qualification" in lane):
+                    tag = _tag(lane)
+                    if row.get("lane_tag") != tag:
+                        to_tag.append({"id": row["id"], "tag": tag})
                 if lane["lane"] not in ("commercial", "land"):
                     continue
                 key = lane["lane"]
@@ -161,10 +178,6 @@ class PropertyLaneBot(BotBase):
                     c[f"{key}_excluded_{lane['exclude_reason']}"] += 1
                 if key == "land" and lane["grade"] and lane["land_flip"]["score"] >= 4:
                     c["land_flip_strong"] += 1
-                if table == "homeowner_requests_staging":
-                    tag = _tag(lane)
-                    if row.get("lane_tag") != tag:
-                        to_tag.append({"id": row["id"], "tag": tag})
         return {"counts": counts, "commercial": _dedupe(commercial), "land": _dedupe(land), "to_tag": to_tag}
 
     def write_tags(self, client, to_tag: List[Dict[str, Any]]) -> int:
@@ -173,7 +186,7 @@ class PropertyLaneBot(BotBase):
         written = 0
         for item in to_tag:
             try:
-                cur = (client.table("homeowner_requests_staging").select("raw_payload")
+                cur = (client.table("homeowner_requests_staging").select("county,owner_name_records,staging_status,raw_payload")
                        .eq("id", item["id"]).limit(1).execute().data) or []
                 if not cur:
                     continue
@@ -182,9 +195,18 @@ class PropertyLaneBot(BotBase):
                     raw = {}
                 if raw.get("property_lane") == item["tag"]:
                     continue
-                raw["property_lane"] = item["tag"]
-                client.table("homeowner_requests_staging").update({"raw_payload": raw}).eq("id", item["id"]).execute()
-                written += 1
+                tag = item["tag"]
+                update = (client.table("homeowner_requests_staging").update({"raw_payload": {**raw, "property_lane": tag}})
+                          .eq("id", item["id"]))
+                if "land_qualification" in tag:
+                    review = tag["land_qualification"]
+                    if qualify(cur[0], review["events"]) != review:
+                        continue
+                    update = update.filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":")))
+                    for field in ("county", "owner_name_records", "staging_status"):
+                        value = cur[0].get(field)
+                        update = update.eq(field, value) if value is not None else update.is_(field, "null")
+                written += bool(update.execute().data)
             except Exception as e:
                 self.logger.warning(f"  tag failed id={item['id']}: {e}")
         return written

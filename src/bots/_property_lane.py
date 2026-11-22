@@ -26,6 +26,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._land_qualification import is_land_signal, qualify
 from ._address import is_natural_person
 from ._field_confidence import phone_trust
 
@@ -72,7 +73,7 @@ STRONG_DISTRESS = {"PRE_FORECLOSURE", "FORECLOSURE", "LIS_PENDENS", "TAX_LIEN", 
                    "BANKRUPTCY", "BUSINESS_CLOSURE", "REO", "COURT_SALE", "TAX_SALE", "TRUSTEE_NOTICE",
                    "SOT", "NOD",
                    # lanes added 2026-11-20
-                   "HEIRS_PROPERTY", "ABSENTEE_LAND", "CHURCH_CLOSURE", "STALLED_BUILD", "PARTITION",
+                   "CHURCH_CLOSURE", "STALLED_BUILD", "PARTITION",
                    "DIVORCE", "CONSERVATORSHIP", "BK_DISMISSED", "BK_DISMISSAL_MOTION", "BK_STAY_RELIEF",
                    "BK_ABANDONED"}
 WEAK_DISTRESS = {"CODE_VIOLATION", "FIRE_DAMAGE", "VACANT"}
@@ -405,7 +406,7 @@ def _land_flip(row: Dict[str, Any], contact: Dict[str, Any], acres: Optional[flo
     return {"score": score, "signals": signals}
 
 
-def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
+def property_lane(row: Dict[str, Any], land_events=()) -> Dict[str, Any]:
     raw = _d(row.get("raw_payload"))
     church = (row.get("distress_type") or "").upper() == "CHURCH_CLOSURE"
     review = _d(raw.get("church_review")) if church else {}
@@ -466,6 +467,15 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         "owner_type": otype, "contact": contact, "grade": None, "exclude_reason": None,
         "stacked_distress": stacked_distress(raw), "version": VERSION,
     }
+    if is_land_signal(row):
+        review = qualify(row, land_events)
+        out["land_qualification"] = review
+        if lane != "land" or review["status"] != "corroborated_opportunity":
+            out["exclude_reason"] = "land_research_only"
+            out["readiness"] = readiness(row, raw, out)
+            if lane == "land":
+                out["land_flip"] = _land_flip(row, contact, acres, value)
+            return out
     if lane not in ("commercial", "land"):
         return out
 
@@ -485,7 +495,7 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         out["exclude_reason"] = "government_owner"
     elif dt == "DEMOLITION":
         out["exclude_reason"] = "permit_not_distress"
-    elif not dt or dt not in LIVE_DISTRESS:
+    elif dt not in LIVE_DISTRESS and not out.get("land_qualification"):
         out["exclude_reason"] = "no_live_distress"
     elif dt in WEAK_DISTRESS and not out["stacked_distress"] and not _failing_structure(raw):
         # A code ticket on a commercial building or a lot is not a reason to
@@ -503,7 +513,7 @@ def property_lane(row: Dict[str, Any]) -> Dict[str, Any]:
         # A: owner reachable directly, value known, distress that forces a sale.
         # Code violations alone never reach A.
         direct = contact["tier"] in ("phone", "email")
-        strong = dt in STRONG_DISTRESS or bool(out["stacked_distress"])
+        strong = dt in STRONG_DISTRESS or bool(out["stacked_distress"] or out.get("land_qualification"))
         out["grade"] = "A" if (direct and value and strong) else "B" if (direct or (value and strong)) else "C"
     if lane == "land":
         out["land_flip"] = _land_flip(row, contact, acres, value)
@@ -582,6 +592,9 @@ def readiness(row: Dict[str, Any], raw: Dict[str, Any], lane: Dict[str, Any]) ->
         "forcing_distress": dt in STRONG_DISTRESS or bool(lane.get("stacked_distress")) or _failing_structure(raw),
         "source_link": bool(row.get("source_url") or raw.get("source_url") or raw.get("docket_url") or raw.get("source")),
     }
+    if "land_qualification" in lane:
+        checks["forcing_distress"] = lane["land_qualification"]["status"] == "corroborated_opportunity"
+        checks["source_link"] = bool(lane["land_qualification"]["source_url"])
     if lane.get("lane") == "land":
         checks["acreage"] = lane.get("acres") is not None
     elif lane.get("lane") == "commercial":
