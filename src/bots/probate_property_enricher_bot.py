@@ -83,6 +83,8 @@ def _lookup_subject(row):
         return None
     if (raw.get("probate_review") or {}).get("stage") == "estate_inactive_reported":
         return None
+    if "conflicting_decedent_names" in (raw.get("probate_review") or {}).get("attorney_draft_hold_reasons", []):
+        return None
     if row.get("bot_source") in {"tn_public_notice", "court_notices"}:
         # Paper location can differ from the court venue. Generic names on old
         # staging rows can be signers, creditors or attorneys.

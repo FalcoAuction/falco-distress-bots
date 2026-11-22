@@ -17,6 +17,25 @@ def notice(lines=DAVIDSON, day=18):
 
 
 class ProbateFollowupTests(unittest.TestCase):
+    def test_conflicting_printed_decedents_hold_name_matching(self):
+        lines = ["ESTATE OF Kil-Joong Kim, (Deceased)",
+                 "Case No. MC-CH-CV-PB-26-307",
+                 "Notice to creditors. Letters Testamentary in respect of the Estate of Kil-Joon Kim, "
+                 "who died 7/7/2026, were issued by the Probate Court of Montgomery County, Tennessee.",
+                 "This 10th day of November, 2026", "Jennifer Juney Park - Executor",
+                 "Attorney for the Estate:", "B. Nathan Hunt"]
+        lead = notice(lines)
+        review = lead.raw_payload["probate_review"]
+        self.assertEqual(review["decedent_names_printed"], ["Kil-Joong Kim", "Kil-Joon Kim"])
+        self.assertIn("conflicting_decedent_names", review["attorney_draft_hold_reasons"])
+        self.assertEqual(review["attorney_draft_status"], "hold")
+        self.assertIsNone(_lookup_subject(vars(lead)))
+        clean = notice([line.replace("Kil-Joong", "KIL-JOON") for line in lines])
+        self.assertNotIn("conflicting_decedent_names", clean.raw_payload["probate_review"]["attorney_draft_hold_reasons"])
+        self.assertEqual(_lookup_subject(vars(clean)), "Kil-Joon Kim")
+        old = {**lead.raw_payload, "probate_review": clean.raw_payload["probate_review"]}
+        self.assertEqual(refresh_patch({"raw_payload": old}, lead)["raw_payload"]["probate_review"], review)
+
     def test_draft_and_seller_have_separate_scopes(self):
         review = notice().raw_payload["probate_review"]
         self.assertEqual(review["estate_key"], "davidson|26P9001")
@@ -149,3 +168,41 @@ class ProbateFollowupTests(unittest.TestCase):
         self.assertEqual(update["raw_payload"]["owner_match"], {"parcel": "123"})
         self.assertEqual(update["raw_payload"]["probate_review"], lead.raw_payload["probate_review"])
         self.assertIsNone(refresh_patch({"raw_payload": update["raw_payload"]}, lead))
+
+    def test_recurring_pending_and_promoted_refresh_are_guarded(self):
+        lead = notice()
+        for status in ("pending", "promoted"):
+            with self.subTest(status=status), patch("src.bots._probate_staging._supabase") as db, patch.object(
+                    BotBase, "_write_staging", return_value=(0, 0)) as base:
+                table = MagicMock()
+                db.return_value.table.return_value = table
+                raw = {**lead.raw_payload, "independent_evidence": {"keep": True}}
+                raw.pop("probate_review")
+                table.select.return_value.eq.return_value.in_.return_value.execute.side_effect = [
+                    MagicMock(data=[{"id": "existing", "pipeline_lead_key": lead.pipeline_lead_key,
+                                     "staging_status": status, "full_name": "Operator name", "raw_payload": raw}]),
+                    MagicMock(data=[])]
+                self.assertEqual(CourtNoticesBot()._write_staging([lead]), (0, 1))
+                update = table.update.call_args.args[0]
+                self.assertEqual(set(update), {"raw_payload", "source_url"})
+                self.assertEqual(update["raw_payload"]["independent_evidence"], {"keep": True})
+                self.assertEqual(update["raw_payload"]["probate_review"], lead.raw_payload["probate_review"])
+                guarded = table.update.return_value.eq.return_value.eq.return_value.eq.return_value.eq.return_value
+                guarded.filter.assert_called_once()
+                guarded.filter.return_value.execute.assert_called_once()
+                base.assert_called_once_with([])
+
+    def test_failed_identity_read_never_reinserts(self):
+        with patch("src.bots._probate_staging._supabase") as db, patch.object(
+                BotBase, "_write_staging", return_value=(0, 0)) as base:
+            db.return_value.table.return_value.select.side_effect = RuntimeError("unavailable")
+            CourtNoticesBot()._write_staging([notice()])
+            base.assert_called_once_with([])
+            db.return_value.table.return_value.update.assert_not_called()
+
+    def test_conflicting_existing_case_identity_cannot_refresh(self):
+        lead = notice()
+        for field, value in (("decedent", "Another Person"), ("county", "shelby"), ("docket", "26P9999")):
+            with self.subTest(field=field):
+                raw = {**lead.raw_payload, "court_notice": {**lead.raw_payload["court_notice"], field: value}}
+                self.assertIsNone(refresh_patch({"raw_payload": raw}, lead))

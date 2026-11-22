@@ -445,6 +445,22 @@ def probate_review(lines: List[str], fields: Dict[str, Any]) -> Dict[str, Any]:
     evidence = found[0] if found else None
     inactive = _INACTIVE_ESTATE.search(text)
     reasons = []
+    # Preserve disagreements printed within one notice. A shared case number
+    # does not establish that two differently spelled decedents are identical.
+    printed_names = []
+    for line in lines:
+        caption = re.match(r"^(?:estate of\s+|in re(?: the matter of)?:?\s+(?:(?:the )?estate of\s+)?)(.+?)"
+                           r"(?:,?\s+\(?deceased\)?\.?)?$", line.strip(), re.I)
+        body = _DECEDENT_RES[2].search(line)
+        for match in (caption, body):
+            if match and probate_name(match[1].strip(" ,")):
+                name = match[1].strip(" ,")
+                if name not in printed_names:
+                    printed_names.append(name)
+    # Only punctuation/case differences are harmless here; no fuzzy names.
+    identity_conflict = len({re.sub(r"[\W_]", "", n).casefold() for n in printed_names}) > 1
+    if identity_conflict:
+        reasons.append("conflicting_decedent_names")
     if inactive:
         stage, evidence = "estate_inactive_reported", inactive[0]
         reasons.append("inactive_case_or_representative")
@@ -457,6 +473,7 @@ def probate_review(lines: List[str], fields: Dict[str, Any]) -> Dict[str, Any]:
     if not (fields.get("attorney") or {}).get("names"):
         reasons.append("no_named_estate_attorney")
     return {"stage": stage, "evidence": evidence,
+            **({"decedent_names_printed": printed_names} if identity_conflict else {}),
             "estate_key": f"{fields['county']}|{fields['docket']}" if fields["county"] and fields["docket"] else None,
             "contact_hold": True, "contact_hold_scope": "owner_seller_solicitation",
             "contact_hold_reasons": ["sale_authority_unverified"],
