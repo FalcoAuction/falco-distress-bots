@@ -49,6 +49,16 @@ def hmda_principal_repair(row: dict) -> dict:
                              "removed_hmda_principal": row["mortgage_balance"]}}}
 
 
+def johnson_board_research(row: dict) -> bool:
+    source = row.get("bot_source") or row.get("source")
+    if source == "johnson_city_bdsr":
+        return True
+    # Promoted bot copies retain the collector payload under a generic source.
+    raw = row.get("raw_payload")
+    return (source in (None, "", "bot") and isinstance(raw, dict)
+            and isinstance(raw.get("johnson_city_bdsr"), dict))
+
+
 def entity_eligible(row: dict) -> bool:
     raw = row.get("raw_payload") or {}
     lane = raw.get("property_lane") or {}
