@@ -41,6 +41,7 @@ from datetime import date, datetime, timedelta
 from typing import List, Optional, Tuple
 
 from ._base import BotBase, LeadPayload
+from ._mackie_refresh import inspect_report, finalize_report, report_as_of, refresh_staging
 
 # pdfplumber is in requirements.txt; lazy-import for clean module-load
 # failure mode (so a missing dep doesn't break the whole bot orchestrator)
@@ -101,6 +102,7 @@ class MackieWolfTrusteeBot(BotBase):
     )
 
     def scrape(self) -> List[LeadPayload]:
+        self._report = None
         if pdfplumber is None:
             self.logger.error(
                 "pdfplumber not installed — run: pip install pdfplumber"
@@ -119,7 +121,13 @@ class MackieWolfTrusteeBot(BotBase):
         if pdf_bytes is None:
             return []
 
-        return self._parse_pdf(pdf_bytes, pdf_url, report_date)
+        self._report = inspect_report(pdf_bytes, pdf_url, getattr(self, "_linked_current", False), pdfplumber)
+        leads = self._parse_pdf(pdf_bytes, pdf_url, report_date)
+        leads = finalize_report(self._report, leads)
+        return leads if self._report["authoritative"] else []
+
+    def _write_staging(self, leads):
+        return refresh_staging(self, leads)
 
     # ── PDF discovery ───────────────────────────────────────────────────────
 
@@ -137,6 +145,7 @@ class MackieWolfTrusteeBot(BotBase):
 
         The old probe is kept as a fallback, now covering both spellings.
         """
+        self._linked_current = False
         res = self.fetch(MWZM_INVESTORS_URL, method="GET")
         if res is not None and res.status_code == 200:
             links = re.findall(
@@ -146,16 +155,13 @@ class MackieWolfTrusteeBot(BotBase):
             )
             best: Tuple[Optional[str], Optional[date]] = (None, None)
             for url in links:
-                m = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", url)
-                if not m:
-                    continue
-                try:
-                    d = date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
-                except ValueError:
+                d = report_as_of(url)
+                if d is None:
                     continue
                 if best[1] is None or d > best[1]:
                     best = (url, d)
             if best[0]:
+                self._linked_current = len({url for url in links if report_as_of(url) == best[1]}) == 1
                 self.logger.info(f"sale report discovered: {best[0]}")
                 return best
 
@@ -208,27 +214,9 @@ class MackieWolfTrusteeBot(BotBase):
             self.logger.warning(f"pdfplumber failed: {e}")
             return []
 
-        lines = full_text.splitlines()
-        # Find record-start indices (lines matching the header pattern)
-        record_starts = [
-            i for i, l in enumerate(lines)
-            if LISTING_HEAD_RE.match(l.strip())
-        ]
-        if not record_starts:
-            self.logger.info("no listing-header lines matched in PDF")
-            return []
+        from ._mackie_pdf import ADDRESS_HEADERS, address_columns
 
-        for j, start in enumerate(record_starts):
-            end = record_starts[j + 1] if j + 1 < len(record_starts) else len(lines)
-            record = [lines[k].strip() for k in range(start, end)]
-
-            head_m = LISTING_HEAD_RE.match(record[0])
-            if not head_m:
-                continue
-            sale_date_raw = head_m.group(1)
-            file_no = head_m.group(2)
-            header_rest = head_m.group(3).strip()
-
+        def borrower_columns(record, header_rest):
             # Find the CITY/STATE/ZIP tail line (terminates the record).
             tail_idx = None
             tail_match = None
@@ -240,8 +228,8 @@ class MackieWolfTrusteeBot(BotBase):
                     break
             if tail_idx is None or tail_match is None:
                 # Malformed record — skip rather than write bad data.
-                self.logger.debug(f"no CITY TN ZIP tail for record starting at line {start}")
-                continue
+                self.logger.debug(f"no CITY TN ZIP tail for record {record[0]}")
+                return None
 
             city = tail_match.group(1).strip()
             zip_code = tail_match.group(2)
@@ -280,9 +268,9 @@ class MackieWolfTrusteeBot(BotBase):
                         break
                 if not after_text:
                     self.logger.debug(
-                        f"no street pattern found for record at line {start}"
+                        f"no street pattern found for record {record[0]}"
                     )
-                    continue
+                    return None
 
             # Trim trailing comma/space from borrower segment (when the
             # last borrower entry ended with ", " before the address)
@@ -313,7 +301,6 @@ class MackieWolfTrusteeBot(BotBase):
                 # cleaned-up borrower-prefix from line 1 as the name.
                 if borrowers_on_header:
                     owners.append(borrowers_on_header)
-            primary_owner = ", ".join(owners) if owners else None
 
             # Split "STREET COUNTY" — county is the trailing word(s).
             # Multi-word county edge case ("Van Buren") gets explicit
@@ -343,10 +330,47 @@ class MackieWolfTrusteeBot(BotBase):
             if county is None:
                 ac_parts = after_text.rsplit(None, 1)
                 if len(ac_parts) < 2:
-                    continue
+                    return None
                 street = ac_parts[0].strip()
                 county = ac_parts[1].strip()
 
+            return street, city, zip_code, county, sale_platform, owners
+
+        lines = full_text.splitlines()
+        address_only = next((line.strip() for line in lines if line.strip()), "") in ADDRESS_HEADERS
+        # A dated test or malformed file starts its own row even when skipped.
+        start_pattern = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}\s") if address_only else LISTING_HEAD_RE
+        record_starts = [
+            i for i, l in enumerate(lines)
+            if start_pattern.match(l.strip())
+        ]
+        if not record_starts:
+            self.logger.info("no listing-header lines matched in PDF")
+            return []
+
+        for j, start in enumerate(record_starts):
+            end = record_starts[j + 1] if j + 1 < len(record_starts) else len(lines)
+            record = [lines[k].strip() for k in range(start, end)]
+
+            head_m = LISTING_HEAD_RE.match(record[0])
+            if not head_m:
+                continue
+            sale_date_raw = head_m.group(1)
+            file_no = head_m.group(2)
+            header_rest = head_m.group(3).strip()
+
+            if address_only:
+                parts = address_columns(header_rest, record[1:], SALE_PLATFORMS | {"COVIUS_REALTYBID"})
+                if parts is None:
+                    continue
+                street, city, zip_code, county, sale_platform = parts
+                owners = []
+            else:
+                parts = borrower_columns(record, header_rest)
+                if parts is None:
+                    continue
+                street, city, zip_code, county, sale_platform, owners = parts
+            primary_owner = ", ".join(owners) if owners else None
             full_addr = f"{street}, {city}, TN {zip_code}"
 
             # Stable lead key: file_no is unique per case
