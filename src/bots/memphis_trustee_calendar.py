@@ -6,7 +6,7 @@ import requests
 from dateutil.tz import gettz
 from bs4 import BeautifulSoup
 
-from ._base import BotBase, _supabase
+from ._base import BotBase, _supabase, guard_phone_metadata
 
 URL = "https://sales.thefoundationlegalgroup.com/"
 FIRM = "Foundation Legal Group, LLP"
@@ -96,11 +96,12 @@ def review(row, listings, today, end):
         advertised = calendar_date(notice.get("advertised_auction_date") or "")
     except ValueError:
         return evidence
+    evidence["advertised_date"] = advertised.isoformat()
     address = row["property_address"] or ""
     zipcode = re.search(r"\bTN\s+(\d{5})(?:-\d{4})?$", address, re.I)
     target = street(address.split(",")[0])
     if (not zipcode or not re.match(r"^\d+\s", target) or target != street(notice.get("address") or "")
-            or advertised.isoformat() != row["trustee_sale_date"] or advertised > end):
+            or advertised > end):
         return evidence
     # Keep one dated anchor across omissions to recognize a subsequent continuance.
     # Bind it to the original evidence controls before it can support a new date.
@@ -111,9 +112,37 @@ def review(row, listings, today, end):
         anchor = prior.get("last_linked_date")
         if anchor:
             evidence["last_linked_date"] = anchor
+    prior_listing = prior.get("listing") or {}
+    accepted_dates = {advertised.isoformat()}
+    if anchor:
+        accepted_dates.add(anchor)
+        if prior_listing.get("prior_date"):
+            accepted_dates.add(prior_listing["prior_date"])
+    if row["trustee_sale_date"] not in accepted_dates:
+        return {**evidence, "reason": "stored_date_conflict"}
+    pm = row.get("phone_metadata") or {}
+    if not isinstance(pm, dict) or not isinstance(pm.get("notice_tracking", {}), dict):
+        return {**evidence, "reason": "invalid_notice_metadata"}
+    tracking = pm.get("notice_tracking", {})
+    aliases = [a for a in (raw.get("foundation_legal_address"), tracking.get("foundation_legal_address"))
+               if a is not None]
+    alias = None
+    if aliases:
+        alias = aliases[-1]
+        if (not isinstance(alias, dict) or any(not isinstance(a, dict) or a.get("address") != alias.get("address")
+                or not re.fullmatch(r"https://www\.memphisdailynews\.com/Search/Details/ViewNotice\.aspx"
+                                    rf"\?id={fid}&date=\d{{1,2}}/\d{{1,2}}/\d{{4}}", a.get("source_url") or "")
+                or a.get("notice_id") != fid or not notice.get("instrument_no")
+                or a.get("instrument_no") != notice["instrument_no"] for a in aliases)
+                or alias.get("zip") != zipcode[1] or not alias.get("street") or not alias.get("city")
+                or alias["street"].split()[0] != target.split()[0]):
+            return {**evidence, "reason": "legal_address_conflict"}
+        target = street(alias["street"])
+        evidence["publisher_legal_address"] = alias
     candidates = [r for r in listings if street(r["address"]) == target]
     if candidates:
-        if len(candidates) != 1 or candidates[0]["zip"] != zipcode[1]:
+        if (len(candidates) != 1 or candidates[0]["zip"] != zipcode[1]
+                or (alias and candidates[0]["city"].casefold() != alias["city"].casefold())):
             return {**evidence, "reason": "ambiguous_identity"}
         listing = candidates[0]
         observed = date.fromisoformat(listing["date"])
@@ -136,18 +165,63 @@ def review(row, listings, today, end):
     return {**evidence, "status": "expired" if (anchor or advertised.isoformat()) < today.isoformat() else "omitted"}
 
 
+def handoff(table, row, evidence, observed_at):
+    """CRM reads the staging date and sync_sale_dates orders observations by last_seen_at."""
+    listing = evidence.get("listing") or {}
+    previous = row["trustee_sale_date"]
+    if (evidence["status"] != "postponed" or listing.get("prior_date") != previous
+            or listing["date"] <= previous):
+        return False
+    # CRM sync also joins street + ZIP across sources. Never export a unit-specific
+    # or alternate-street date under the less precise staging address.
+    if street(listing["address"]) != street(row["property_address"].split(",")[0]):
+        return False
+    pm = row.get("phone_metadata")
+    if (pm is not None and not isinstance(pm, dict)) or (pm or {}).get("sale_status"):
+        return False
+    tracking = (pm or {}).get("notice_tracking", {})
+    if not isinstance(tracking, dict):
+        return False
+    if tracking.get("last_seen_at"):
+        try:
+            if datetime.fromisoformat(tracking["last_seen_at"].replace("Z", "+00:00")) > observed_at:
+                return False
+        except (ValueError, TypeError, AttributeError):
+            return False
+    notice = row.get("structured") or (row.get("raw_payload") or {}).get("structured") or {}
+    if not notice.get("instrument_no"):
+        return False
+    update = {"trustee_sale_date": listing["date"], "phone_metadata": {
+        **(pm or {}), "notice_tracking": {**tracking, "last_seen_at": observed_at.isoformat(),
+                                          "last_seen_by": KEY}}}
+    query = table.update(update)
+    guards = {"id": row["id"], "pipeline_lead_key": row["pipeline_lead_key"], "bot_source": "memphis_daily_news",
+              "staging_status": row["staging_status"], "county": "shelby", "property_address": row["property_address"],
+              "trustee_sale_date": previous, "raw_payload->structured->>tdn_no": evidence["notice_id"],
+              "raw_payload->structured->>substitute_trustee": FIRM,
+              "raw_payload->structured->>instrument_no": notice["instrument_no"],
+              "raw_payload->structured->>advertised_auction_date": notice["advertised_auction_date"],
+              f"raw_payload->{KEY}->>status": "postponed", f"raw_payload->{KEY}->>checked_on": evidence["checked_on"],
+              f"raw_payload->{KEY}->listing->>prior_date": previous, f"raw_payload->{KEY}->listing->>date": listing["date"]}
+    for key, value in guards.items():
+        query = query.eq(key, value)
+    return bool(guard_phone_metadata(query, pm).execute().data)
+
+
 def run():
     today = datetime.now(timezone.utc).astimezone(gettz("America/Chicago")).date()
     end = today + timedelta(days=120)
+    observed_at = datetime.now(timezone.utc)
     listings = load_calendar(today, end)
     client = _supabase()
     if client is None:
         raise RuntimeError("staging unavailable")
     last = None
-    fetched = staged = 0
+    fetched = staged = dates_updated = 0
     while True:
         query = (client.table("homeowner_requests_staging")
-                 .select("id,bot_source,pipeline_lead_key,county,property_address,trustee_sale_date,"
+                 .select("id,bot_source,pipeline_lead_key,county,property_address,trustee_sale_date,staging_status,phone_metadata,"
+                         "legal_address:raw_payload->foundation_legal_address,"
                          "structured:raw_payload->structured,prior:raw_payload->memphis_trustee_calendar")
                  .eq("bot_source", "memphis_daily_news").eq("county", "shelby")
                  .eq("raw_payload->structured->>substitute_trustee", FIRM)
@@ -156,6 +230,7 @@ def run():
             query = query.gt("id", last)
         rows = query.order("id").limit(100).execute().data or []
         patches = []
+        postponed = []
         for row in rows:
             prior = row["prior"] or {}
             # Revisit elapsed notices for continuances, including previously observed extensions.
@@ -163,9 +238,12 @@ def run():
             latest = max(row["trustee_sale_date"] or "", prior.get("last_linked_date") or "")
             if latest and latest < cutoff and prior.get("status") in (None, "expired"):
                 continue
-            evidence = review({**row, "raw_payload": {"structured": row["structured"]}}, listings, today, end)
+            raw = {"structured": row["structured"], "foundation_legal_address": row.get("legal_address")}
+            evidence = review({**row, "raw_payload": raw}, listings, today, end)
             if evidence:
                 fetched += 1
+                if evidence["status"] == "postponed" and row["trustee_sale_date"] != evidence["listing"]["date"]:
+                    postponed.append((row, evidence))
                 if evidence != prior:
                     patches.append({"id": row["id"], "raw_patch": {KEY: evidence}})
         if patches:
@@ -173,7 +251,9 @@ def run():
             if count != len(patches):
                 raise RuntimeError("incomplete calendar evidence update")
             staged += count
+        for row, evidence in postponed:
+            dates_updated += handoff(client.table("homeowner_requests_staging"), row, evidence, observed_at)
         if len(rows) < 100:
             break
         last = rows[-1]["id"]
-    return {"status": "success", "fetched": fetched, "staged": staged}
+    return {"status": "success", "fetched": fetched, "staged": staged, "dates_updated": dates_updated}

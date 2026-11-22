@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import unittest
 from bs4 import BeautifulSoup
 
 from src.bots import memphis_trustee_calendar as cal
+from src.bots._memphis_notice_evidence import publisher_evidence
 
 
 DAY = date(2026, 11, 22)
@@ -50,6 +51,53 @@ class CalendarTests(unittest.TestCase):
         assert check([LISTING], dict(ROW, pipeline_lead_key="wrong")) is None
         assert check([LISTING], dict(ROW, county="davidson")) is None
 
+
+    def test_legal_unit_requires_same_notice_loan_zip_and_unique_listing(self):
+        notice = dict(NOTICE, instrument_no="01000123")
+        url = "https://www.memphisdailynews.com/Search/Details/ViewNotice.aspx?id=FD100&date=11/20/2026"
+        clause = "ALSO KNOWN AS: 14 Oak Cove East #204, Cordova, TN 38125 This sale is subject to"
+        raw = publisher_evidence(dict(notice, body=clause), "shelby", "FD100", url)
+        alias = raw["foundation_legal_address"]
+        listing = dict(LISTING, address="14 Oak Cove East #204", city="Cordova")
+        def status(aka, entries):
+            row = dict(ROW, raw_payload={"structured": notice, "foundation_legal_address": aka})
+            return check(entries, row)["status"]
+        self.assertEqual(status(alias, [listing]), "corroborated")
+        for change in [{"instrument_no": "other"}, {"notice_id": "FD200"}, {"zip": "38124"},
+                       {"source_url": url.replace("FD100", "FD200")}]:
+            self.assertEqual(status(dict(alias, **change), [listing]), "unresolved")
+        self.assertEqual(status(alias, [dict(listing, address="14 Oak Cove East #205")]), "unresolved")
+        self.assertEqual(status(alias, [listing, listing]), "unresolved")
+        self.assertNotIn("foundation_legal_address", publisher_evidence(
+            dict(notice, body=clause + " " + clause), "shelby", "FD100", url))
+
+    def test_postponement_handoff_and_next_recheck(self):
+        row = dict(ROW, staging_status="pending", raw_payload={"structured": dict(NOTICE, instrument_no="001")})
+        listing = dict(LISTING, date="2027-01-05", prior_date="2026-12-01")
+        ev = check([listing], row)
+        clock = datetime(2026, 11, 22, 21, tzinfo=timezone.utc)
+        table = MagicMock()
+        query = table.update.return_value
+        query.eq.return_value = query.is_.return_value = query
+        query.execute.return_value.data = [row]
+        self.assertTrue(cal.handoff(table, row, ev, clock))
+        change = table.update.call_args.args[0]
+        self.assertEqual(change["trustee_sale_date"], "2027-01-05")
+        self.assertEqual(change["phone_metadata"]["notice_tracking"]["last_seen_at"], clock.isoformat())
+        query.eq.assert_any_call("trustee_sale_date", "2026-12-01")
+        query.eq.assert_any_call("raw_payload->memphis_trustee_calendar->listing->>date", "2027-01-05")
+        query.is_.assert_called_with("phone_metadata", "null")
+        updated = dict(row, **change, prior=ev)
+        self.assertEqual(check([listing], updated)["status"], "postponed")
+        self.assertFalse(cal.handoff(table, updated, ev, clock))
+        next_listing = dict(listing, prior_date="2027-01-05", date="2027-02-01")
+        self.assertEqual(check([next_listing], updated)["status"], "postponed")
+        for modified in [dict(row, trustee_sale_date="2026-12-03"), dict(row, property_address="14 Oak Cv #3, Memphis, TN 38125"),
+                         dict(row, phone_metadata={"sale_status": {"status": "cancelled"}}),
+                         dict(row, phone_metadata={"notice_tracking": {"last_seen_at": "2026-12-01T12:00:00Z"}})]:
+            self.assertFalse(cal.handoff(table, modified, ev, clock))
+        for status in ["expired", "omitted", "unresolved", "corroborated"]:
+            self.assertFalse(cal.handoff(table, row, dict(ev, status=status), clock))
 
     def test_parser_rejects_partial_or_wrong_geography(self):
         form = (f'<input id="txtRangeBegin" value="{DAY}"><input id="txtRangeEnd" value="{END}">'
