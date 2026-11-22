@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from src.bots.memphis_codes_bot import FIELDS, MemphisCodesBot, evidence, request_address
+from src.bots.memphis_codes_bot import FIELDS, MemphisCodesBot, evidence, request_address, review_candidates
 
 
 DAY = "2026-11-22"
@@ -24,6 +24,15 @@ def response(features, more=False):
 class MemphisTests(unittest.TestCase):
     def setUp(self):
         self.bot = MemphisCodesBot()
+
+    @patch("src.bots.memphis_codes_bot.REFRESH_LIMIT", 2)
+    def test_active_cases_and_history_have_separate_review_capacity(self):
+        def row(key, checked=None, finding=None):
+            return dict(id=key, pipeline_lead_key=key, checked=checked, finding=finding)
+
+        candidates = [row("a"), row("b"), row("c"), row("previous", DAY, "structural_request"), row("new")]
+        selected = review_candidates(candidates, {"new"})
+        self.assertEqual([r["id"] for r in selected], ["new", "previous", "a", "b"])
 
     def test_exact_confirmation_across_pages_filters_noise_and_conflicts(self):
         self.bot.fetch = Mock(side_effect=[

@@ -167,7 +167,8 @@ class MemphisCodesBot(BotBase):
         last = "00000000-0000-0000-0000-000000000000"
         while True:
             page = (table.select("id,pipeline_lead_key,number:raw_payload->memphis_311->>INCIDENT_NUMBER,"
-                                 "checked:raw_payload->memphis_codes_review->>checked_on")
+                                 "checked:raw_payload->memphis_codes_review->>checked_on,"
+                                 "finding:raw_payload->memphis_codes_review->>finding")
                     .eq("bot_source", self.name).gt("id", last).order("id").limit(250).execute().data)
             for row in page:
                 key = row["pipeline_lead_key"]
@@ -181,7 +182,7 @@ class MemphisCodesBot(BotBase):
             last = page[-1]["id"]
         fresh = [lead for lead in leads if lead.pipeline_lead_key not in known]
         staged, dupes = super()._write_staging(fresh) if fresh else (0, 0)
-        selected = sorted(candidates, key=lambda r: (r["checked"] or "", r["id"]))[:REFRESH_LIMIT]
+        selected = review_candidates(candidates, {lead.pipeline_lead_key for lead in leads})
         for start in range(0, len(selected), 40):
             chunk = selected[start:start + 40]
             numbers = {r["number"] for r in chunk}
@@ -205,6 +206,19 @@ class MemphisCodesBot(BotBase):
                 if count != len(patches):
                     raise RuntimeError(f"Memphis review updated {count} of {len(patches)} rows")
         return staged, dupes + len(leads) - len(fresh)
+
+
+def review_candidates(candidates, discovered_keys):
+    # Reserve capacity for history even when the active list grows. Prior
+    # research cases that disappeared from discovery still need a disposition.
+    research = []
+    history = []
+    for row in sorted(candidates, key=lambda r: (r["checked"] or "", r["id"])):
+        if row.get("finding") == "structural_request" or row["pipeline_lead_key"] in discovered_keys:
+            research.append(row)
+        else:
+            history.append(row)
+    return research[:REFRESH_LIMIT] + history[:REFRESH_LIMIT]
 
 
 def run() -> dict:
