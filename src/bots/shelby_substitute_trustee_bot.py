@@ -35,6 +35,8 @@ import sys
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Set
 
+from requests.adapters import HTTPAdapter
+
 from ._base import BotBase, LeadPayload, _supabase
 from ._shelby_register import (BASE, address_of, deed_of_trust_ref, detail_url, parse_detail, parse_results,
                                split_parties, trustees, years_since)
@@ -96,6 +98,9 @@ def build_lead(bot: "ShelbySubstituteTrusteeBot", row: Dict[str, Any], appt: Opt
             "recorded": row["recorded"], "appointment_date": (appt or {}).get("instrument_date"),
             "lenders": parties["lenders"], "borrowers": parties["borrowers"], "party_basis": parties["basis"],
             "substitute_trustees": sub_trustees, "deed_of_trust": (appt and deed_of_trust_ref(appt)) or None,
+            # Preserve the index evidence even when a legacy reference cannot
+            # be resolved by the numeric deed-of-trust lookup.
+            **({"appointment_cross_references": appt["xrefs"]} if appt and appt.get("xrefs") else {}),
             "parcel_id": (dot or {}).get("parcel_id"), "subdivision": (dot or {}).get("subdivision"),
             "loan": loan or None,
         },
@@ -110,7 +115,8 @@ class ShelbySubstituteTrusteeBot(BotBase):
     expected_min_yield = 0      # weekends and holidays record nothing
     frozen_after_runs = 10_000
 
-    days_back = 7               # first run and catch-up window
+    days_back = 21              # allow catch-up across multiple scheduled weeks
+    recent_slots = 2            # keep early signals moving during a backlog
     # 2 detail requests each at 30s, plus the search: 6 filings is ~7 minutes,
     # inside the runner's 10-minute per-bot cap (leads are written only when
     # scrape() returns, so a timed-out run stages nothing). Two runs a day read
@@ -120,25 +126,36 @@ class ShelbySubstituteTrusteeBot(BotBase):
     # failed request): re-read a few per run, newest first, at 1 request each.
     max_backfill_per_run = 3
 
+    def __init__(self):
+        super().__init__()
+        # Transport retries would run inside fetch(), bypassing its crawl delay.
+        self.session.mount(BASE + "/", HTTPAdapter(max_retries=0))
+
     def scrape(self) -> List[LeadPayload]:
-        self.fetch(HOME)  # session cookie
+        home = self.fetch(HOME, allow_redirects=False)  # session cookie
+        if home is None or home.status_code != 200:
+            return []
         end = date.today()
         start = end - timedelta(days=self.days_back)
-        res = self.fetch(SEARCH, method="POST", data={
+        res = self.fetch(SEARCH, method="POST", allow_redirects=False, data={
             "itype1": CODE, "itype2": "", "startdate": start.strftime("%m/%d/%Y"),
             "enddate": end.strftime("%m/%d/%Y"), "searchtype": "ITYPE"})
         if res is None or res.status_code != 200:
             self.logger.warning(f"search failed ({getattr(res, 'status_code', 'no response')})")
             return []
-        rows = [r for r in parse_results(res.text) if r["code"] == CODE]
+        rows = {r["instrument"]: r for r in parse_results(res.text)
+                if r["code"] == CODE and start.isoformat() <= (r["recorded"] or "") <= end.isoformat()}
         self.logger.info(f"{len(rows)} APPT filing(s) {start} to {end}")
-        known = self._known({self.make_lead_key(self.name, f"shelby|{r['instrument']}") for r in rows})
-        fresh = [r for r in rows if self.make_lead_key(self.name, f"shelby|{r['instrument']}") not in known]
-        fresh.sort(key=lambda r: r["recorded"] or "", reverse=True)
-        if len(fresh) > self.max_new_per_run:
-            self.logger.info(f"{len(fresh)} new; reading the newest {self.max_new_per_run}, the rest next run")
+        keyed = {self.make_lead_key(self.name, f"shelby|{inst}"): row for inst, row in rows.items()}
+        known = self._known(set(keyed))
+        fresh = sorted((row for key, row in keyed.items() if key not in known),
+                       key=lambda row: (row["recorded"], row["instrument"]))
+        recent_start = (end - timedelta(days=7)).isoformat()
+        recent = [row for row in reversed(fresh) if row["recorded"] >= recent_start][:self.recent_slots]
+        priority_ids = {row["instrument"] for row in recent}
+        selected = (recent + [row for row in fresh if row["instrument"] not in priority_ids])[:self.max_new_per_run]
         leads: List[LeadPayload] = []
-        for row in fresh[: self.max_new_per_run]:
+        for row in selected:
             appt = self._detail(row["detail_url"]) if row.get("detail_url") else None
             if row.get("detail_url") and appt is None:
                 continue  # Retry the appointment before marking this instrument as collected.
@@ -201,7 +218,7 @@ class ShelbySubstituteTrusteeBot(BotBase):
         return filled
 
     def _detail(self, url: str) -> Optional[Dict[str, Any]]:
-        res = self.fetch(url)
+        res = self.fetch(url, allow_redirects=False)
         if res is None or res.status_code != 200:
             return None
         return parse_detail(res.text)
@@ -211,13 +228,14 @@ class ShelbySubstituteTrusteeBot(BotBase):
         client = _supabase()
         if client is None or not keys:
             return set()
-        try:
+        ordered = sorted(keys)
+        known = set()
+        # Bound the URL length when a busy three-week index contains hundreds of filings.
+        for offset in range(0, len(ordered), 100):
             res = (client.table("homeowner_requests_staging").select("pipeline_lead_key")
-                   .eq("bot_source", self.name).in_("pipeline_lead_key", sorted(keys)).execute())
-            return {r["pipeline_lead_key"] for r in (getattr(res, "data", None) or [])}
-        except Exception as e:  # noqa: BLE001 - a failed lookup only costs extra requests
-            self.logger.warning(f"known-key lookup failed: {e}")
-            return set()
+                   .eq("bot_source", self.name).in_("pipeline_lead_key", ordered[offset:offset + 100]).execute())
+            known.update(r["pipeline_lead_key"] for r in res.data or [])
+        return known
 
 
 def run() -> dict:

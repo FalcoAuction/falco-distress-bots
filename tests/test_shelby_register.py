@@ -12,6 +12,7 @@ import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 os.environ["NEXT_PUBLIC_SUPABASE_URL"] = ""
 os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
@@ -142,6 +143,11 @@ class LeadTests(unittest.TestCase):
         bot = ShelbySubstituteTrusteeBot()
         row = parse_results(RESULTS)[1]
         lead = build_lead(bot, row, parse_detail(APPT_OLD_BOOK), None)
+        self.assertEqual(lead.raw_payload["appointment_cross_references"],
+                         [{"instrument": "LM6983", "year": "2001"}])
+        self.assertIsNone(lead.raw_payload["deed_of_trust"])
+        self.assertIsNone(lead.raw_payload["parcel_id"])
+        self.assertEqual(lead.raw_payload["party_basis"], "lender_words")
         self.assertIsNone(lead.property_address)
         self.assertIsNone(lead.mortgage_balance)
         self.assertEqual(lead.owner_name_records, "ROE RICHARD; ROE RITA")
@@ -158,6 +164,31 @@ class LeadTests(unittest.TestCase):
         self.assertEqual(lead.raw_payload["borrowers"], [])
         self.assertEqual(lead.raw_payload["party_basis"], "unidentified")
         self.assertIn("Borrower not identified", lead.admin_notes)
+
+
+class ScheduledSelectionTests(unittest.TestCase):
+    def test_budget_shares_newest_and_oldest_unstaged_filings(self):
+        bot = ShelbySubstituteTrusteeBot()
+        dates = ["2026-10-31", "2026-11-01", "2026-11-08", "2026-11-09",
+                 "2026-11-10", "2026-11-11", "2026-11-20", "2026-11-21",
+                 "2026-11-22", "2026-11-23", None]
+        rows = [dict(parse_results(RESULTS)[0], instrument=str(i), recorded=day,
+                     detail_url=f"https://example/{i}") for i, day in enumerate(dates)]
+        known = {bot.make_lead_key(bot.name, "shelby|2")}
+        with patch("src.bots.shelby_substitute_trustee_bot.date", wraps=date) as clock, \
+                patch("src.bots.shelby_substitute_trustee_bot.parse_results", return_value=rows + [rows[1]]), \
+                patch.object(bot, "_known", side_effect=lambda keys: known & keys), \
+                patch.object(bot, "fetch", return_value=Mock(status_code=200)) as fetch, \
+                patch.object(bot, "_detail", return_value={}) as detail, patch.object(bot, "backfill"):
+            clock.today.return_value = date(2026, 11, 22)
+            for expected in (["8", "7", "1", "3", "4", "5"], ["6"], []):
+                leads = bot.scrape()
+                self.assertEqual([lead.raw_payload["instrument"] for lead in leads], expected)
+                self.assertEqual([call.args[0] for call in detail.call_args_list],
+                                 [f"https://example/{i}" for i in expected])
+                self.assertEqual(fetch.call_args.kwargs["data"]["startdate"], "11/01/2026")
+                known.update(lead.pipeline_lead_key for lead in leads)
+                detail.reset_mock()
 
 
 if __name__ == "__main__":
