@@ -597,7 +597,8 @@ class TnPublicNoticeBot(ProbateNoticeBot):
                 return None   # bids, storage and towing sales, other auctioneers' ads
         if kind == "foreclosure" and distress not in ("PROBATE", "PRE_FORECLOSURE", "PARTITION"):
             filed_as, distress = distress, "PRE_FORECLOSURE"
-        property_address = court_address or self._extract_address(excerpt, city)
+        address_text = trustee_notice.property_address_text(excerpt) if distress == "PRE_FORECLOSURE" else excerpt
+        property_address = court_address or self._extract_address(address_text, city)
         parcel = self._extract_parcel(excerpt)
         if tax_lead is not None:
             parcel, property_address = tax_lead
