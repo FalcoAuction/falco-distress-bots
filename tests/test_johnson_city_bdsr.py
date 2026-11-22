@@ -100,3 +100,34 @@ class JohnsonCityTests(unittest.TestCase):
         update.eq.assert_any_call("id", "row")
         update.filter.assert_called_once()
         self.assertEqual(update.filter.call_args.args[:2], ("raw_payload", "eq"))
+
+
+class BoardRoutingTests(unittest.TestCase):
+    def test_decision_holds_canonical_and_promoted_board_copies(self):
+        from src.bots.decision_engine_bot import DecisionEngineBot
+        from src.bots._free_data import johnson_board_research
+        bot = DecisionEngineBot()
+        raw = {"johnson_city_bdsr": {"stage": "docket_removal_reported"}}
+        for row in ({"bot_source": "johnson_city_bdsr"}, {"source": "bot", "raw_payload": raw}):
+            decision = bot._fast_rules(row)
+            self.assertEqual((decision["action"], decision["priority_score"], decision["suggested_outreach"]),
+                             ("HOLD_FOR_DATA", 0, "none"))
+        self.assertFalse(johnson_board_research({"bot_source": "independent_notice", "raw_payload": raw}))
+
+    def test_promoter_skips_pending_and_verified_board_rows_before_contact(self):
+        from src.bots.auto_promoter_bot import AutoPromoterBot
+        client = MagicMock()
+        live = MagicMock()
+        staging = MagicMock()
+        client.table.side_effect = {"homeowner_requests": live, "homeowner_requests_staging": staging}.__getitem__
+        live.select.return_value.range.return_value.execute.return_value.data = []
+        staging.select.return_value.in_.return_value.range.return_value.execute.return_value.data = [
+            {"bot_source": "johnson_city_bdsr", "staging_status": status}
+            for status in ("pending", "verified")]
+        with patch("src.bots.auto_promoter_bot._supabase", return_value=client), \
+                patch("src.bots.auto_promoter_bot.paid_data_enabled", return_value=False), \
+                patch.object(AutoPromoterBot, "_report_health"):
+            result = AutoPromoterBot().run()
+        self.assertEqual(result["held_johnson_board"], 2)
+        self.assertEqual(result["attempted"], 0)
+        live.insert.assert_not_called()

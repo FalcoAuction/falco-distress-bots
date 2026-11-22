@@ -47,7 +47,7 @@ from ._paid import paid_data_enabled
 from ._field_confidence import phone_trust
 from ._warn_gate import is_tn_warn
 from ._land_qualification import land_gate
-from ._free_data import entity_eligible, professional_contact_ready
+from ._free_data import entity_eligible, johnson_board_research, professional_contact_ready
 from ._twilio_lookup import (
     get_twilio_client,
     normalize_phone_e164,
@@ -185,6 +185,7 @@ class AutoPromoterBot(BotBase):
 
         # Pull eligible staging candidates
         promoted = 0
+        held_johnson_board = 0
         skipped_not_defensible = 0
         skipped_missing_field = 0
         skipped_dup = 0
@@ -217,6 +218,9 @@ class AutoPromoterBot(BotBase):
             for row in rows:
                 if attempted >= max_per_run:
                     break
+                if johnson_board_research(row):
+                    held_johnson_board += 1
+                    continue
                 # Eligibility checks — gate shape depends on distress type.
                 # Foreclosure family needs defensible mortgage data
                 # (the pitch is equity-protect, math sheet, etc.).
@@ -488,6 +492,7 @@ class AutoPromoterBot(BotBase):
         return {
             "name": self.name, "status": "ok",
             "attempted": attempted, "promoted": promoted,
+            "held_johnson_board": held_johnson_board,
             "not_defensible": skipped_not_defensible,
             "missing_field": skipped_missing_field,
             "already_in_live": skipped_already_promoted,
