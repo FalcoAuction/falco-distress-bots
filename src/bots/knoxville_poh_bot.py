@@ -196,6 +196,9 @@ class KnoxvillePohBot(BotBase):
                     except Exception as exc:
                         self.refresh_counts["failed"] += 1
                         self.logger.warning("Knoxville update failed (%s)", type(exc).__name__)
+        from ._knox_poh_assessor import refresh
+        self.assessor_counts = refresh(client, self._reviews, self.fetch)
+        self.logger.info("Knox County tax roll %s", self.assessor_counts)
         return staged, len(leads) - len(fresh)
 
     def _extract_text(self, pdf_bytes: bytes) -> str:
