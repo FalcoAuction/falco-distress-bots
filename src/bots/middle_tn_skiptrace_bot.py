@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
+from ._land_qualification import GATE_FIELDS, land_gate
 from .batchdata_skip_trace_bot import BatchDataSkipTraceBot
 
 
@@ -82,7 +83,8 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                         .select(
                             "id, property_address, owner_name_records, "
                             "full_name, county, priority_score, "
-                            "phone_metadata, distress_type, trustee_sale_date"
+                            "phone_metadata, distress_type, trustee_sale_date," + GATE_FIELDS
+                            + (",staging_status" if table == "homeowner_requests_staging" else "")
                         )
                         .is_("phone", "null")
                         .not_.is_("owner_name_records", "null")
@@ -102,6 +104,8 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                     if not rows:
                         break
                     for r in rows:
+                        if not land_gate(r, client=client):
+                            continue
                         if _normalize_county(r.get("county")) not in FOCUS_COUNTIES:
                             continue
                         pm = r.get("phone_metadata") or {}

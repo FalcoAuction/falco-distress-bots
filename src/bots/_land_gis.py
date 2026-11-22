@@ -74,12 +74,25 @@ def county_rows(county: str, get: Callable[..., Any]) -> Iterator[Dict[str, Any]
     is the caller's fetch (url, params=...) returning a response or None."""
     url, where, shape = SOURCES[county]
     offset = 0
+    last_id = None
     while True:
         res = get(url, params={"where": where, "outFields": "*", "returnGeometry": "false", "f": "json",
                                "resultOffset": offset, "resultRecordCount": PAGE, "orderByFields": "OBJECTID"})
-        feats: List[Dict[str, Any]] = (res.json().get("features") or []) if res is not None and res.status_code == 200 else []
+        if res is None or res.status_code != 200:
+            raise ValueError(f"{county} parcel service failed at offset {offset}")
+        page = res.json()
+        if page.get("error") or not isinstance(page.get("features"), list):
+            raise ValueError(f"{county} parcel service returned an invalid page at offset {offset}")
+        feats = page["features"]
         for f in feats:
-            yield shape(f.get("attributes") or {})
-        if len(feats) < PAGE:
+            attrs = f["attributes"]
+            oid = attrs.get("OBJECTID")
+            if oid is None or (last_id is not None and oid <= last_id):
+                raise ValueError(f"{county} parcel page failed to advance at offset {offset}")
+            last_id = oid
+            yield shape(attrs)
+        if not page.get("exceededTransferLimit") and len(feats) < PAGE:
             return
-        offset += PAGE
+        if not feats:
+            raise ValueError(f"{county} parcel service returned an empty intermediate page")
+        offset += len(feats)

@@ -69,6 +69,7 @@ import traceback as tb
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ._land_qualification import land_gate
 from ._base import BotBase, _supabase
 from ._field_confidence import (
     deep_merge_dict,
@@ -530,6 +531,8 @@ class DecisionEngineBot(BotBase):
     def _fast_rules(self, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Apply the explicit safety rails. Returns a decision dict if a
         rule matches, None if the lead is gray-area and needs LLM."""
+        if not land_gate(row):
+            return self._mk_decision("HOLD_FOR_DATA", 0, "Land evidence requires operator research", "none", 1.0)
         pm = row.get("phone_metadata") or {}
         if not isinstance(pm, dict):
             pm = {}
