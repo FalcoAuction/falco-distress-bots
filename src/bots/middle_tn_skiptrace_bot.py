@@ -31,6 +31,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List
 
+from ._warn_gate import is_tn_warn
 from ._land_qualification import GATE_FIELDS, land_gate
 from .batchdata_skip_trace_bot import BatchDataSkipTraceBot
 
@@ -104,7 +105,7 @@ class MiddleTnSkipTraceBot(BatchDataSkipTraceBot):
                     if not rows:
                         break
                     for r in rows:
-                        if not land_gate(r, client=client):
+                        if is_tn_warn(r) or not land_gate(r, client=client):
                             continue
                         if _normalize_county(r.get("county")) not in FOCUS_COUNTIES:
                             continue

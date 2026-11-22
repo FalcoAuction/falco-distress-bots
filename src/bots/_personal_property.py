@@ -33,7 +33,10 @@ from __future__ import annotations
 import re
 import json
 import math
-from datetime import date
+from datetime import date, timedelta
+from urllib.parse import urlsplit
+
+from ._warn_gate import is_tn_warn
 from typing import Any, Dict, List, Optional, Tuple
 
 ESTATE_HOME_MIN = 1_000_000       # proxy only; contents signals qualify an estate at any home value
@@ -203,6 +206,8 @@ def classify(lead: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """lead: distress_type, full_name, owner_name_records, property_value, and raw_payload (dict)."""
     raw = lead.get("raw_payload") if isinstance(lead.get("raw_payload"), dict) else {}
     dt = (lead.get("distress_type") or "").upper()
+    if is_tn_warn(lead):
+        return _warn_assets(lead, raw)
     planes = _aircraft(raw)
     plane_bands = {p.get("value_band") for p in planes}
 
@@ -254,9 +259,6 @@ def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: 
     routable, why_not = True, None
     if region == "FL":
         routable, why_not = False, "Florida: no auction partner there yet"
-    elif dt == "BUSINESS_CLOSURE" and isinstance(raw.get("warn"), dict):
-        routable, why_not = False, "Confirm specific surplus assets and the authorized seller"
-        controller = "Asset owner or authorized disposition manager unverified"
     elif lane == "vessel_arrest":
         routable, why_not = False, "the court sells it; the plaintiff's counsel is a relationship, not a seller"
     elif lane == "vessel_lien" and not c.get("owner"):
@@ -281,13 +283,6 @@ def routing(tag: Dict[str, Any], lead: Dict[str, Any], raw: Dict[str, Any], dt: 
         basis = "business equipment on the county tangible personal property roll"
     if not tag.get("est_value_min") and lane not in _VALUE_BASIS:
         basis = "unknown: confirm on the first call"
-    if region == "TN" and dt == "BUSINESS_CLOSURE" and isinstance(raw.get("warn"), dict):
-        tag["grade"] = "B"
-        primary = "Ask the employer who handles surplus assets"
-        if not tag.get("est_value_min"):
-            basis = "No documented asset value"
-        if raw["warn"].get("asset_disposition") == "sold":
-            why_not = "Documented equipment sale completed"
     tag.update({
         "region": region, "controller": controller, "routable": routable, "not_routable_reason": why_not,
         "route_to": ROUTE_TO if routable else None, "value_basis": basis,
@@ -383,6 +378,79 @@ def qualify_routing(tag, lead, raw):
                    est_value_min=value.get("amount") or tag.get("est_value_min"),
                    value_basis=value.get("source_url") or tag.get("value_basis"))
     tag["prospect"] = tag["qualification"] in ("qualified_prospect", "reviewed")
+    return tag
+
+
+def _warn_assets(lead, raw):
+    """Apply the existing asset-review contract to the named employer, never to its landlord."""
+    notice = raw.get("warn") if isinstance(raw.get("warn"), dict) else {}
+    review = raw.get("warn_review") if isinstance(raw.get("warn_review"), dict) else {}
+    ev = raw.get("personal_property_evidence")
+    ev = ev if isinstance(ev, dict) else {}
+    company = str(notice.get("company") or "").strip()
+    source = notice.get("letter_url") or review.get("source_url")
+    notice_urls = {str(url).split("?")[0].split("#")[0].lower() for url in (
+        source, notice.get("letter_url"), review.get("source_url"), lead.get("source_url")) if url}
+
+    def independent(fact):
+        if not isinstance(fact, dict):
+            return False
+        url = fact.get("source_url")
+        try:
+            parts = urlsplit(url or "")
+            return (parts.scheme in {"https", "http"} and bool(parts.hostname)
+                    and url.split("?")[0].split("#")[0].lower() not in notice_urls
+                    and not (parts.hostname.endswith("tn.gov") and "warn" in parts.path.lower()))
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    assets = ev.get("assets") if isinstance(ev.get("assets"), list) else []
+    tag = _result("owner_asset", "B", [], None, [f"TN WARN employment notice: {company or 'unnamed employer'}"], raw, [])
+    tag.update(region="TN", routable=True, not_routable_reason=None, controller=None,
+               primary_contact=None, value_basis=None)
+    tag = qualify_routing(tag, lead, raw)
+    holds = tag["holds"]
+    matched = bool(company and company.casefold() == str(ev.get("subject_name") or "").strip().casefold()
+                   and tag["asset_evidence"] and len(tag["asset_evidence"]) == len(assets)
+                   and all(independent(asset) for asset in assets)
+                   and not any("subject does not match" in h for h in holds))
+    if not matched:
+        holds.append("Employer-specific inventory needs independent evidence")
+    for field in ("controller", "availability", "liens", "deadline"):
+        if not independent(ev.get(field)):
+            holds.append(f"{field.capitalize()} requires evidence independent of the employment notice")
+    terminal = next((r.get("asset_disposition") for r in (review, notice)
+                     if r.get("asset_disposition") in ("sold", "unavailable", "withdrawn")), None)
+    if terminal:
+        holds.append(f"Asset disposition reported: {terminal}")
+    held = terminal or tag["qualification"] == "hold"
+    qualified = bool(matched and not held)
+    routable = qualified and not holds
+    tag.update(policy="pp-warn-v1", lane="owner_asset" if qualified else "warn_research",
+               qualification="hold" if held else "reviewed" if routable else "qualified_prospect" if qualified else "research",
+               prospect=qualified, grade="B" if qualified else None, routable=routable,
+               categories=sorted({str(a["kind"]) for a in assets}) if qualified else [],
+               not_routable_reason="; ".join(holds) or None, route_to=ROUTE_TO if routable else None,
+               next_action="Review documented assets" if qualified else "Review employer and asset disposition",
+               warn_notice=notice.get("notice"), warn_company=company, disposition=terminal,
+               disposition_source=review.get("disposition_source") or notice.get("disposition_source"),
+               employment_notice_date=notice.get("effective"), letter_sha256=review.get("letter_sha256"),
+               est_value_min=None, value_basis=None)
+    # The employment effective date never supplies an asset deadline.
+    deadline = ev.get("deadline") if isinstance(ev.get("deadline"), dict) else {}
+    tag["deadline"] = deadline.get("date") if qualified and independent(deadline) and _fresh(deadline.get("verified_on")) else None
+    if not routable:
+        tag.update(controller=None, primary_contact=None)
+    if qualified:
+        dated = list(assets)
+        if routable:
+            dated += [ev["controller"], ev["availability"], ev["liens"], deadline]
+        for asset in assets:
+            if routable and asset["kind"] == "aircraft":
+                plane = next(p for p in _aircraft(raw) if p.get("n_number") == asset["asset_id"])
+                dated += [plane, {"verified_on": plane["registry_date"]}]
+        tag["review_valid_through"] = (min(date.fromisoformat(d["verified_on"]) for d in dated)
+                                       + timedelta(days=7)).isoformat()
     return tag
 
 

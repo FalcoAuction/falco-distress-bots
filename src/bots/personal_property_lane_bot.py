@@ -32,7 +32,7 @@ _RAW_TEXT = ("parcel", "cumulative_owed", "years_delinquent", "owner_name_1", "c
              "court_id", "docket_number", "courtlistener_docket_url", "case_number", "docket_url", "state",
              "source", "kind", "attorney", "petitioner", "petitioner_address", "filed", "debtor",
              "trustee", "sale_date")
-_RAW_JSON = ("court_notice", "warn", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
+_RAW_JSON = ("court_notice", "warn", "warn_review", "aircraft", "ffl", "outbuildings", "obituary", "vessel_case",
              "fl_tpp", "sunbiz_event", "vessel", "b2b_contacts", "personal_property_evidence")
 _BASE_COLS = "id, distress_type, full_name, owner_name_records, property_value, trustee_sale_date, county"
 
@@ -132,7 +132,7 @@ class PersonalPropertyLaneBot(BotBase):
                 "staged": tagged + cleared, "duplicates": unchanged, "fetched": scanned}
 
     def _rows(self, client, table: str):
-        cols = ", ".join([_BASE_COLS]
+        cols = ", ".join([_BASE_COLS] + (["bot_source"] if table == "homeowner_requests_staging" else [])
                          + [f"{k}:raw_payload->>{k}" for k in _RAW_TEXT]
                          + [f"{k}:raw_payload->{k}" for k in _RAW_JSON]
                          + ["_pp:raw_payload->personal_property"])
