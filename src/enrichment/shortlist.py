@@ -82,6 +82,21 @@ def screen(opportunity: Dict[str, Any], raw_payload: Optional[Dict[str, Any]], t
     if county not in IN_SCOPE:
         return False, {"reason": "outside_tennessee"}
     sale = _as_date(opportunity.get("sale_date"))
+    if opportunity.get("bot_source") == "mackie_wolf_trustee":
+        # The nightly ranking can still contain yesterday's deadline after a
+        # trustee report has moved or withdrawn a file.
+        metadata = opportunity.get("phone_metadata") or {}
+        if not isinstance(metadata, dict):
+            return False, {"reason": "trustee_notice_review"}
+        flag = metadata.get("sale_status") or {}
+        review = metadata.get("trustee_notice_review") or {}
+        if (not isinstance(flag, dict) or not isinstance(review, dict)
+                or flag.get("status") in {"ran", "reinstated", "cancelled"}
+                or review.get("reason") == "stale_notice"):
+            return False, {"reason": "trustee_notice_review"}
+        sale = _as_date(opportunity.get("trustee_sale_date"))
+        if sale is None or sale < today:
+            return False, {"reason": "no_current_sale_date"}
     days = (sale - today).days if sale else None
     if days is not None and 0 <= days < MIN_DAYS_TO_SALE:
         return False, {"reason": "sale_too_soon", "days_to_sale": days}
