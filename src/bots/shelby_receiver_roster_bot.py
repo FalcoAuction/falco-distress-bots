@@ -6,9 +6,11 @@ import re
 
 import pdfplumber
 
-from ._base import BotBase, BotTimeout
+from ._base import BotBase, BotTimeout, _supabase
 from ._owner_lookup import LegacyTLSAdapter
 from ._shelby_receiver_property import property_record
+from ._shelby_receiver_crm import publish, reviews
+from .shelby_receiver_history import collect_history
 from .shelby_tax_sale_bot import EXTRACT, SCHEDULE, scheduled_parcels
 
 
@@ -107,7 +109,7 @@ class ShelbyReceiverBot(BotBase):
                     continue
                 listing["property_review"] = property_record(response.text, case, listing, day)
 
-    def run(self):
+    def run(self, *, archive_seed=None):
         started = datetime.now(timezone.utc)
         self._report_health("running", started, None, 0, 0, 0, 0)
         receipt, error, status = None, None, "ok"
@@ -123,6 +125,18 @@ class ShelbyReceiverBot(BotBase):
             leads = scheduled_parcels(schedule.text, extract.content.decode("utf-8-sig"), started.date())
             attach_trustee_list(receipt, leads)
             self.attach_property_records(receipt, started.date())
+            client = _supabase()
+            if client is None:
+                raise RuntimeError("Receiver staging unavailable")
+            if archive_seed is None:
+                last = (client.table("bot_run_health").select("notes->sale_book_history")
+                        .eq("bot_source", self.name).eq("status", "ok").order("started_at", desc=True)
+                        .limit(1).execute().data or [])
+                archive_seed = last[0].get("sale_book_history") if last else None
+            receipt["sale_book_history"] = collect_history(receipt, self.session, previous=archive_seed,
+                                                          max_books=2, day=started.date())
+            receipt.update(publish(client, reviews(receipt, started.date()), started.date()))
+
         except BotTimeout as exc:
             status, error = "timed_out", str(exc)
         except Exception as exc:

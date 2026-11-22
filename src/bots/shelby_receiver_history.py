@@ -2,6 +2,7 @@
 import argparse
 import json
 import re
+from datetime import date, timedelta
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import urljoin
@@ -66,6 +67,8 @@ def book_results(pages, targets):
 def read_pages(content):
     pages = []
     with pypdfium2.PdfDocument(content) as doc:
+        if len(doc) > 1200:
+            raise ValueError("Sale book exceeds page budget")
         for page in doc:
             text = page.get_textpage()
             try:
@@ -76,7 +79,8 @@ def read_pages(content):
     return pages
 
 
-def collect_history(receipt, session):
+def collect_history(receipt, session, *, previous=None, max_books=None, day=None):
+    day = day or date.today()
     targets = matched_parcels(receipt)
     report = {"index_url": INDEX, "roster_sha256": receipt["sha256"], "targets": targets,
               "books": [], "receiver_appointment_verified": False, "sale_authority_verified": False}
@@ -84,29 +88,46 @@ def collect_history(receipt, session):
         return report
     response = session.get(INDEX, timeout=30)
     response.raise_for_status()
-    seen = set()
+    previous = previous or {}
+    cached = {book["url"]: book for book in previous.get("books", [])} if previous.get("targets") == targets else {}
+    catalog = {}
     for a in BeautifulSoup(response.content, "html.parser").select("a[href]"):
         label = " ".join(a.get_text(" ", strip=True).split())
         if not BOOK.match(label):
             continue
         url = urljoin(INDEX, a["href"]).replace("http://", "https://", 1)
-        if url in seen or not re.match(r"https://(?:www\.)?shelbycountytn\.gov/DocumentCenter/View/\d+", url, re.I):
+        if not re.match(r"https://(?:www\.)?shelbycountytn\.gov/DocumentCenter/View/\d+", url, re.I):
             continue
-        seen.add(url)
-        book = {"sale": label, "url": url}
-        report["books"].append(book)
+        catalog[url] = label
+    if not catalog:
+        raise ValueError("No recognized county sale books")
+    # Unchecked books first, newest index entry first on ties. Age failures
+    # and successes alike so a broken PDF cannot starve the rest of the index.
+    cutoff = (day - timedelta(days=90)).isoformat()
+    candidates = sorted(reversed(catalog), key=lambda u: cached.get(u, {}).get("attempted_on", ""))
+    due = [u for u in candidates if cached.get(u, {}).get("status") != "searched_extractable_text"
+           or cached[u].get("attempted_on", "") <= cutoff]
+    for url in due[:max_books]:
+        book = {"sale": catalog[url], "url": url, "attempted_on": day.isoformat()}
+        cached[url] = book
         try:
-            response = session.get(url, timeout=45)
-            response.raise_for_status()
-            pages = read_pages(response.content)
-        except (requests.RequestException, pypdfium2.PdfiumError) as exc:
+            with session.get(url, timeout=15, stream=True) as response:
+                response.raise_for_status()
+                content = bytearray()
+                for chunk in response.iter_content(65536):
+                    if len(content) + len(chunk) > 32 * 1024 * 1024:
+                        raise ValueError("Sale book exceeds download budget")
+                    content.extend(chunk)
+            pages = read_pages(bytes(content))
+        except (requests.RequestException, pypdfium2.PdfiumError, ValueError) as exc:
             book.update(status="unavailable", error=str(exc))
             continue
-        book.update(status="searched_extractable_text", sha256=sha256(response.content).hexdigest(),
+        book.update(status="searched_extractable_text", sha256=sha256(content).hexdigest(),
                     pages=len(pages), text_pages=sum(bool(p.strip()) for p in pages),
                     matches=list(book_results(pages, targets)))
-    if not seen:
-        raise ValueError("No recognized county sale books")
+    report["books"] = [cached.get(url, {"url": url, "sale": label, "status": "pending"})
+                       for url, label in catalog.items()]
+    report["books_attempted"] = len(due[:max_books])
     return report
 
 
