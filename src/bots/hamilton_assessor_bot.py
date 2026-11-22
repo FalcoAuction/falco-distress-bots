@@ -175,7 +175,8 @@ class HamiltonAssessorBot(BotBase):
 
         # Also build an address-keyed secondary index for leads that
         # don't have parcel ID yet
-        addr_index = self._build_address_index(index)
+        ambiguous_addresses = set()
+        addr_index = self._build_address_index(index, ambiguous_addresses)
         roll_index = {}
         for parcel, facts in index.items():
             key = "".join(parcel.split())
@@ -188,6 +189,11 @@ class HamiltonAssessorBot(BotBase):
         error_message: Optional[str] = None
 
         try:
+            try:
+                self._review_chattanooga_parcels(client, index, addr_index, ambiguous_addresses)
+            except Exception as exc:
+                self.logger.warning("Chattanooga parcel review incomplete: %s", type(exc).__name__)
+                error_message = f"Chattanooga parcel review incomplete: {type(exc).__name__}"
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} Hamilton candidates to enrich")
             for row in candidates[:self.max_leads_per_run]:
@@ -202,7 +208,11 @@ class HamiltonAssessorBot(BotBase):
                 if roll_key and roll_key.startswith("PER-"):
                     skipped += 1
                     continue
-                hit = roll_index.get("".join(roll_key.split())) if roll_key else self._lookup(row, index, addr_index)
+                if isinstance(raw0.get("chattanooga_codes"), dict):
+                    street = str(row.get("property_address") or "").split(",")[0].strip().upper()
+                    hit = None if street in ambiguous_addresses else index.get(addr_index.get(street))
+                else:
+                    hit = roll_index.get("".join(roll_key.split())) if roll_key else self._lookup(row, index, addr_index)
                 if hit is None:
                     no_match += 1
                     continue
@@ -288,6 +298,7 @@ class HamiltonAssessorBot(BotBase):
             self.logger.warning(f"Hamilton ZIP fetch failed: "
                                   f"{res.status_code if res else 'no-response'}")
             return {}
+        self.county_file_stamp = res.headers.get("Last-Modified") or res.headers.get("ETag")
         try:
             zf = zipfile.ZipFile(io.BytesIO(res.content))
         except zipfile.BadZipFile as e:
@@ -351,7 +362,7 @@ class HamiltonAssessorBot(BotBase):
         }
 
     @staticmethod
-    def _build_address_index(parcel_index: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
+    def _build_address_index(parcel_index: Dict[str, Dict[str, Any]], ambiguous=None) -> Dict[str, str]:
         """Build an address→parcel_key lookup for leads that don't yet
         have parcel ID. Only stores leading-portion of normalized addr."""
         idx: Dict[str, str] = {}
@@ -359,8 +370,43 @@ class HamiltonAssessorBot(BotBase):
             addr = (rec.get("property_address") or "").strip().upper()
             if not addr:
                 continue
+            if ambiguous is not None and addr in idx and idx[addr] != parcel_key:
+                ambiguous.add(addr)
             idx[addr] = parcel_key
         return idx
+
+    def _review_chattanooga_parcels(self, client, index, addresses, ambiguous):
+        """Use the same county download to check every city-code research record."""
+        last = None
+        table = client.table("homeowner_requests_staging")
+        while True:
+            q = table.select("id,property_address,pipeline_lead_key,case:raw_payload->chattanooga_codes->>case_number,"
+                             "prior:raw_payload->chattanooga_parcel_review").eq("bot_source", "chattanooga_codes")
+            if last:
+                q = q.gt("id", last)
+            rows = q.order("id").limit(100).execute().data or []
+            patches = []
+            for row in rows:
+                street = str(row.get("property_address") or "").split(",")[0].strip().upper()
+                case = row.get("case")
+                if not street or not case or row.get("pipeline_lead_key") != self.make_lead_key("chattanooga_codes", f"{case}|{street}"):
+                    continue
+                evidence = {"case_number": case, "property_address": street, "source_url": HAMILTON_ASSESSOR_ZIP,
+                            "county_file_stamp": self.county_file_stamp, "status": "no_exact_address"}
+                if street in ambiguous:
+                    evidence["status"] = "ambiguous_address"
+                elif street in addresses:
+                    record = index[addresses[street]]
+                    evidence.update(status="exact_county_address", parcel=record["parcel"],
+                                    recorded_owner=record["owner"], county_appraisal=record["appraised"],
+                                    land_use=record["land_use"])
+                if evidence != row.get("prior"):
+                    patches.append({"id": row["id"], "raw_patch": {"chattanooga_parcel_review": evidence}})
+            if patches:
+                client.rpc("apply_staging_enrichment", {"p_rows": patches}).execute()
+            if len(rows) < 100:
+                break
+            last = rows[-1]["id"]
 
     # ── Candidate fetch + lookup ────────────────────────────────────────────
 
