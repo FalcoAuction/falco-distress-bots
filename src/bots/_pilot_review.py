@@ -323,22 +323,50 @@ def merge_review(existing: Optional[Dict[str, Any]], new: Dict[str, Any]) -> Dic
     return existing
 
 
+def _owner_parts(key: Optional[str]) -> List[str]:
+    """The people and entities inside an owner key, each scoped to its county:
+    "tn|shelby|P:BYRD T+P:BYRD B" -> ["tn|shelby|P:BYRD T", "tn|shelby|P:BYRD B"]."""
+    if not key or key.count("|") < 2:
+        return []
+    scope, _, names = key.rpartition("|")
+    return [f"{scope}|{n}" for n in names.split("+") if n]
+
+
 def dedupe_worklist(cards: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Collapse first-trace cards to one row per owner group, keeping every
-    separately identified property under it. A card with no owner key stands
-    alone. Cards for the same property across lanes merge into one asset entry
-    that lists every lane that reached it."""
+    separately identified property under it.
+
+    Two cards are the same group when their owner keys share any person or
+    entity in the same county: "Byrd Tyrone" alone on one parcel and "Byrd
+    Tyrone & Beth" on another are one person to trace, listed once with both
+    properties (each property keeps its own signer line). A card with no owner
+    key stands alone. Cards for the same property across lanes merge into one
+    asset entry that lists every lane that reached it.
+    """
+    picked = [(n, c) for n, c in enumerate(cards) if c.get("route") == "first_trace_review"]
+    parent: Dict[str, str] = {}
+
+    def find(x: str) -> str:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for n, card in picked:
+        parts = _owner_parts(card.get("owner_group_key")) or [f"__solo_{n}"]
+        for part in parts[1:]:
+            parent[find(part)] = find(parts[0])
     groups: Dict[str, Dict[str, Any]] = {}
     out: List[Dict[str, Any]] = []
-    for n, card in enumerate(cards):
-        if card.get("route") != "first_trace_review":
-            continue
-        key = card.get("owner_group_key") or f"__solo_{n}"
-        g = groups.get(key)
+    for n, card in picked:
+        root = find((_owner_parts(card.get("owner_group_key")) or [f"__solo_{n}"])[0])
+        g = groups.get(root)
         if g is None:
-            g = {"owner_group_key": card.get("owner_group_key"), "assets": {}, "lanes": []}
-            groups[key] = g
+            g = {"owner_group_key": card.get("owner_group_key"), "owner_group_keys": [], "assets": {}, "lanes": []}
+            groups[root] = g
             out.append(g)
+        if card.get("owner_group_key") and card["owner_group_key"] not in g["owner_group_keys"]:
+            g["owner_group_keys"].append(card["owner_group_key"])
         pkey = card.get("property_key") or f"__asset_{n}"
         slot = g["assets"].setdefault(pkey, {"property_key": card.get("property_key"), "cards": []})
         slot["cards"].append(card)

@@ -166,6 +166,22 @@ class WorklistTests(unittest.TestCase):
         rows = dedupe_worklist([base, other])
         self.assertEqual((len(rows), len(rows[0]["assets"])), (1, 2))
 
+    def test_groups_sharing_a_person_are_one_row(self):
+        base = card()
+        alone = card(owner_names=["BYRD TYRONE"], asset={**base["asset"], "parcel": "111111A"})
+        joint = card(owner_names=["BYRD TYRONE & BETH D"], asset={**base["asset"], "parcel": "222222B"})
+        partner = card(owner_names=["BYRD BETH D", "GHOLSTON WILLIE P"], asset={**base["asset"], "parcel": "333333C"})
+        other = card(owner_names=["FRYAR SARAH"], asset={**base["asset"], "parcel": "444444D"})
+        rows = dedupe_worklist([alone, other, joint, partner])
+        self.assertEqual([len(r["assets"]) for r in rows], [3, 1])
+        self.assertEqual(len(rows[0]["owner_group_keys"]), 3)
+
+    def test_same_name_in_another_county_stays_apart(self):
+        base = card()
+        a = card(owner_names=["BYRD TYRONE"], county="Hamilton", asset={**base["asset"], "parcel": "111111A"})
+        b = card(owner_names=["BYRD TYRONE"], county="Knox", asset={**base["asset"], "parcel": "222222B"})
+        self.assertEqual(len(dedupe_worklist([a, b])), 2)
+
     def test_unknown_owners_never_merge(self):
         a = {**card(), "owner_group_key": None}
         b = {**card(), "owner_group_key": None}
