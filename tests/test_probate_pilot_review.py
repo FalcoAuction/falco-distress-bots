@@ -357,7 +357,7 @@ class TransferAndRepeatTests(unittest.TestCase):
 
     def test_another_lanes_stronger_card_is_kept(self):
         row = estate(owner="PERSON, EVE F & PERSON, ADAM")
-        other = {"route": "first_trace_review", "reviewed_by": "tax_lane", "lane": "tax"}
+        other = {"route": "removed", "reviewed_by": "tax_lane", "lane": "tax"}
         row["raw_payload"]["pilot_review"] = other
         item = plan([row], roll(owner="PERSON, EVE F & PERSON, ADAM"))[0]
         self.assertIs(item["after"], other)

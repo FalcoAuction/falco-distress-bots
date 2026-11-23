@@ -26,7 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ._pilot_review import dedupe_worklist, owner_group_key, property_key, rekey, runway_days
+from ._pilot_review import ROUTES, dedupe_worklist, owner_group_key, property_key, rekey, runway_days
 
 CRM = "https://falco.llc/crm/leads/"
 LANE_LABEL = {"pre_foreclosure": "Pre-foreclosure", "tax": "Delinquent tax", "cre": "Commercial",
@@ -124,7 +124,7 @@ def build_worklist(rows: List[Dict[str, Any]], baseline: Optional[List[Dict[str,
                 "order": n,
                 "owner_group": dec.get("name") or "Decision-maker not identified",
                 "signer_path": f"{dec.get('role') or 'unknown role'}{'' if dec.get('verified') else ' (not verified)'}: {dec.get('basis') or ''}".strip(),
-                "lanes": " + ".join(LANE_LABEL.get(x["lane"], x["lane"]) for x in a["cards"]),
+                "lanes": " + ".join(dict.fromkeys(LANE_LABEL.get(x["lane"], x["lane"]) for x in a["cards"])),
                 "county": c.get("_county") or "",
                 "asset": ast.get("address") or ast.get("description") or "",
                 "parcel": ast.get("parcel") or "",
@@ -163,18 +163,22 @@ def build_worklist(rows: List[Dict[str, Any]], baseline: Optional[List[Dict[str,
 
 
 def fetch_cards(client) -> List[Dict[str, Any]]:
-    """Every staging row with a pilot card, paged by id."""
+    """Every staging row with a pilot card. Read one route at a time so the
+    query uses the partial index on the card route (a bare "has a card" filter
+    scans all of staging and hits the API timeout)."""
     rows: List[Dict[str, Any]] = []
-    last = "00000000-0000-0000-0000-000000000000"
-    while True:
-        page = (client.table("homeowner_requests_staging")
-                .select("id,county,pilot_review:raw_payload->pilot_review")
-                .not_.is_("raw_payload->pilot_review", "null").gt("id", last).order("id").limit(500)
-                .execute().data) or []
-        rows.extend(page)
-        if len(page) < 500:
-            return rows
-        last = page[-1]["id"]
+    for route in ROUTES:
+        start = 0
+        while True:
+            page = (client.table("homeowner_requests_staging")
+                    .select("id,county,pilot_review:raw_payload->pilot_review")
+                    .eq("raw_payload->pilot_review->>route", route)
+                    .order("id").range(start, start + 199).execute().data) or []
+            rows.extend(page)
+            if len(page) < 200:
+                break
+            start += 200
+    return rows
 
 
 def write_outputs(result: Dict[str, Any], out_dir: Path) -> List[Path]:

@@ -146,10 +146,10 @@ class MergeTests(unittest.TestCase):
         old, new = card(), card(route="removed")
         self.assertIs(merge_review(old, new), new)
 
-    def test_other_reviewer_only_wins_when_stronger(self):
+    def test_between_lanes_the_cautious_card_wins(self):
         hold, rec, gone = card(route="research_hold", by="a"), card(by="b"), card(route="removed", by="c")
-        self.assertIs(merge_review(hold, rec), rec)
-        self.assertIs(merge_review(rec, hold), rec)
+        self.assertIs(merge_review(hold, rec), hold)
+        self.assertIs(merge_review(rec, hold), hold)
         self.assertIs(merge_review(rec, gone), gone)
         self.assertIs(merge_review(gone, rec), gone)
 

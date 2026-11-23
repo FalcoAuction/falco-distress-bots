@@ -17,7 +17,7 @@ os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.bots._pilot_review import build_review, debt, source  # noqa: E402
-from src.bots.pilot_worklist import COLUMNS, build_worklist, write_outputs  # noqa: E402
+from src.bots.pilot_worklist import COLUMNS, build_worklist, fetch_cards, write_outputs  # noqa: E402
 
 TODAY = date(2026, 11, 22)
 SRC = source("County record", "https://example.test/r", "2026-11-22")
@@ -107,6 +107,37 @@ class WorklistTests(unittest.TestCase):
             self.assertTrue(all(p.exists() and p.stat().st_size > 0 for p in paths))
             header = (Path(d) / "pilot-worklist.csv").read_text(encoding="utf-8").splitlines()[0]
             self.assertEqual(header.split(","), COLUMNS)
+
+
+class _Query:
+    def __init__(self, log, data):
+        self.log, self.data, self.route, self.lo = log, data, None, 0
+    def table(self, _):
+        return _Query(self.log, self.data)
+    def select(self, _):
+        return self
+    def eq(self, column, value):
+        self.log.append(column)
+        self.route = value
+        return self
+    def order(self, _):
+        return self
+    def range(self, lo, hi):
+        self.lo, self.hi = lo, hi
+        return self
+    def execute(self):
+        rows = [r for r in self.data if r["pilot_review"]["route"] == self.route]
+        return type("R", (), {"data": rows[self.lo:self.hi + 1]})()
+
+
+class FetchTests(unittest.TestCase):
+    def test_reads_by_route_and_pages(self):
+        data = [{"id": str(n), "county": "Shelby", "pilot_review": {"route": "research_hold"}} for n in range(450)]
+        data.append({"id": "x", "county": "Shelby", "pilot_review": {"route": "first_trace_review"}})
+        log = []
+        rows = fetch_cards(_Query(log, data))
+        self.assertEqual(len(rows), 451)
+        self.assertEqual(set(log), {"raw_payload->pilot_review->>route"})
 
 
 if __name__ == "__main__":
