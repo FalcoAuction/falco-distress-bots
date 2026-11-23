@@ -570,7 +570,7 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
     }
     event = {"what": what, "status": status, "checked_on": today.isoformat(), "source": register}
     asset = {"description": description, "parcel": parcel, "address": address, "tie": tie, "source": asset_src}
-    names = owner if owner else borrowers   # as sourced, so the cross-lane owner key agrees
+    names = [owner] if owner else borrowers   # one sourced string, unsplit, so the cross-lane owner key agrees
 
     if linked and notice_carded:
         return build_review(
@@ -709,7 +709,7 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
     }
     if row.get("staging_status") == "promoted":
         conflicts.append("Already promoted into the live lead list. Check that record's status and any prior contact first")
-    names = evidence["owner"] if evidence else (borrowers or staging_owner)   # as sourced
+    names = [evidence["owner"]] if evidence else (borrowers or [staging_owner])   # as sourced, unsplit
     common = dict(lane=LANE, reviewed_by=REVIEWER, county=row.get("county"), owner_names=names, today=today,
                   event={"what": what, "status": event_status, "checked_on": listed_on, "source": event_src},
                   asset={"description": "Real property under the deed of trust being foreclosed", "parcel": parcel,
