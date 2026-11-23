@@ -402,7 +402,7 @@ SALE_UNKNOWNS = [
 
 
 def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
-                     notice_carded: bool = False) -> Dict[str, Any]:
+                     notice_carded: bool = False, ranked: Optional[bool] = None) -> Dict[str, Any]:
     """Card for one Shelby appointment of substitute trustee.
 
     row: id, property_address, source_url, property_value,
@@ -552,6 +552,12 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
         elif economics.get("value") is None:
             hold = "Owner and parcel are verified, but there is no sourced value yet"
             verify.append("Scheduled county assessment or recorded loan estimate")
+        elif ranked is False and not (linked and notice_carded):
+            # Same rule as an advertised sale: the lane does not recommend paid
+            # contact data for a record the ranking excludes or has not ranked yet.
+            hold = ("Owner, parcel and value are verified, but the record is not on the ranked list (it fails a ranking "
+                    "rule such as the expected fee floor, or the nightly ranking has not picked it up yet)")
+            verify.append("Recheck after the next nightly ranking")
     if not borrower_text and not owner:
         verify.append("Read the recorded appointment for the borrower's name")
 

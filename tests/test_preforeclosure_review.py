@@ -261,6 +261,12 @@ class AppointmentCardTests(unittest.TestCase):
         self.assertTrue(card["decider"]["verified"])
         self.assertNotIn("—", str(card))
 
+    def test_unranked_early_filing_is_held(self):
+        card = appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=False)
+        self.assertEqual(card["route"], "research_hold")
+        self.assertIn("not on the ranked list", card["route_reason"])
+        self.assertEqual(appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=True)["route"], "first_trace_review")
+
     def test_index_only_filing_is_research_with_the_attempt_count(self):
         row = appt_row(deed_of_trust=None, parcel_id=None, loan=None, dot_checked_at=None, **{COUNTY_KEY: None})
         row["property_address"] = None
