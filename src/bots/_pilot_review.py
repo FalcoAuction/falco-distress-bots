@@ -99,7 +99,10 @@ def property_key(county: Any, parcel: Any = None, address: Any = None, state: st
     """One key per property. Parcel wins; a normalized street address is the
     fallback. Returns None when neither identifies the property."""
     c = _county(county)
-    p = re.sub(r"[^A-Z0-9]", "", str(parcel or "").upper())
+    # Comptroller roll IDs end with the roll year ("074 058    12100 000 2027");
+    # the tract is the same every year, so the year is not part of the key.
+    p = re.sub(r"\s+20\d{2}\s*$", "", str(parcel or "").upper())
+    p = re.sub(r"[^A-Z0-9]", "", p)
     if c and len(p) >= 6:
         return f"{state.lower()}|{c}|p:{p}"
     a = _clean(address)
