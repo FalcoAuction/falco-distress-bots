@@ -35,7 +35,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from ._base import BotBase, _supabase
 from ._cre_review import (HAMILTON_ASSESSOR_URL, HAMILTON_SALE_LIST_URL, HAMILTON_TRUSTEE_URL, REVIEWER,
-                          parse_sale_list, review_row, roll_index, roll_status)
+                          mailing_index_for, parse_sale_list, review_row, roll_index, roll_status)
 from ._pilot_review import merge_review
 from .hamilton_assessor_bot import HamiltonAssessorBot, _norm_parcel
 
@@ -86,8 +86,11 @@ def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date) -> List[Dic
     None. A row whose card is unchanged, or whose existing card wins the
     merge (manual, or a stronger card from another lane), is left alone."""
     plan = []
+    # Attention and care-of names per P.O. box, so a company with no name on its
+    # own mailing line still gets the labeled path its sister company carries.
+    boxes = mailing_index_for(rows, evidence_for)
     for row in rows:
-        got = review_row(row, evidence_for(row), today)
+        got = review_row(row, evidence_for(row), today, boxes)
         if not got:
             continue
         card, facts = got

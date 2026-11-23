@@ -26,6 +26,7 @@ import re
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+from ._entity_signer import hold_extras
 from ._pilot_review import _ENTITY, build_review, debt, merge_review, source
 
 STATUS_KEY = "tax_status"
@@ -217,9 +218,12 @@ def shelby_card(row: Dict[str, Any], status: Dict[str, Any], day: date, list_url
                              "owner of record may be deceased and the signer is not established.",
                       "check": "Check Shelby Probate Court for an estate and a named personal representative."})
     elif is_entity(owner):
+        # People printed beside the company in the tax suit are a labeled path, never a signer.
+        _, paths = hold_extras(owner, suit_parties=(parties, source(
+            "Shelby County tax suit publication", pub_url, None)) if parties else None)
         holds.append({"why": "The owner of record is an entity; no person with authority to sign is identified.",
                       "check": "Read the Tennessee Secretary of State business record for the entity's status, "
-                               "registered agent and officers."})
+                               "registered agent and officers." + "".join(" " + line for line in paths)})
     if not value:
         holds.append({"why": "No county value is on file for this parcel.",
                       "check": "Recheck the Trustee parcel page for the current assessment."})
