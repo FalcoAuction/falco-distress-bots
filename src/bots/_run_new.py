@@ -110,6 +110,7 @@ from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import davidson_tax_stack_bot
 from . import property_lane_bot
+from . import cre_review_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
 from . import ffl_overlay_bot
@@ -293,6 +294,9 @@ NEW_BOTS = [
     # so grades see the owner's land use and verified phones.
     ("davidson_tax_stack", davidson_tax_stack_bot.run),
     ("property_lane", property_lane_bot.run),
+    # Commercial review cards: parcel, owner entity, signer path, distress tie
+    # on the building owner's parcel. Reads the lane tags written just above.
+    ("cre_review", cre_review_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),
