@@ -111,7 +111,9 @@ def next_status(prior: Optional[Dict[str, Any]], seen: Dict[str, Any], day: date
         out["status"] = "listed"
         out["note"] = "On the county's current sale list on " + today + "."
     if old_date and new_date and new_date != old_date and out["status"] != "postponed":
-        out["prior_sale_date"] = old_date
+        out.update(prior_sale_date=old_date, sale_date_changed_on=today)
+    if out["status"] == "noticed" and out.get("prior_sale_date"):
+        out["note"] += " The notice now gives " + new_date + " as the sale date (was " + out["prior_sale_date"] + ")."
     return out
 
 
@@ -197,6 +199,12 @@ def shelby_card(row: Dict[str, Any], status: Dict[str, Any], day: date, list_url
                       "check": ("Check the outcome of the " + upcoming[0] + " Environmental Court hearing on warrant "
                                 + warrants + " after it is held (next check " + upcoming[0] + ").") if upcoming else
                                ("Check the Environmental Court roster for the next hearing on warrant " + warrants + ".")})
+    if value and (row.get("property_value_source") != "shelby_trustee_assessment_estimate"
+                  or detail.get("estimated_appraisal") != value):
+        holds.append({"why": "The value on file (source " + str(row.get("property_value_source")) + ") is not the "
+                             "county assessment of this parcel; the Trustee shows no current-year assessment for it.",
+                      "check": "Confirm on the Shelby Assessor record whether this parcel ID is current or an "
+                               "earlier ID of another listed parcel at the same address."})
     if recheck.get("status"):
         holds.append({"why": "The Trustee parcel page did not confirm this parcel and sale together on "
                              + str(recheck.get("checked_on")) + " while the sale list still shows it.",
@@ -273,8 +281,11 @@ def shelby_card(row: Dict[str, Any], status: Dict[str, Any], day: date, list_url
         economics={"deadline": sale_date,
                    "deadline_kind": "Tax sale date. " + REDEMPTION + ".",
                    "value": value,
-                   "value_basis": "County estimate: " + str(detail.get("tax_year") or "current")
-                                  + " assessment divided by the class ratio. Not a market value.",
+                   "value_basis": ("County estimate: " + str(detail.get("tax_year") or "current")
+                                   + " assessment divided by the class ratio. Not a market value.")
+                                  if detail.get("estimated_appraisal") == value else
+                                  ("Copied from another record (source " + str(row.get("property_value_source"))
+                                   + "). Not an assessment of this parcel."),
                    "value_is_estimate": True, "value_source": page if value else None, "known_debt": known,
                    "unknowns": ["Mortgage payoff and any other recorded liens (no recorded instrument read)",
                                 "City taxes and court costs added in the tax suit",
@@ -324,16 +335,19 @@ def cheatham_card(row: Dict[str, Any], status: Dict[str, Any], day: date, notice
     unknown_owner = printed_owner.lower().startswith("unknown") or not printed_owner
     roll_owner = roll.get("owner") if str(roll.get("owner") or "").upper() != "UNKNOWN" else None
     name = None if unknown_owner else (roll_owner or printed_owner)
-    aliases = [a.strip(" .)") for a in re.split(r"\(?\b(?:a/?k/?a|aka)\b", printed_owner, flags=re.I)]
-    # Both names of an "aka" owner are kept so two tracts held under either
+    aka = re.fullmatch(r"(.+?)\s*\(\s*(?:a/?k/?a|aka)\s+(.+?)\)", printed_owner.strip(), re.I)
+    aliases = [a.strip(" .") for a in aka.groups()] if aka else []
+    if any(len(a.split()) < 2 or " and " in a.lower() for a in aliases):
+        aliases = []
+    # Both full names of an "aka" owner are kept so two tracts held under either
     # name fall in one owner group; otherwise the county roll name is the key.
     if unknown_owner:
         owner_names = None
-    elif len([a for a in aliases if a]) > 1:
-        owner_names = sorted({a for a in aliases if a})
+    elif aliases:
+        owner_names = sorted(set(aliases))
     else:
         owner_names = [roll_owner or printed_owner]
-    parcel_id = " ".join(str(roll.get("parcelid") or "").split()[:-1]) or None
+    parcel_id = roll.get("parcelid") or None   # as sourced; the shared property key drops the roll year
     printed = (tract or {}).get("parcel_printed") or raw.get("parcel_printed")
     address = row.get("property_address") or (tract or {}).get("location") or raw.get("location_printed")
     sale_date = status.get("sale_date") or row.get("trustee_sale_date")
@@ -364,6 +378,10 @@ def cheatham_card(row: Dict[str, Any], status: Dict[str, Any], day: date, notice
     elif is_entity(name):
         holds.append({"why": "The owner is an entity; no person with authority to sign is identified.",
                       "check": "Read the Tennessee Secretary of State business record for the entity."})
+    if tract and not tract.get("parcel_forms_agree", True):
+        holds.append({"why": "The notice prints two parcel numbers for this tract that do not agree ("
+                             + str(tract.get("parcel_printed")) + " and " + str(tract.get("parcel_long")) + ").",
+                      "check": "Confirm the parcel for " + label + " with the Clerk and Master before relying on the matched roll parcel."})
     if not re.match(r"\d+\s", str(address or "")):
         holds.append({"why": "The notice gives no street number for this tract.",
                       "check": "Confirm the tract location on the county parcel map."})
