@@ -22,9 +22,9 @@ class MemphisCountyValueBot(BotBase):
     def _candidates(self, client):
         today = date.today()
         rows = (client.table("homeowner_requests_staging")
-                .select("id,bot_source,pipeline_lead_key,property_address,county,staging_status,property_value,raw_payload,phone_metadata")
+                .select("id,bot_source,pipeline_lead_key,property_address,county,staging_status,property_value,trustee_sale_date,raw_payload,phone_metadata")
                 .eq("bot_source", "memphis_daily_news").eq("county", "shelby")
-                .neq("staging_status", "rejected").is_("property_value", "null")
+                .neq("staging_status", "rejected")
                 .or_(f"trustee_sale_date.gte.{today.isoformat()},trustee_sale_date.is.null")
                 .order("id").limit(500).execute().data or [])
         fresh = []
@@ -39,9 +39,16 @@ class MemphisCountyValueBot(BotBase):
                 seen = datetime.fromisoformat(tracking["last_seen_at"].replace("Z", "+00:00")).date()
             except (ValueError, TypeError, KeyError):
                 continue
-            if (tracking.get("last_seen_by") != "memphis_daily_news"
-                    or not today - timedelta(days=2) <= seen <= today
-                    or review.get("checked_on", "") >= today.isoformat()):
+            if tracking.get("last_seen_by") != "memphis_daily_news" or review.get("checked_on", "") >= today.isoformat():
+                continue
+            # The county bill is what ties a current owner and parcel to the
+            # notice, so a row valued by another source still gets one check.
+            # It is read once; only rows with no value are re-read daily.
+            upcoming = (row.get("trustee_sale_date") or "") >= today.isoformat()
+            if row.get("property_value") is not None:
+                if review or not upcoming:
+                    continue
+            elif not (upcoming or today - timedelta(days=2) <= seen <= today):
                 continue
             fresh.append(row)
         return sorted(fresh, key=lambda r: ((r.get("phone_metadata") or {}).get(REVIEW, {}).get("checked_on", ""), r["id"]))
@@ -51,14 +58,17 @@ class MemphisCountyValueBot(BotBase):
         if len(quote(json.dumps(original), safe="")) > 6000:
             return False  # isolate oversized CAS payloads, never blindly overwrite
         patch = {"phone_metadata": {**(original or {}), REVIEW: evidence}}
-        if evidence["status"] == "verified_assessment":
+        valued = row.get("property_value") is not None
+        if evidence["status"] == "verified_assessment" and not valued:
             patch.update(property_value=evidence["estimated_appraisal"],
                          property_value_source=VALUE_SOURCE)
         query = (client.table("homeowner_requests_staging").update(patch)
                  .eq("id", row["id"]).eq("bot_source", "memphis_daily_news")
                  .eq("pipeline_lead_key", row["pipeline_lead_key"])
                  .eq("property_address", row["property_address"]).eq("county", "shelby")
-                 .eq("staging_status", row["staging_status"]).is_("property_value", "null"))
+                 .eq("staging_status", row["staging_status"]))
+        # A value another source already set is kept; the write is refused if it moved.
+        query = query.eq("property_value", row["property_value"]) if valued else query.is_("property_value", "null")
         # Preserve all raw evidence; guard the original notice parcel independently.
         parcel = (row["raw_payload"].get("extracted") or {}).get("parcel")
         query = (query.is_("raw_payload->extracted->>parcel", "null") if parcel is None
