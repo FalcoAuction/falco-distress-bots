@@ -13,7 +13,7 @@ class MemphisCountyValueBot(BotBase):
     name = "memphis_county_value"
     description = "Exact Shelby trustee parcel assessments for current Memphis Daily News notices"
     throttle_seconds = 1.5
-    max_attempts = 40
+    max_attempts = 150  # bounded by the 380 second budget in run()
 
     def __init__(self):
         super().__init__()

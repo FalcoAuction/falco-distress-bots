@@ -32,6 +32,9 @@ jobs:
       # read this live. Notion was removed 2026-04-29.
       NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      # Rubin Lublin sale list recheck for Memphis notices. Patrick accepted
+      # the firm's listing terms on 2026-11-23. One GET per run.
+      RUBIN_LUBLIN_LIST_ENABLED: "1"
 
       # ===== CourtListener (free account token) =====
       # Bankruptcy search, Schedule D reader and debtor-attorney lookup. Without
