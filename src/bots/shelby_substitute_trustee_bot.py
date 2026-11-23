@@ -22,7 +22,10 @@ terms carry only an "as is" disclaimer. robots.txt disallows /imgView.php
 (document images), which this never requests. The register's main site
 asks for Crawl-delay: 30 and rate-limits faster clients, so every request
 here waits 30 seconds. Already-staged filings are skipped before any
-detail request, and reads at most 6 new filings per run (about 7 minutes).
+detail request. A run makes at most 14 detail requests: up to 6 new filings,
+then filings staged from the index alone whose detail page was refused
+earlier (at least one, at most 4 a run), then the deed-of-trust backfill.
+The first request the Register does not serve ends that run's Register work.
 
 Distress type: SUBSTITUTION_OF_TRUSTEE (the CRM labels it Pre-Foreclosure
 (SOT); the auto promoter applies the foreclosure mortgage gate).
@@ -126,13 +129,22 @@ class ShelbySubstituteTrusteeBot(BotBase):
     # Staged filings whose deed of trust was never read (an old run, a
     # failed request): re-read a few per run, newest first, at 1 request each.
     max_backfill_per_run = 3
+    # Filings staged from the index alone (the Register refused the detail
+    # page): up to this many per run, oldest attempt first, two requests each.
+    max_deferred_per_run = 4
+    # Detail requests per run across new, deferred and backfill reads. With
+    # the home page and the search that is 16 requests, 8 minutes at the
+    # Register's 30 second crawl delay, inside the runner's 10-minute cap.
+    max_detail_requests = 14
 
     def __init__(self):
         super().__init__()
+        self._register_down = False
         # Transport retries would run inside fetch(), bypassing its crawl delay.
         self.session.mount(BASE + "/", HTTPAdapter(max_retries=0))
 
     def scrape(self) -> List[LeadPayload]:
+        self._register_down = False
         home = self.fetch(HOME, allow_redirects=False)  # session cookie
         if home is None or home.status_code != 200:
             return []
@@ -156,23 +168,38 @@ class ShelbySubstituteTrusteeBot(BotBase):
         priority_ids = {row["instrument"] for row in recent}
         selected = (recent + [row for row in fresh if row["instrument"] not in priority_ids])[:self.max_new_per_run]
         leads: List[LeadPayload] = []
+        requests_left = self.max_detail_requests
         for row in selected:
+            if self._register_down or requests_left < 2:
+                break  # never keep asking a Register that just refused; the rest wait for the next run
+            requests_left -= 1
             appt = self._detail(row["detail_url"]) if row.get("detail_url") else None
             if row.get("detail_url") and appt is None:
+                self._register_down = True
                 continue  # Retry the appointment before marking this instrument as collected.
             ref = deed_of_trust_ref(appt) if appt else None
-            dot = self._detail(detail_url(ref["instrument"], ref["year"])) if ref else None
+            dot = None
+            if ref:
+                requests_left -= 1
+                dot = self._detail(detail_url(ref["instrument"], ref["year"]))
+                if dot is None:
+                    self._register_down = True
             if dot and not LOAN_DOC.search(dot.get("doc_type") or ""):
                 dot = None  # cross reference points at something other than a deed of trust
             lead = build_lead(self, row, appt, dot)
             if lead:
                 leads.append(lead)
         self.logger.info(f"staging {len(leads)} lead(s), {sum(1 for l in leads if l.property_address)} with an address")
-        used = self.retry_deferred_appointment() if self.max_backfill_per_run >= 2 else 0
-        self.backfill(self.max_backfill_per_run - used)
+        # New filings spend first, but two requests are always kept back so a
+        # busy week cannot starve the filings still waiting on their detail page.
+        requests_left = max(requests_left, 2)
+        if not self._register_down:
+            requests_left -= self.retry_deferred_appointment(min(requests_left, 2 * self.max_deferred_per_run))
+        if not self._register_down and requests_left > 0:
+            self.backfill(min(self.max_backfill_per_run, requests_left))
         return leads
 
-    def _deferred_rows(self, client):
+    def _deferred_rows(self, client, limit=1):
         return (client.table("homeowner_requests_staging")
                 .select("id,raw_payload,property_address").eq("bot_source", self.name)
                 .eq("staging_status", "pending")
@@ -181,36 +208,50 @@ class ShelbySubstituteTrusteeBot(BotBase):
                 .not_.is_("raw_payload->recovery->>detail_issue", "null")
                 .is_("raw_payload->recovery->>detail_checked_at", "null")
                 .order("raw_payload->recovery->>last_detail_attempt", nullsfirst=True)
-                .order("id").limit(1).execute().data)
+                .order("id").limit(limit).execute().data)
 
     def _verified_detail(self, instrument, year):
         res = self.fetch(detail_url(instrument, year), allow_redirects=False)
         if res is None or res.status_code != 200:
+            self._register_down = True
             return None
         if not re.search(r"Information For Instrument #\s*" + re.escape(instrument) + r"\s*<", res.text, re.I):
             return None
         doc = parse_detail(res.text)
         return doc if doc.get("doc_type") else None
 
-    def retry_deferred_appointment(self):
-        """One pending index-only recovery per run, using at most two detail requests."""
+    def retry_deferred_appointment(self, max_requests=2):
+        """Pending index-only recoveries, least recently tried first, two detail
+        requests each, within max_requests. Stops at the first request the
+        Register does not serve. Every attempt is recorded on the filing."""
         client = _supabase()
         if client is None:
             return 0
         used = 0
         try:
-            rows = self._deferred_rows(client)
-            if not rows:
-                return 0
-            row = rows[0]
+            rows = self._deferred_rows(client, max(1, max_requests // 2)) or []
+        except Exception as exc:
+            self.logger.warning("Deferred appointment lookup failed (%s)", type(exc).__name__)
+            return 0
+        for row in rows:
+            if self._register_down or max_requests - used < 2:
+                break
+            used += self._retry_one(client, row)
+        return used
+
+    def _retry_one(self, client, row):
+        used = 0
+        try:
             original = row["raw_payload"]
             raw = dict(original)
             recovery = dict(raw["recovery"])
             raw["recovery"] = recovery
             now = datetime.now(timezone.utc).isoformat()
             recovery["last_detail_attempt"] = now
+            recovery["detail_attempts"] = int(recovery.get("detail_attempts") or 0) + 1
             used = 1
             appt = self._verified_detail(raw["instrument"], raw["recorded"][:4])
+            recovery["last_detail_result"] = "appointment page read" if appt else "appointment page not served"
             patch = {"raw_payload": raw}
             if appt and appt["doc_type"].upper().startswith("APPOINTMENT OF SUBSTITUTE TR"):
                 ref = deed_of_trust_ref(appt)
@@ -218,6 +259,8 @@ class ShelbySubstituteTrusteeBot(BotBase):
                 if ref:
                     used += 1
                     dot = self._verified_detail(ref["instrument"], ref["year"])
+                    recovery["last_detail_result"] = ("deed of trust page read" if dot
+                                                      else "appointment read; deed of trust page not served")
                 if appt.get("xrefs") and not raw.get("appointment_cross_references"):
                     raw["appointment_cross_references"] = appt["xrefs"]
                 if not raw.get("appointment_date"):
@@ -241,6 +284,10 @@ class ShelbySubstituteTrusteeBot(BotBase):
                             raw["parcel_id"] = parcel
                         if row["property_address"] is None and address:
                             patch["property_address"] = address
+                        # The original loan amount is a recorded fact, not a payoff.
+                        if not raw.get("loan") and dot.get("mortgage_amount"):
+                            raw["loan"] = {"original_amount": dot["mortgage_amount"],
+                                           "loan_date": dot.get("instrument_date") or dot.get("file_date")}
                         raw["dot_checked_at"] = raw.get("dot_checked_at") or now[:10]
             update = (client.table("homeowner_requests_staging").update(patch)
                       .eq("id", row["id"]).eq("bot_source", self.name).eq("staging_status", "pending")
