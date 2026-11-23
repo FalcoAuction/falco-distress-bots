@@ -623,7 +623,7 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
         list_url, list_label, listed_on = seen.get("url"), seen.get("label") or f"{firm} sale calendar", seen["checked_on"]
     event_src = source(list_label, list_url, listed_on)
 
-    what = f"Substitute trustee sale by {firm}" + (f" (file {case})" if case else "")
+    what = f"Substitute trustee sale by {firm}" + (f" ({'file' if src_name in FIRMS else 'notice'} {case})" if case else "")
     if status == "postponed":
         what += f", postponed from {state['prior_date']} to {sale}."
         event_status = "postponed"
