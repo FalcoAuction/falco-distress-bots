@@ -68,6 +68,13 @@ class KeyTests(unittest.TestCase):
                          property_key("Shelby", None, "12 MAIN ST MEMPHIS"))
         self.assertIsNone(property_key("Shelby", None, "Main Street"))
 
+    def test_comptroller_roll_year_is_not_part_of_the_key(self):
+        self.assertEqual(property_key("Robertson", "074 058    12100 000 2027"),
+                         property_key("Robertson", "074 058    12100 000"))
+        self.assertEqual(property_key("Robertson", "074 058    12100 000 2026"),
+                         property_key("robertson county", "074 058    12100 000 2027"))
+        self.assertNotEqual(property_key("Shelby", "D0215M D02027"), property_key("Shelby", "D0215M D0"))
+
 
 class BuildTests(unittest.TestCase):
     def test_complete_card(self):
