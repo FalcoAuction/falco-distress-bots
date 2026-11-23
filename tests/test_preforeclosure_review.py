@@ -132,7 +132,8 @@ class SaleStateTests(unittest.TestCase):
         self.assertEqual((card["route"], card["event"]["status"]), ("first_trace_review", "active"))
         self.assertEqual(card["economics"]["deadline"], "2026-12-18")
         self.assertEqual(card["property_key"], "tn|sumner|p:083137JD01500000")
-        self.assertEqual(card["owner_group_key"], "tn|sumner|P:GERDES K")   # same key the Nov 22 baseline gives
+        self.assertEqual(card["owner_group_key"], "tn|sumner|P:GERDES C+P:GERDES K")   # both joint roll owners
+        self.assertEqual(card["owner_names"], ["GERDES KEITH & GERDES CHRISTIENE ETUX"])   # as sourced
         self.assertIn("does not name the borrower", card["decider"]["role"])
 
     def test_postponement_updates_the_same_record(self):
@@ -259,6 +260,12 @@ class AppointmentCardTests(unittest.TestCase):
         self.assertIn("Taxpayer on the county realty bill and borrower on the appointment", card["decider"]["role"])
         self.assertTrue(card["decider"]["verified"])
         self.assertNotIn("—", str(card))
+
+    def test_unranked_early_filing_is_held(self):
+        card = appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=False)
+        self.assertEqual(card["route"], "research_hold")
+        self.assertIn("not on the ranked list", card["route_reason"])
+        self.assertEqual(appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=True)["route"], "first_trace_review")
 
     def test_index_only_filing_is_research_with_the_attempt_count(self):
         row = appt_row(deed_of_trust=None, parcel_id=None, loan=None, dot_checked_at=None, **{COUNTY_KEY: None})

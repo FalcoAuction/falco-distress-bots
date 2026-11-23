@@ -186,6 +186,7 @@ class PreforeclosureReviewBot(BotBase):
             sales.update({r["id"]: r for r in self._sales(client, today, source)})
         identities = [notice_identity(n) for n in notices]
 
+        ranked = self._ranked(client, [r["id"] for r in appointments] + [i for i in sales if only is None or i in only])
         budget = self.max_owner_checks if owner_checks is None else owner_checks
         started = time.monotonic()
         linked_to: Dict[str, Dict[str, Any]] = {}
@@ -234,7 +235,8 @@ class PreforeclosureReviewBot(BotBase):
                 raw[LINK_KEY] = patch[LINK_KEY] = link
             card = appointment_card({**row, "raw": raw}, link, today,
                                     notice_carded=link.get("staging_id") in sales
-                                    and (only is None or link.get("staging_id") in only))
+                                    and (only is None or link.get("staging_id") in only),
+                                    ranked=row["id"] in ranked)
             self._plan_card(row["id"], raw.get("pilot_review"), card, patch, counts)
             if patch:
                 patches[row["id"]] = patch
@@ -242,7 +244,6 @@ class PreforeclosureReviewBot(BotBase):
                              "keys": sorted(patch), "route": (patch.get("pilot_review") or raw.get("pilot_review") or {}).get("route"),
                              "link": link["status"]})
 
-        ranked = self._ranked(client, [i for i in sales if only is None or i in only])
         last_read: Dict[str, Optional[datetime]] = {}
         for row in sales.values():
             tracking = row.get("notice_tracking") if isinstance(row.get("notice_tracking"), dict) else {}
