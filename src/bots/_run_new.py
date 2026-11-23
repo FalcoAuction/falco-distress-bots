@@ -378,6 +378,20 @@ CRITICAL_BOTS = {
     "decision_engine",
 }
 
+# Quick review bots the budget gate does not skip. They keep the pilot review
+# cards (sale status, tax status, commercial and land evidence) current, each
+# finishes in well under a minute, and a skipped day leaves a recommendation
+# resting on yesterday's check. Unlike CRITICAL_BOTS, a failure here does not
+# fail the job. In the reserve window each is capped at QUICK_REVIEW_CAP so
+# together they cannot eat the critical tail's time.
+QUICK_REVIEW_BOTS = {
+    "cheatham_tax_sale",
+    "land_review",
+    "preforeclosure_review",
+    "cre_review",
+}
+QUICK_REVIEW_CAP = 120
+
 # Paid bots are parked unless FALCO_PAID_DATA_ENABLED=1 (see _paid.py).
 # Slow, low-yield, and the source only refreshes weekly. Excluded from the
 # daily run; weekly_heavy.yml runs them with --only.
@@ -478,6 +492,7 @@ def run_pipeline(
     timeouts: Optional[Dict[str, int]] = None,
     default_timeout: int = DEFAULT_BOT_TIMEOUT,
     critical: Optional[set] = None,
+    quick: Optional[set] = None,
     clock: Callable[[], float] = time.monotonic,
     summary_path: Optional[Path] = SUMMARY_PATH,
 ) -> Dict[str, Any]:
@@ -486,13 +501,15 @@ def run_pipeline(
     Budget gate: once the remaining budget drops below `reserve_seconds`,
     non-critical bots are skipped (status `skipped_budget`) so the
     critical tail still runs. Critical bots always run, capped to
-    whatever budget is left (floor 60s).
+    whatever budget is left (floor 60s). Bots in `quick` also run inside
+    the reserve, capped at QUICK_REVIEW_CAP, and never fail the job.
 
     The summary is rewritten after every bot so a hard kill (job
     timeout) still leaves a partial file for the alert step to read.
     """
     timeouts = timeouts if timeouts is not None else BOT_TIMEOUTS
     critical = critical if critical is not None else CRITICAL_BOTS
+    quick = quick if quick is not None else QUICK_REVIEW_BOTS
     parked = set() if paid_data_enabled() else PAID_BOTS
     critical = critical - parked
     t0 = clock()
@@ -534,13 +551,16 @@ def run_pipeline(
             _flush()
             continue
 
-        if not is_critical and critical_ahead and remaining < reserve_seconds:
+        in_reserve = critical_ahead and remaining < reserve_seconds
+        if not is_critical and in_reserve and name not in quick:
             print(f"\n[{name}] SKIPPED (budget: {remaining / 60:.1f} min left, reserve {reserve_seconds / 60:.0f})")
             summary["bots"].append({"bot": name, "status": "skipped_budget", "elapsed": 0.0})
             _flush()
             continue
 
         cap = timeouts.get(name, default_timeout)
+        if in_reserve and not is_critical:
+            cap = min(cap, QUICK_REVIEW_CAP)
         if remaining < cap:
             cap = max(60, int(remaining))
         bot_started = datetime.now(timezone.utc)

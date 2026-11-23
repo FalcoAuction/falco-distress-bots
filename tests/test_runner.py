@@ -177,6 +177,33 @@ class RunPipelineTests(unittest.TestCase):
         self.assertEqual(got, {"a": "ok", "b": "ok", "x": "skipped_budget", "crit": "ok"})
         self.assertEqual(s["critical_incomplete"], [])
 
+    def test_quick_review_bots_run_inside_the_reserve_and_never_fail_the_job(self):
+        clock = FakeClock()
+
+        def boom():
+            clock.t += 5
+            raise RuntimeError("county site down")
+
+        bots = [
+            ("a", self._bot(clock, 200)),
+            ("x", self._bot(clock, 100)),
+            ("review", self._bot(clock, 20)),
+            ("review_broken", boom),
+            ("crit", self._bot(clock, 10)),
+        ]
+        s = run_pipeline(bots, budget_seconds=250, reserve_seconds=100, critical={"crit"},
+                         quick={"review", "review_broken"}, clock=clock, summary_path=None)
+        got = {b["bot"]: b["status"] for b in s["bots"]}
+        self.assertEqual((got["x"], got["review"], got["crit"]), ("skipped_budget", "ok", "ok"))
+        self.assertNotEqual(got["review_broken"], "ok")
+        self.assertEqual(s["critical_incomplete"], [])
+
+    def test_shipped_quick_review_list(self):
+        self.assertEqual(_run_new.QUICK_REVIEW_BOTS,
+                         {"cheatham_tax_sale", "land_review", "preforeclosure_review", "cre_review"})
+        self.assertTrue(_run_new.QUICK_REVIEW_BOTS.isdisjoint(_run_new.CRITICAL_BOTS))
+        self.assertTrue(_run_new.QUICK_REVIEW_BOTS <= {n for n, _ in _run_new.NEW_BOTS})
+
     def test_paid_bots_are_parked_unless_enabled(self):
         import os
         clock = FakeClock()
