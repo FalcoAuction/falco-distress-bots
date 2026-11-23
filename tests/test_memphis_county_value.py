@@ -2,7 +2,7 @@ import base64
 import copy
 import json
 import unittest
-from datetime import date, datetime, timezone
+from datetime import timedelta, date, datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from src.bots._shelby_trustee_value import select_parcel, parcel_value, lookup, REVIEW, VALUE_SOURCE
@@ -75,6 +75,25 @@ class CountyValueTests(unittest.TestCase):
         for method in ["select","eq","neq","is_","or_","order","limit"]:getattr(q,method).return_value=q
         a=row();same=row();same["id"]="same";same["phone_metadata"][REVIEW]={"checked_on":date.today().isoformat()};stale=row();stale["id"]="stale";stale["phone_metadata"]["notice_tracking"]["last_seen_at"]="2020-01-01T00:00:00Z"
         q.execute.return_value=SimpleNamespace(data=[a,same,stale]);self.assertEqual([r["id"] for r in b._candidates(client)],["one"])
+    def test_valued_notice_gets_one_county_check_while_the_sale_is_ahead(self):
+        b=MemphisCountyValueBot();self.addCleanup(b.session.close);client=MagicMock();q=client.table.return_value
+        for method in ["select","eq","neq","is_","or_","order","limit"]:getattr(q,method).return_value=q
+        ahead=(date.today()+timedelta(days=20)).isoformat();old="2020-01-01T00:00:00Z"
+        def made(i,**kw):
+            r=row();r["id"]=i;r["trustee_sale_date"]=ahead;r["phone_metadata"]["notice_tracking"]["last_seen_at"]=old;r.update(kw);return r
+        valued=made("valued",property_value=90000)
+        checked=made("checked",property_value=90000);checked["phone_metadata"][REVIEW]={"checked_on":"2026-01-01","status":"no_current_match"}
+        passed=made("passed",property_value=90000,trustee_sale_date="2020-01-01")
+        unvalued=made("unvalued")
+        q.execute.return_value=SimpleNamespace(data=[valued,checked,passed,unvalued])
+        self.assertEqual(sorted(r["id"] for r in b._candidates(client)),["unvalued","valued"])
+    def test_persist_keeps_a_value_another_source_set(self):
+        b=MemphisCountyValueBot();self.addCleanup(b.session.close);client=MagicMock();q=client.table.return_value
+        for method in ["update","eq","neq","is_","or_","filter"]:getattr(q,method).return_value=q
+        r=row();r["property_value"]=90000
+        b._persist(client,r,{"status":"verified_assessment","estimated_appraisal":100000})
+        data=q.update.call_args.args[0];self.assertNotIn("property_value",data);self.assertNotIn("property_value_source",data)
+        self.assertIn(("property_value",90000),[c.args for c in q.eq.call_args_list])
     def test_scheduled_before_fallback_and_after_notices(self):
         from src.bots import _run_new
         names=[name for name,_ in _run_new.NEW_BOTS]
