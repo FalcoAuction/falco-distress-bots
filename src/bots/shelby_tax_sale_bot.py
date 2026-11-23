@@ -4,7 +4,8 @@ import base64
 import io
 import json
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from urllib.parse import unquote, urlencode
 from uuid import NAMESPACE_URL, uuid5
 
@@ -12,10 +13,15 @@ from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload, _supabase
 from ._owner_lookup import LegacyTLSAdapter
+from ._tax_tract_review import CARD_KEY, STATUS_KEY, next_status, patch_for, shelby_card, shelby_wants_card
 
 SCHEDULE = "https://shelbycountytrustee.com/191/Tax-Sale-Schedule"
 EXTRACT = "https://scgpublic.s3.amazonaws.com/TaxSaleExtract.csv"
 REMOVED = "Parcel no longer on current Shelby trustee tax sale list"
+SALE_PASSED = "Shelby tax sale date passed; sale result not verified"
+STAGING = "homeowner_requests_staging"
+DETAIL_BUDGET = 12          # Trustee parcel pages per run, new and refreshed together
+REFRESH_AFTER_DAYS = 7      # a first-trace card's balance is re-read after this long
 
 
 def scheduled_parcels(html, contents, today):
@@ -125,22 +131,37 @@ class ShelbyTaxSaleBot(BotBase):
 
     def scrape(self):
         self.snapshot_complete = False
+        self.outage = "Shelby trustee inventory unavailable"
         schedule = self.fetch(SCHEDULE)
         extract = self.fetch(EXTRACT)
         if schedule is None or not schedule.ok or extract is None or not extract.ok:
-            raise ValueError("Shelby trustee inventory unavailable")
-        leads = scheduled_parcels(schedule.text, extract.content.decode("utf-8-sig"), date.today())
+            raise ValueError(self.outage)
+        try:
+            leads = scheduled_parcels(schedule.text, extract.content.decode("utf-8-sig"), date.today())
+        except ValueError as exc:
+            self.outage = "Shelby trustee list unreadable: " + str(exc)
+            raise
+        try:
+            self.list_date = parsedate_to_datetime(extract.headers.get("Last-Modified", "")).date().isoformat()
+        except (TypeError, ValueError):
+            self.list_date = None
         self.snapshot_complete = True
         return leads
 
     def _write_staging(self, leads):
-        # BotBase also calls this method after a failed scrape.
+        # BotBase also calls this method after a failed scrape. A failed or
+        # malformed snapshot retires nothing: every tracked tract is dated
+        # "unknown" for today and keeps its last confirmed status.
         if not getattr(self, "snapshot_complete", False):
+            client = _supabase()
+            if client is not None:
+                self._review_tracts(client, None, date.today(), getattr(self, "outage", None))
             return 0, 0
         client = _supabase()
         if client is None:
             raise RuntimeError("Staging unavailable")
-        table = client.table("homeowner_requests_staging")
+        table = client.table(STAGING)
+        today = date.today()
         rows = [staging_row(lead, self.run_id) for lead in leads]
         current = {row["id"]: row for row in rows}
         inserted = 0
@@ -160,7 +181,8 @@ class ShelbyTaxSaleBot(BotBase):
                              "trustee_sale_date": listed["trustee_sale_date"]}
                 elif old["staging_status"] == "pending":
                     if not listed:
-                        patch = {"staging_status": "rejected", "rejection_reason": REMOVED}
+                        passed = (old["trustee_sale_date"] or "9999") < today.isoformat()
+                        patch = {"staging_status": "rejected", "rejection_reason": SALE_PASSED if passed else REMOVED}
                     elif old["trustee_sale_date"] != listed["trustee_sale_date"]:
                         patch = {"trustee_sale_date": listed["trustee_sale_date"]}
                 if patch:
@@ -172,6 +194,7 @@ class ShelbyTaxSaleBot(BotBase):
                 break
             after = page[-1]["id"]
         self._fill_details(client, current)
+        self._review_tracts(client, current, today)
         return inserted, len(rows) - inserted
 
     def _fill_details(self, client, current):
@@ -180,10 +203,12 @@ class ShelbyTaxSaleBot(BotBase):
                    .select("id,raw_payload,owner_name_records,property_value,property_value_source")
                    .eq("bot_source", self.name).eq("staging_status", "pending")
                    .is_("raw_payload->trustee_detail", "null").order("id").limit(12).execute().data or [])
+        self.detail_fetches = 0
         for row in records:
             listed = current.get(row["id"])
             if not listed:
                 continue
+            self.detail_fetches += 1
             res = self.fetch(listed["source_url"], timeout=12)
             if res is None or not res.ok:
                 break
@@ -197,6 +222,82 @@ class ShelbyTaxSaleBot(BotBase):
                 patch.update(property_value=evidence["estimated_appraisal"],
                              property_value_source="shelby_trustee_assessment_estimate")
             apply(client, "homeowner_requests_staging", row, patch)
+
+    def _refresh_details(self, client, rows, current, today, *, ids=None, budget=None, max_age_days=REFRESH_AFTER_DAYS):
+        """Re-read the Trustee balance behind the oldest first-trace cards so
+        the tax debt on a card carries a recent as-of date."""
+        budget = DETAIL_BUDGET - getattr(self, "detail_fetches", 0) if budget is None else budget
+        cutoff = (today - timedelta(days=max_age_days)).isoformat()
+
+        def due(row):
+            raw = row["raw_payload"] or {}
+            if row["id"] not in current or not raw.get("trustee_detail"):
+                return False
+            if ids is not None:
+                return row["id"] in ids
+            return ((raw.get(CARD_KEY) or {}).get("route") == "first_trace_review"
+                    and raw["trustee_detail"].get("checked_on", "") <= cutoff)
+
+        oldest = sorted(filter(due, rows), key=lambda r: r["raw_payload"]["trustee_detail"].get("checked_on", ""))
+        refreshed = []
+        for row in oldest[:max(budget, 0)]:
+            listed = current[row["id"]]
+            res = self.fetch(listed["source_url"], timeout=12)
+            if res is None or not res.ok:
+                break
+            raw = row["raw_payload"]
+            old = raw["trustee_detail"]
+            evidence = parcel_evidence(res.text, listed["raw_payload"], today)
+            if evidence:
+                if old.get("total_tax_balance") is not None:
+                    evidence["previous_total_tax_balance"] = {"amount": old["total_tax_balance"],
+                                                              "as_of": old.get("checked_on")}
+                patch = {"trustee_detail": evidence, "trustee_detail_recheck": None}
+            else:
+                patch = {"trustee_detail_recheck": {"checked_on": today.isoformat(),
+                                                    "status": "parcel_or_sale_not_confirmed"}}
+            client.rpc("apply_staging_enrichment", {"p_rows": [{"id": row["id"], "raw_patch": patch}]}).execute()
+            row["raw_payload"] = {**raw, **patch}
+            refreshed.append(row["id"])
+        return refreshed
+
+    def _review_tracts(self, client, current, today, reason=None, *, write=True):
+        """Date every tracked tract from this run's list and keep its review
+        card current. current is None when the county list could not be read."""
+        table = client.table(STAGING)
+        rows, after = [], "00000000-0000-0000-0000-000000000000"
+        while True:
+            page = (table.select("id,staging_status,rejection_reason,property_address,owner_name_records,"
+                                 "property_value,property_value_source,trustee_sale_date,source_url,raw_payload")
+                    .eq("bot_source", self.name).gt("id", after).order("id").limit(500).execute().data or [])
+            rows.extend(page)
+            if len(page) < 500:
+                break
+            after = page[-1]["id"]
+        if current is not None and write:
+            self._refresh_details(client, rows, current, today)
+        patches = []
+        for row in rows:
+            raw = row["raw_payload"] or {}
+            listed = current.get(row["id"]) if current is not None else None
+            prior = raw.get(STATUS_KEY)
+            if prior is None and row["staging_status"] == "pending":
+                # First dated check of a row the collector already carried as listed.
+                prior = {"status": "listed", "sale_date": row["trustee_sale_date"]}
+            status = next_status(prior, {
+                "available": current is not None, "reason": reason, "listed": bool(listed),
+                "sale_date": listed["trustee_sale_date"] if listed else None,
+                "source_url": EXTRACT, "source_date": getattr(self, "list_date", None)}, today)
+            status.setdefault("sale_id", raw.get("sale_id"))
+            card = shelby_card(row, status, today, EXTRACT) if shelby_wants_card(row) else None
+            patch = patch_for(raw, status, card)
+            if patch:
+                patches.append({"id": row["id"], "raw_patch": patch})
+        if write:
+            for start in range(0, len(patches), 200):
+                client.rpc("apply_staging_enrichment", {"p_rows": patches[start:start + 200]}).execute()
+        self.review_patches = patches
+        return patches
 
 
 def run():
