@@ -29,6 +29,7 @@ import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import _entity_signer as entity_signer
 from ._pilot_review import build_review, debt, source
 from ._property_lane import (COMMERCIAL_MAX_VALUE, COMMERCIAL_MIN_VALUE, _name_set, _num, last_sale,
                              owner_mismatch, owner_type, parcel_id, parcel_owner, value_source)
@@ -150,6 +151,75 @@ def notice_parties(body: Any) -> Optional[str]:
     return re.sub(r"\s+", " ", m[1]).strip(" .;") if m else None
 
 
+# Keys on a staging row that carry a county owner or mailing line, with the label used to cite them.
+_MAIL_KEYS = (("hamilton_assessor", "owner_mailing", "Hamilton County assessor mailing line"),
+              ("hamilton_assessor", "owner", "Hamilton County assessor owner line"),
+              ("comptroller_parcel", "owner_mailing", "State assessment roll mailing line"),
+              ("metro_parcel", "owner_mailing", "Metro Nashville parcel mailing line"),
+              ("tpad", "mailing_address", "State assessment (TPAD) mailing line"))
+
+
+def mail_lines(row: Dict[str, Any], evidence: Optional[Dict[str, Any]] = None) -> List[Tuple[str, Dict[str, Any]]]:
+    """(county owner or mailing line, source) pairs held for a row. For a
+    Hamilton tax row the current assessor export wins over the staged copy."""
+    raw = _d(row.get("raw_payload"))
+    out: List[Tuple[str, Dict[str, Any]]] = []
+    a = _d(_d(evidence).get("assessor"))
+    if a:
+        src = source("Hamilton County assessor export", HAMILTON_ASSESSOR_URL, _d(evidence).get("assessor_date"))
+        out += [(a[k], src) for k in ("owner_mailing", "owner") if a.get(k)]
+    for key, field, label in _MAIL_KEYS:
+        if a and key == "hamilton_assessor":
+            continue
+        line = _d(raw.get(key)).get(field)
+        if line:
+            out.append((str(line), source(label, _d(raw.get(key)).get("detail_url"), None)))
+    if row.get("bot_source") == "hamilton_tax_delinquent":
+        for field in ("owner_name_1", "owner_name_2"):
+            if raw.get(field):
+                out.append((str(raw[field]), source("Hamilton County Trustee delinquent tax file owner line",
+                                                    HAMILTON_TRUSTEE_URL, _d(evidence).get("roll_date"))))
+    return out
+
+
+def company_signer(row: Dict[str, Any], owner: Optional[str], notice: Optional[Dict[str, Any]] = None,
+                   evidence: Optional[Dict[str, Any]] = None,
+                   mailing_index: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The signer answer for a company owner from what the row already holds:
+    the saved notice text (dated by its publication) and the county owner and
+    mailing lines. Never a network read."""
+    raw = _d(row.get("raw_payload"))
+    lines = mail_lines(row, evidence)
+    mailing = next((line for line, _ in lines if entity_signer.mailing_key(line)), None)
+    texts = [(raw.get("body"), notice)] if raw.get("body") and notice else []
+    return entity_signer.find(owner, texts=texts, mail_lines=lines, mailing=mailing, mailing_index=mailing_index)
+
+
+def mailing_index_for(rows: List[Dict[str, Any]], evidence_for=None) -> Dict[str, Any]:
+    """Attention and care-of names per P.O. box across the rows of one run."""
+    entries = []
+    for row in rows:
+        raw = _d(row.get("raw_payload"))
+        ev = evidence_for(row) if evidence_for else None
+        owner = (_d(_d(ev).get("assessor")).get("owner") or parcel_owner(raw) or row.get("owner_name_records")
+                 or row.get("full_name"))
+        owner = " & ".join(owner_names_as_sourced(owner)) or owner
+        lines = mail_lines(row, ev)
+        box = next((line for line, _ in lines if entity_signer.mailing_key(line)), None)
+        if not box:
+            continue
+        for line, src in lines:
+            # An attention name printed on the owner line is filed under the row's box.
+            entries.append((owner, line if entity_signer.mailing_key(line) else f"{line}, {box}", src))
+    return entity_signer.build_mailing_index(entries)
+
+
+def _signer_decider(answer: Dict[str, Any], owner: Optional[str], county_matched: bool) -> Dict[str, Any]:
+    first = answer["signers"][0]
+    return {"name": first["name"], "role": f"{first['role']} of {str(owner or '').strip()}, the owner of record",
+            "basis": entity_signer.signer_basis(answer), "verified": bool(county_matched), "source": first["source"]}
+
+
 # ── Hamilton county evidence ─────────────────────────────────────────────────
 
 def parse_sale_list(text: str) -> Dict[str, Dict[str, Any]]:
@@ -238,7 +308,8 @@ def _under_fee_floor(card: Dict[str, Any], value: float) -> Dict[str, Any]:
                  ["Check whether the same owner has other distressed parcels to sell together"])
 
 
-def generic_hold_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def generic_hold_card(row: Dict[str, Any], today: date,
+                      mailing_index: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """A graded commercial row whose record type has no parcel-level check yet."""
     raw = _d(row.get("raw_payload"))
     dt = str(row.get("distress_type") or "").upper()
@@ -250,6 +321,7 @@ def generic_hold_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any],
     value = _num(row.get("property_value")) if vsrc else None
     basis = f"County appraisal ({vsrc})" if value else None
     src = source(f"{row.get('bot_source')} record", row.get("source_url"), today)
+    answer = company_signer(row, owner, mailing_index=mailing_index) if kind == "entity" else None
     check = {"BANKRUPTCY": "Read the petition and schedules: is the debtor the entity that owns this parcel, and is the case open",
              "TAX_LIEN": "Confirm the parcel is still in the county tax suit or on a published sale list",
              "TAX_SALE": "Confirm the parcel is still on the published sale list and the sale date",
@@ -271,17 +343,24 @@ def generic_hold_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any],
                    "value_source": src if value else None,
                    "unknowns": ["Whether the event is still active", "Debt and liens"]},
         availability={"evidence": "", "checked_on": today, "first_call_question": "",
-                      "verify_next": [check, LISTING_CHECK] + ([SOS_PATH] if kind == "entity" else [])})
-    return card, _facts(row, pid, owner, kind, f"unconfirmed: {dt}", value, basis, _iso(row.get("trustee_sale_date")), None)
+                      "verify_next": [check, LISTING_CHECK] + entity_signer.path_lines(answer)
+                      + ([SOS_PATH] if kind == "entity" else [])})
+    return card, _facts(row, pid, owner, kind, f"unconfirmed: {dt}", value, basis, _iso(row.get("trustee_sale_date")),
+                        None, answer)
 
 
-def _facts(row, parcel, owner, kind, tie, value, basis, deadline, signer) -> Dict[str, Any]:
-    return {"version": VERSION, "parcel": parcel, "owner_entity": owner, "owner_type": kind, "distress_tie": tie,
-            "value": value, "value_basis": basis, "deadline": deadline, "signer": signer,
-            "listing_status": "not verified", "staging_id": row.get("id")}
+def _facts(row, parcel, owner, kind, tie, value, basis, deadline, signer, answer=None) -> Dict[str, Any]:
+    facts = {"version": VERSION, "parcel": parcel, "owner_entity": owner, "owner_type": kind, "distress_tie": tie,
+             "value": value, "value_basis": basis, "deadline": deadline, "signer": signer,
+             "listing_status": "not verified", "staging_id": row.get("id")}
+    if answer and answer["status"] != "none":
+        # Only a company owner with something found carries this, so other rows' facts are unchanged.
+        facts["entity_signer"] = answer
+    return facts
 
 
-def _signer_gate(kind: str, owner: Optional[str], signer: Optional[str]) -> Optional[Tuple[str, str, List[str]]]:
+def _signer_gate(kind: str, owner: Optional[str], signer: Optional[str],
+                 answer: Optional[Dict[str, Any]] = None) -> Optional[Tuple[str, str, List[str]]]:
     """(route, reason, verify_next) when the owner type blocks a first trace, else None."""
     if kind == "government":
         return "removed", "The owner of record is a public body, not a private seller.", []
@@ -300,7 +379,11 @@ def _signer_gate(kind: str, owner: Optional[str], signer: Optional[str]) -> Opti
         what = "trust; the trustee is not named in the record" if kind == "fiduciary" else \
             "company; no member, manager or officer is named in a primary record"
         verify = ["Read the recorded deed for the trustee's name"] if kind == "fiduciary" else [SOS_PATH]
-        return "research_hold", f"The owner of record is a {what}, so the signer is unresolved.", verify
+        paths = entity_signer.path_lines(answer) if kind == "entity" else []
+        reason = f"The owner of record is a {what}, so the signer is unresolved."
+        if paths:
+            reason += f" {len(paths)} path{'s' if len(paths) > 1 else ''} to the signer on file, not verified."
+        return "research_hold", reason, paths + verify
     if kind == "co_owners":
         return ("research_hold", "The county lists additional unnamed co-owners (et al, et ux); every owner must sign "
                 "and they are not all named.", ["Read the vesting deed for every owner's name"])
@@ -347,7 +430,8 @@ def tenant_card(row: Dict[str, Any], today: date, kind_of: str) -> Tuple[Dict[st
     return card, facts
 
 
-def foreclosure_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+def foreclosure_card(row: Dict[str, Any], today: date,
+                     mailing_index: Optional[Dict[str, Any]] = None) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     raw = _d(row.get("raw_payload"))
     st = _d(raw.get("structured"))
     pm = _d(row.get("phone_metadata"))
@@ -376,6 +460,11 @@ def foreclosure_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], 
         basis = "County building value only (TPAD); land and total appraisal not captured"
     county_src = source(f"County parcel record ({vsrc or 'assessor'})", tp.get("detail_url"), today) if (owner_rec or value) else None
     signer = notice_trustee(raw.get("body")) if kind == "fiduciary" else (owner if kind == "person" else None)
+    # A company owner: the notice sometimes recites who signed the deed of trust for it.
+    answer = company_signer(row, owner, notice, mailing_index=mailing_index) if kind == "entity" else None
+    named = answer if answer and answer["status"] == "verified" else None
+    if named:
+        signer = named["signers"][0]["name"]
     lender = st.get("lender") or None
     trustee = st.get("substitute_trustee") or None
     sold = _iso(last_sale(raw))
@@ -413,11 +502,12 @@ def foreclosure_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], 
         asset={"description": desc, "parcel": pid, "address": row.get("property_address"),
                "tie": "The notice names this street address; " + " and ".join(tie_bits) if tie_bits else "",
                "source": county_src or notice},
-        decider={"name": signer or (owner if kind in ("entity", "fiduciary") else None), "role": role,
-                 "basis": (f"The notice's owner line names {signer} as trustee of the owning trust" if kind == "fiduciary" and signer
-                           else f"County parcel record lists {owner_rec} as owner; the notice names the same borrower" if owner_rec
-                           else "Borrower named in the notice; county owner not matched"),
-                 "verified": bool(signer and owner_rec), "source": notice if kind == "fiduciary" else (county_src or notice)},
+        decider=_signer_decider(named, owner, bool(owner_rec)) if named else
+        {"name": signer or (owner if kind in ("entity", "fiduciary") else None), "role": role,
+         "basis": (f"The notice's owner line names {signer} as trustee of the owning trust" if kind == "fiduciary" and signer
+                   else f"County parcel record lists {owner_rec} as owner; the notice names the same borrower" if owner_rec
+                   else "Borrower named in the notice; county owner not matched"),
+         "verified": bool(signer and owner_rec), "source": notice if kind == "fiduciary" else (county_src or notice)},
         economics={"deadline": sale, "deadline_kind": "trustee sale", "value": value, "value_basis": basis,
                    "value_is_estimate": False, "value_source": county_src if value else None,
                    "known_debt": known_debt, "unknowns": unknowns + ([f"Lender: {lender}"] if lender and len(lender) < 80 else [])},
@@ -427,7 +517,8 @@ def foreclosure_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], 
                       "first_call_question": ("Is the trustee sale still going ahead, and would you rather sell at a "
                                               "marketed auction before that date than let the lender take it at the courthouse?"),
                       "verify_next": verify})
-    facts = _facts(row, pid, owner, kind, f"trustee sale notice naming the parcel owner; sale {sale}", value, basis, sale, signer)
+    facts = _facts(row, pid, owner, kind, f"trustee sale notice naming the parcel owner; sale {sale}", value, basis, sale,
+                   signer, answer)
     if status == "resolved":
         # A passed date is not proof of a sale: it may have been postponed or cancelled.
         return _hold(card, "research_hold", f"The advertised sale date {sale} has passed; the outcome is not on file.",
@@ -443,7 +534,7 @@ def foreclosure_card(row: Dict[str, Any], today: date) -> Tuple[Dict[str, Any], 
     if sold and pub and sold > pub:
         return _hold(card, "removed", f"The county shows a transfer on {sold}, after the notice.", [],
                      [f"Recorded transfer {sold}"]), facts
-    gate = _signer_gate(kind, owner, signer)
+    gate = _signer_gate(kind, owner, signer, answer)
     if gate:
         return _hold(card, gate[0], gate[1], gate[2]), facts
     if value is None or not vsrc:
@@ -487,6 +578,11 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
         if list_year else None
     use = a.get("land_use") or a.get("property_type")
     signer = " & ".join(owner_names_as_sourced(owner)) if kind == "person" else None
+    company = " & ".join(owner_names_as_sourced(owner)) or owner
+    answer = company_signer(row, company, None, ev, ev.get("mailing_index")) if kind == "entity" else None
+    named = answer if answer and answer["status"] == "verified" else None
+    if named:
+        signer = named["signers"][0]["name"]
     known_debt = [debt("delinquent_tax", roll["balance"], ev.get("roll_date"), roll_src,
                        f"Bill years {span}; excludes interest, fees and costs added since the file date. Not a payoff.")] \
         if roll.get("on_roll") else []
@@ -515,11 +611,12 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
                "parcel": parcel or None, "address": row.get("property_address"),
                "tie": (f"The tax bills are on parcel {parcel}; the assessor export lists the same parcel number and owner"
                        if a else f"The tax bills are on parcel {parcel}"), "source": asr_src if a else roll_src},
-        decider={"name": signer or (owner if kind in ("entity", "fiduciary", "co_owners", "estate", "religious", "bank") else None),
-                 "role": "owner of record and taxpayer" if kind == "person" else f"owner of record ({kind.replace('_', ' ')})",
-                 "basis": (f"Assessor export lists {a.get('owner')} as owner of parcel {parcel}; the Trustee bills the same name"
-                           if a else "Taxpayer name on the Trustee file only; assessor parcel not matched"),
-                 "verified": bool(a) and kind == "person", "source": asr_src if a else roll_src},
+        decider=_signer_decider(named, company, bool(a)) if named else
+        {"name": signer or (owner if kind in ("entity", "fiduciary", "co_owners", "estate", "religious", "bank") else None),
+         "role": "owner of record and taxpayer" if kind == "person" else f"owner of record ({kind.replace('_', ' ')})",
+         "basis": (f"Assessor export lists {a.get('owner')} as owner of parcel {parcel}; the Trustee bills the same name"
+                   if a else "Taxpayer name on the Trustee file only; assessor parcel not matched"),
+         "verified": bool(a) and kind == "person", "source": asr_src if a else roll_src},
         economics={"deadline": None, "deadline_kind": "none scheduled",
                    "value": value, "value_basis": basis, "value_is_estimate": False,
                    "value_source": asr_src if value else None, "known_debt": known_debt, "unknowns": unknowns},
@@ -532,7 +629,7 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
                       "verify_next": verify})
     tie = (f"real property tax on the owner's parcel; years {span}; past the statutory turnover date {turned}; docket not read"
            if roll.get("on_roll") else "paid or removed")
-    facts = _facts(row, parcel or None, owner, kind, tie, value, basis, None, signer)
+    facts = _facts(row, parcel or None, owner, kind, tie, value, basis, None, signer, answer)
     facts.update(roll=roll, roll_date=ev.get("roll_date"), assessor_date=ev.get("assessor_date"),
                  sale_list=listed, sale_list_year=list_year)
     if not roll.get("on_roll"):
@@ -558,7 +655,7 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
     if len(years) < 2:
         return _hold(card, "research_hold", "A single delinquent year is on file; no pattern of non-payment yet.",
                      ["Recheck the Trustee file next cycle"]), facts
-    gate = _signer_gate(kind, owner, signer)
+    gate = _signer_gate(kind, owner, signer, answer)
     if gate:
         return _hold(card, gate[0], gate[1], gate[2]), facts
     if value is None:
@@ -574,8 +671,8 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
     return build_review(route="first_trace_review", route_reason=reason, **card), facts
 
 
-def review_row(row: Dict[str, Any], evidence: Optional[Dict[str, Any]] = None,
-               today: Optional[date] = None) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+def review_row(row: Dict[str, Any], evidence: Optional[Dict[str, Any]] = None, today: Optional[date] = None,
+               mailing_index: Optional[Dict[str, Any]] = None) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """(pilot_review card, cre_review facts) for a commercial-lane staging row,
     or None when the row belongs to another lane or cannot be carded yet."""
     today = today or date.today()
@@ -593,11 +690,11 @@ def review_row(row: Dict[str, Any], evidence: Optional[Dict[str, Any]] = None,
     if row.get("bot_source") == "hamilton_tax_delinquent":
         if evidence is None:
             return None            # county files unavailable this run: keep the last card
-        return hamilton_tax_card(row, evidence, today)
+        return hamilton_tax_card(row, {**evidence, "mailing_index": mailing_index}, today)
     if lane.get("exclude_reason") == "owner_mismatch":
         return tenant_card(row, today, "owner_mismatch")
     if dt in FORECLOSURE and (row.get("trustee_sale_date") or lane.get("grade")):
-        return foreclosure_card(row, today)
+        return foreclosure_card(row, today, mailing_index)
     if lane.get("grade"):
-        return generic_hold_card(row, today)
+        return generic_hold_card(row, today, mailing_index)
     return None
