@@ -6,8 +6,12 @@ estate whose full notice names a fiduciary (or that carries recorded court
 evidence), it rechecks the county roll for the matched parcel and writes
 raw_payload.pilot_review (lane "probate") through the shared card contract:
 
-  - decedent still the sole owner of record, tie confirmed, value sourced,
-    no known listing or transfer        -> first_trace_review
+  - a record evidences authority over the exact parcel (will power of sale,
+    sale order, sole heir or devisee), or the named fiduciary is on today's
+    roll as the surviving co-owner      -> first_trace_review
+  - decedent still the sole owner, tie confirmed, value sourced, no known
+    listing or transfer, but no authority record
+                                        -> research_hold "Estate candidate: ..."
   - institutional or attorney fiduciary -> professional_relationship
   - co-owner, trust or life estate on the roll, name-only tie, pending
     petition, broker listing, identity conflict, unclear signer, county roll
@@ -119,7 +123,8 @@ def needs_review(row: Dict[str, Any], today: date, role: str) -> bool:
         # Another reviewer's card: look again weekly, merge_review decides.
         last = control.parse_date(str(check.get("checked_on") or "")[:10])
         return last is None or (today - last).days >= RECHECK_DAYS
-    if check.get("fingerprint") != fingerprint(row) or check.get("role") != role:
+    if (check.get("fingerprint") != fingerprint(row) or check.get("role") != role
+            or check.get("rules") != control.RULES):
         return True
     last = control.parse_date(str(check.get("checked_on") or "")[:10])
     return last is None or (today - last).days >= RECHECK_DAYS
@@ -257,6 +262,7 @@ class ProbatePilotReviewBot(BotBase):
                                             professional_estates=professionals.get(pro["key"]) if pro else None)
                 if new is not None:
                     check = {"checked_on": today.isoformat(), "fingerprint": fingerprint(primary), "role": "primary",
+                             "rules": control.RULES,
                              "roll": roll, "duplicate_rows": sorted(m["id"] for m in members if m is not primary),
                              "counsel": [{"name": a, "key": control.professional_key(a),
                                           "estates": counsel.get(control.professional_key(a), [])}
@@ -269,6 +275,7 @@ class ProbatePilotReviewBot(BotBase):
                         o["id"] == primary["id"] for o in out):
                     continue  # no card on the primary yet: nothing to point at
                 check = {"checked_on": today.isoformat(), "fingerprint": fingerprint(member), "role": "duplicate",
+                         "rules": control.RULES,
                          "primary_row": primary["id"]}
                 self._queue(out, member, control.duplicate_card(member, primary["id"], today), check,
                             "duplicate", primary["id"])
