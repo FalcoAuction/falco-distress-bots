@@ -627,7 +627,7 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
     # alone do not give it, so this is the nearest hold, not a recommendation.
     clerk = f"{county.title()} County probate clerk"
     return hold(f"{CANDIDATE_PREFIX}the decedent is still the sole owner of record on the {county.title()} County "
-                f"roll, {_people(reps)} is named as {_role(reps).replace(' (role as printed)', '')} without an "
+                f"roll, {_people(reps)} {'are' if len(reps) > 1 else 'is'} named as {_role(reps).replace(' (role as printed)', '')} without an "
                 f"identity conflict, the value is sourced (${int(value):,}, {value_basis}) and no transfer or "
                 "listing conflict is known. Authority over this parcel is not evidenced by a record: letters "
                 "alone do not give it.",
