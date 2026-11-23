@@ -17,7 +17,7 @@ os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test")
 
 from src.bots import preforeclosure_review_bot as bot_module  # noqa: E402
 from src.bots._preforeclosure_review import (COUNTY_KEY, EVIDENCE_KEY, LINK_KEY, TRACK_KEY, appointment_card,  # noqa: E402
-                                             link_notice, names_agree, notice_identity, parcels_differ, sale_card,
+                                             key_names, link_notice, names_agree, notice_identity, parcels_differ, sale_card,
                                              sale_state, shelby_parcel)
 from src.bots.preforeclosure_review_bot import PreforeclosureReviewBot, merge_county  # noqa: E402
 
@@ -225,6 +225,11 @@ class SaleStateTests(unittest.TestCase):
         card = sale_card(noted, state_of(noted), TODAY)
         self.assertEqual((card["route"], card["route_reason"], card["availability"]["verify_next"][0]),
                          ("research_hold", "Title passed by affidavit", "Read the affidavit"))
+        dated = sale_row(seed={"hold": "Two sources give different sale dates", "conflicts": ["Mackie Wolf says Dec 17, the publisher says Dec 15"]},
+                         comptroller=comptroller)
+        clash = sale_card(dated, state_of(dated), TODAY)
+        self.assertEqual((clash["route"], clash["route_reason"]), ("research_hold", "Two sources give different sale dates"))
+        self.assertEqual(clash["availability"]["conflicts"], ["Mackie Wolf says Dec 17, the publisher says Dec 15"])
         promoted = sale_card(sale_row(staging_status="promoted"), state_of(sale_row()), TODAY)
         self.assertEqual(promoted["route"], "research_hold")
         company = sale_row(owner_name_records="PLEX LLC", seed={**sale_row()["seed"], "owner": "PLEX LLC"})
@@ -248,9 +253,15 @@ def appt_row(**raw_over):
 
 
 class AppointmentCardTests(unittest.TestCase):
-    def test_verified_early_filing_with_unknown_deadline(self):
+    def test_verified_early_filing_with_unknown_deadline_is_research(self):
         card = appointment_card(appt_row(), {"status": "none"}, TODAY)
-        self.assertEqual(card["route"], "first_trace_review")
+        self.assertEqual(card["route"], "research_hold")
+        self.assertTrue(card["route_reason"].startswith(
+            "Early filing: owner RICKARD SAMANTHA on the county bill matches the borrower, parcel 089026  00007, "
+            "value estimate $160,000, original loan $104,000 (not a payoff)."))
+        self.assertIn("Promote when a sale notice or trustee calendar date appears for this loan",
+                      card["availability"]["verify_next"])
+        self.assertIn("Have you been able to work anything out", card["availability"]["first_call_question"])
         self.assertIsNone(card["economics"]["deadline"])
         self.assertIsNone(card["economics"]["runway_days"])
         self.assertIn("Sale date. None advertised yet", card["economics"]["unknowns"])
@@ -261,11 +272,28 @@ class AppointmentCardTests(unittest.TestCase):
         self.assertTrue(card["decider"]["verified"])
         self.assertNotIn("—", str(card))
 
-    def test_unranked_early_filing_is_held(self):
+    def test_unranked_early_filing_says_so(self):
         card = appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=False)
         self.assertEqual(card["route"], "research_hold")
-        self.assertIn("not on the ranked list", card["route_reason"])
-        self.assertEqual(appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=True)["route"], "first_trace_review")
+        self.assertTrue(card["route_reason"].startswith("Early filing: "))
+        self.assertIn("Not on the ranked list", card["route_reason"])
+        ranked = appointment_card(appt_row(), {"status": "none"}, TODAY, ranked=True)
+        self.assertEqual(ranked["route"], "research_hold")
+        self.assertNotIn("ranked list", ranked["route_reason"])
+
+    def test_second_owner_in_spoken_order_is_keyed_by_surname(self):
+        county = {**appt_row()["raw"][COUNTY_KEY], "roll_owner": "ALI ABDUL-KAREEM & GAIL D FRIPP"}
+        card = appointment_card(appt_row(borrowers=["ALI ABDUL K", "FRIPP GAIL D"], **{COUNTY_KEY: county}),
+                                {"status": "none"}, TODAY)
+        self.assertEqual(card["owner_group_key"], "tn|shelby|P:ALI A+P:FRIPP G")
+        self.assertEqual(card["owner_names"], ["ALI ABDUL-KAREEM", "FRIPP, GAIL D"])
+        self.assertEqual(card["decider"]["name"], "ALI ABDUL-KAREEM & GAIL D FRIPP")     # shown as sourced
+        self.assertEqual(key_names("CHILDRESS COTY L & JACQUES RAWLS", ["Jacques Rawls"]),
+                         ["CHILDRESS COTY L", "RAWLS, JACQUES"])
+        self.assertEqual(key_names("PIGUES THOMAS E JR AND LASHUANA FOX AND", ["Thomas Pigues"]),
+                         ["PIGUES THOMAS E JR AND LASHUANA FOX AND"])              # no evidence for FOX: as sourced
+        self.assertEqual(key_names("ODOM JERRY W & AMY E", ["Amy Odom"]), ["ODOM JERRY W & AMY E"])
+        self.assertEqual(key_names("GERDES KEITH & GERDES CHRISTIENE ETUX", []), ["GERDES KEITH & GERDES CHRISTIENE ETUX"])
 
     def test_index_only_filing_is_research_with_the_attempt_count(self):
         row = appt_row(deed_of_trust=None, parcel_id=None, loan=None, dot_checked_at=None, **{COUNTY_KEY: None})
@@ -306,6 +334,8 @@ class AppointmentCardTests(unittest.TestCase):
         self.assertIn("10 days before the first advertisement", card["route_reason"])
         alone = appointment_card(appt_row(), link, TODAY, notice_carded=False)
         self.assertEqual((alone["route"], alone["economics"]["deadline"]), ("first_trace_review", "2026-12-29"))
+        undated = appointment_card(appt_row(), {**link, "sale_date": None}, TODAY, notice_carded=False)
+        self.assertEqual(undated["route"], "research_hold")
 
     def test_conflicting_notice_holds(self):
         link = {"status": "conflict", "notice_ids": ["FD1"], "reason": "notice FD1 names parcel X"}

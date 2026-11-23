@@ -173,6 +173,52 @@ def parcels_match(a: Any, b: Any) -> bool:
     return bool(full_a) and full_a == full_b
 
 
+_GENERATION = {"JR", "SR", "II", "III", "IV"}
+
+
+def _surname_of(name: str) -> Optional[str]:
+    """Surname of one person as the source prints it: before a comma, first
+    on an all-capitals index or roll line, last in mixed-case prose."""
+    text = str(name or "").strip()
+    words = [w for w in re.sub(r"[^A-Za-z, -]", " ", text).replace(",", " , ").split()]
+    if "," in words:
+        words = words[:words.index(",")]
+        return words[0].upper() if words else None
+    words = [w for w in words if w.upper() not in _GENERATION and len(w) > 1]
+    if len(words) < 2:
+        return None
+    return (words[0] if text == text.upper() else words[-1]).upper()
+
+
+def key_names(owner: Any, others: Any) -> List[str]:
+    """Owner names to hand to the shared owner key.
+
+    A county bill prints the first owner surname first and often prints a
+    second owner in spoken order ("ALI ABDUL-KAREEM & GAIL D FRIPP"). The
+    shared key reads every all-capitals name as surname first, so a second
+    owner whose surname is known from the borrower list is rewritten as
+    "FRIPP, GAIL D". Nothing is rewritten on a guess: with no borrower to
+    confirm the surname the name is passed exactly as sourced.
+    """
+    text = str(owner or "").strip()
+    if not text:
+        return []
+    surnames = {s for s in (_surname_of(n) for n in split_names(others)) if s}
+    parts = [x.strip() for x in re.split(r"\s*(?:;|&|\bAND\b)\s*", text, flags=re.I) if x.strip()]
+    out, changed = [], False
+    for part in parts:
+        words = part.replace(".", " ").split()
+        core = [w for w in words if w.upper() not in _GENERATION and len(w) > 1]
+        if ("," in part or len(core) < 2 or core[0].upper() in surnames
+                or core[-1].upper() not in surnames or part != part.upper()):
+            out.append(part)
+            continue
+        cut = len(words) - 1 - [w.upper() for w in reversed(words)].index(core[-1].upper())
+        out.append(f"{words[cut]}, {' '.join(words[:cut] + words[cut + 1:])}".strip())
+        changed = True
+    return out if changed else [text]
+
+
 # ── Appointment to notice ───────────────────────────────────────────────────
 
 
@@ -552,6 +598,16 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
         elif economics.get("value") is None:
             hold = "Owner and parcel are verified, but there is no sourced value yet"
             verify.append("Scheduled county assessment or recorded loan estimate")
+        elif not economics.get("deadline"):
+            # Patrick's rule: an early filing with no advertised sale date is kept
+            # as research, however well verified. It is promoted by the notice.
+            loan_text = (f", original loan {_money(economics['known_debt'][0]['amount'])} (not a payoff)"
+                         if economics["known_debt"] else "")
+            hold = (f"Early filing: owner {owner} on the county bill matches the borrower, parcel {parcel}, "
+                    f"value estimate {_money(economics['value'])}{loan_text}. No sale date is advertised yet"
+                    + (". Not on the ranked list (a ranking rule such as the fee floor excludes it, or it is not ranked yet)"
+                       if ranked is False else ""))
+            verify.append("Promote when a sale notice or trustee calendar date appears for this loan")
         elif ranked is False and not (linked and notice_carded):
             # Same rule as an advertised sale: the lane does not recommend paid
             # contact data for a record the ranking excludes or has not ranked yet.
@@ -576,7 +632,7 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
     }
     event = {"what": what, "status": status, "checked_on": today.isoformat(), "source": register}
     asset = {"description": description, "parcel": parcel, "address": address, "tie": tie, "source": asset_src}
-    names = [owner] if owner else borrowers   # one sourced string, unsplit, so the cross-lane owner key agrees
+    names = key_names(owner, all_borrowers) if owner else borrowers   # as sourced; see key_names
 
     if linked and notice_carded:
         return build_review(
@@ -591,8 +647,8 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
                             economics=economics, availability=availability)
     return build_review(
         lane=LANE, route="first_trace_review", reviewed_by=REVIEWER, county="Shelby", owner_names=names, today=today,
-        route_reason=("Early foreclosure filing with the borrower confirmed on the current county bill, an exact parcel "
-                      "and a sourced value. " + ("Sale advertised." if linked else "No sale date is advertised yet, so the deadline is unknown.")),
+        route_reason=("Foreclosure filing with the borrower confirmed on the current county bill, an exact parcel, "
+                      f"a sourced value and a sale advertised for {economics['deadline']}."),
         event=event, asset=asset, decider=decider, economics=economics, availability=availability)
 
 
@@ -713,9 +769,10 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
         "verify_next": verify + ["Check for an active listing or contract before buying contact data",
                                  "Reread the trustee's list on the morning of any call. Dates move"],
     }
+    conflicts.extend(c for c in (seed.get("conflicts") or []) if c)
     if row.get("staging_status") == "promoted":
         conflicts.append("Already promoted into the live lead list. Check that record's status and any prior contact first")
-    names = [evidence["owner"]] if evidence else (borrowers or [staging_owner])   # as sourced, unsplit
+    names = key_names(evidence["owner"], borrowers) if evidence else (borrowers or [staging_owner])   # as sourced
     common = dict(lane=LANE, reviewed_by=REVIEWER, county=row.get("county"), owner_names=names, today=today,
                   event={"what": what, "status": event_status, "checked_on": listed_on, "source": event_src},
                   asset={"description": "Real property under the deed of trust being foreclosed", "parcel": parcel,
