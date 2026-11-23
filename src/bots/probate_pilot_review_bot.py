@@ -321,20 +321,30 @@ class ProbatePilotReviewBot(BotBase):
         # backlog a rare filter can scan everything and time out.
         for source_name in SOURCES:
             for condition in filters:
-                try:
-                    for offset in range(0, 10000, PAGE):
-                        page = (client.table(table).select("id").in_("distress_type", ["PROBATE", "COURT_SALE"])
-                                .eq("bot_source", source_name).eq("staging_status", "pending").or_(condition)
-                                .order("staged_at", desc=True).range(offset, offset + PAGE - 1)
-                                .execute().data or [])
-                        ids.extend(r["id"] for r in page if r["id"] not in ids)
-                        if len(page) < PAGE:
-                            break
-                except Exception as exc:
-                    # Rows it would have found keep their current card until
-                    # the next run.
-                    self.logger.warning("probate row filter skipped (%s): %s %s", type(exc).__name__,
-                                        source_name, condition)
+                if source_name == "tn_public_notice" and "comptroller_parcel" in condition:
+                    # About a thousand excerpt-only rows with no fiduciary; the
+                    # filter also times out on a cold cache. Out of scope here.
+                    continue
+                for attempt in (1, 2):
+                    try:
+                        found: List[str] = []
+                        for offset in range(0, 10000, PAGE):
+                            page = (client.table(table).select("id")
+                                    .in_("distress_type", ["PROBATE", "COURT_SALE"])
+                                    .eq("bot_source", source_name).eq("staging_status", "pending").or_(condition)
+                                    .order("staged_at", desc=True).range(offset, offset + PAGE - 1)
+                                    .execute().data or [])
+                            found.extend(r["id"] for r in page)
+                            if len(page) < PAGE:
+                                break
+                        ids.extend(i for i in found if i not in ids)
+                        break
+                    except Exception as exc:
+                        # The second try usually runs on a warm cache. Rows a
+                        # skipped filter would have found keep their card.
+                        if attempt == 2:
+                            self.logger.warning("probate row filter skipped (%s): %s %s", type(exc).__name__,
+                                                source_name, condition)
         for offset in range(0, len(ids), 50):
             for row in (client.table(table).select(COLUMNS).in_("id", ids[offset:offset + 50]).execute().data or []):
                 rows[row["id"]] = row
