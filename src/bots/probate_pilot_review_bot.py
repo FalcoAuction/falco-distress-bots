@@ -130,7 +130,8 @@ class ProbatePilotReviewBot(BotBase):
     description = "Probate lane review card: estate control of a specific, available parcel"
     throttle_seconds = 1.5
     expected_min_yield = 0
-    max_roll_checks = 60
+    # About a minute of county requests per run at the throttle below.
+    max_roll_checks = 40
 
     def scrape(self) -> List[Any]:
         return []
