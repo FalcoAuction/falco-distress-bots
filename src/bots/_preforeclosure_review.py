@@ -714,7 +714,8 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
         what += f", last advertised for {sale}. The trustee's list has not been read since {listed_on}, so today's status is not confirmed."
         event_status = "unknown"
     if appointment and lead_time(appointment):
-        what += (f" The appointment of substitute trustee (Shelby instrument {appointment.get('instrument')}) was recorded "
+        label = appointment.get("instrument_label") or f"Shelby instrument {appointment.get('instrument')}"
+        what += (f" The appointment of substitute trustee ({label}) was recorded "
                  f"{appointment['appointment_recorded']}, {lead_time(appointment)}.")
 
     evidence = county_evidence(row)
