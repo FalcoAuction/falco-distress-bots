@@ -37,7 +37,8 @@ from typing import Any, Dict, List, Optional
 
 from dateutil.tz import gettz
 
-from ._base import BotBase, BotTimeout, _supabase
+from . import rubin_lublin_list
+from ._base import BotBase, BotTimeout, _supabase, guard_phone_metadata
 from ._owner_lookup import LegacyTLSAdapter
 from ._pilot_review import merge_review
 from ._preforeclosure_review import (COUNTY_KEY, EVIDENCE_KEY, LINK_KEY, REVIEWER, SALE_SOURCES, TRACK_KEY, _stamp,
@@ -45,6 +46,7 @@ from ._preforeclosure_review import (COUNTY_KEY, EVIDENCE_KEY, LINK_KEY, REVIEWE
                                      same_card, track_of)
 from ._preforeclosure_review import shelby_parcel
 from ._shelby_trustee_value import HOST, lookup
+from ._trustee_list_match import LIST_KEY, all_staged_books, check_notices, effective_date, page_book
 
 TABLE = "homeowner_requests_staging"
 APPOINTMENT_SOURCE = "shelby_substitute_trustee"
@@ -59,6 +61,7 @@ SALE_COLUMNS = (
     "cited_appointment:raw_payload->substitute_trustee_appointment,notice_parcel:raw_payload->extracted->>parcel,"
     "calendar:raw_payload->memphis_trustee_calendar,value_estimate:raw_payload->value_estimate,"
     "comptroller:raw_payload->comptroller_parcel,borrowers:raw_payload->borrowers,"
+    f"list_check:raw_payload->{LIST_KEY},"
     f"seed:raw_payload->{EVIDENCE_KEY},track:raw_payload->{TRACK_KEY},card:raw_payload->pilot_review"
 )
 APPOINTMENT_COLUMNS = ("id,pipeline_lead_key,property_address,source_url,property_value,property_value_source,"
@@ -149,6 +152,45 @@ class PreforeclosureReviewBot(BotBase):
         return self._page(lambda: client.table(TABLE).select(SALE_COLUMNS).eq("bot_source", source)
                           .in_("staging_status", ["pending", "promoted"]).gte("trustee_sale_date", cutoff))
 
+    # ── Memphis notices against their own trustee's sale list ───────────────
+
+    def _list_checks(self, notices, sales, now: datetime, today: date) -> Dict[str, Dict[str, Any]]:
+        """Evidence per Memphis notice id from the sale list of the trustee the
+        notice names (_trustee_list_match). A list that cannot be read today
+        confirms nothing and withdraws nothing."""
+        books = all_staged_books(sales.values(), now)
+        try:
+            listings = rubin_lublin_list.load(self.session)
+            if listings is not None:
+                books["rubin_lublin_list"] = page_book("rubin_lublin_list", listings, today.isoformat(), rubin_lublin_list.URL)
+        except BotTimeout:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Rubin Lublin sale list not read (%s)", type(exc).__name__)
+        return check_notices(notices, books, today.isoformat())
+
+    def _redate(self, client, row: Dict[str, Any], check: Dict[str, Any], now: datetime) -> bool:
+        """Move a Memphis notice record to the later date its trustee's list
+        shows. Compare-and-set on the whole record identity, the stored date
+        and phone_metadata, so a manual status or a concurrent write wins."""
+        found = (client.table(TABLE).select("id,pipeline_lead_key,phone_metadata").eq("id", row["id"]).limit(1).execute().data) or []
+        if not found:
+            return False
+        pm = found[0].get("phone_metadata")
+        if (pm is not None and not isinstance(pm, dict)) or (pm or {}).get("sale_status"):
+            return False
+        tracking = (pm or {}).get("notice_tracking", {})
+        if not isinstance(tracking, dict):
+            return False
+        query = client.table(TABLE).update({"trustee_sale_date": check["date"], "phone_metadata": {
+            **(pm or {}), "notice_tracking": {**tracking, "last_seen_at": now.isoformat(), "last_seen_by": REVIEWER}}})
+        for key, value in {"id": row["id"], "pipeline_lead_key": found[0]["pipeline_lead_key"],
+                           "bot_source": "memphis_daily_news", "staging_status": row["staging_status"],
+                           "property_address": row["property_address"], "trustee_sale_date": row["trustee_sale_date"],
+                           "raw_payload->structured->>tdn_no": row["notice_id"]}.items():
+            query = query.eq(key, value)
+        return bool(guard_phone_metadata(query, pm).execute().data)
+
     def _ranked(self, client, ids: List[str]) -> set:
         """Which of these records are on the current ranked list. A failed
         read raises: a card must not change route because a query timed out."""
@@ -174,7 +216,8 @@ class PreforeclosureReviewBot(BotBase):
         today = now.astimezone(gettz("America/Chicago")).date()
         only = set(only_ids) if only_ids is not None else None
         counts = dict(appointments=0, owner_checks=0, owners_verified=0, linked=0, link_conflicts=0, sales=0,
-                      cards_written=0, unchanged=0, kept_existing=0)
+                      cards_written=0, unchanged=0, kept_existing=0, list_checked=0, list_confirmed=0,
+                      list_postponed=0, redated=0)
         patches: Dict[str, Dict[str, Any]] = {}
         plan: List[Dict[str, Any]] = []
 
@@ -185,6 +228,10 @@ class PreforeclosureReviewBot(BotBase):
         for source in SALE_SOURCES[1:]:
             sales.update({r["id"]: r for r in self._sales(client, today, source)})
         identities = [notice_identity(n) for n in notices]
+        checks = self._list_checks(notices, sales, now, today)
+        # A notice past its printed date comes back when the trustee's list shows a later one.
+        sales.update({n["id"]: n for n in notices if n["id"] in checks and n["id"] not in sales})
+        redates: List[tuple] = []
 
         ranked = self._ranked(client, [r["id"] for r in appointments] + [i for i in sales if only is None or i in only])
         budget = self.max_owner_checks if owner_checks is None else owner_checks
@@ -259,6 +306,17 @@ class PreforeclosureReviewBot(BotBase):
             if seeds and row["id"] in seeds and not row.get("seed"):
                 row = {**row, "seed": seeds[row["id"]]}
                 patch[EVIDENCE_KEY] = seeds[row["id"]]
+            check = checks.get(row["id"])
+            if check is not None:
+                counts["list_checked"] += 1
+                counts["list_confirmed"] += check["status"] == "confirmed"
+                counts["list_postponed"] += check["status"] == "postponed"
+                if check != row.get("list_check"):
+                    patch[LIST_KEY] = check
+                moved = effective_date(row, check, today.isoformat())
+                if moved != row.get("trustee_sale_date"):
+                    redates.append((row, check))
+                row = {**row, "list_check": check, "trustee_sale_date": moved}
             row = {**row, "ranked": row["id"] in ranked}
             state = sale_state(row, last_read.get(row["bot_source"]), now, today)
             track = track_of(state, row.get("track"), today)
@@ -270,6 +328,7 @@ class PreforeclosureReviewBot(BotBase):
                 patches[row["id"]] = patch
                 plan.append({"id": row["id"], "kind": "sale", "source": row["bot_source"], "keys": sorted(patch),
                              "state": state["status"], "sale_date": state.get("sale_date"),
+                             "list": (check or {}).get("status"),
                              "route": (patch.get("pilot_review") or row.get("card") or {}).get("route")})
 
         if not dry_run:
@@ -279,6 +338,10 @@ class PreforeclosureReviewBot(BotBase):
                 written = client.rpc("apply_staging_enrichment", {"p_rows": chunk}).execute().data
                 if written != len(chunk):
                     raise RuntimeError(f"review write incomplete: {written} of {len(chunk)}")
+            for row, check in redates:
+                counts["redated"] += self._redate(client, row, check, now)
+        else:
+            counts["redated"] = len(redates)
         return {**counts, "rows_changed": len(patches), "plan": plan, "patches": patches if dry_run else None,
                 "source_last_read": {k: v.isoformat() if v else None for k, v in last_read.items()}}
 
