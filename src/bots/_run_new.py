@@ -96,6 +96,7 @@ from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
 from . import land_lane_bot
+from . import land_review_bot
 from . import church_closure_bot
 from . import stalled_build_bot
 from . import probate_property_enricher_bot
@@ -153,6 +154,15 @@ NEW_BOTS = [
     # everything is lost by running it last: on a run that hits the job
     # timeout, last is exactly the slot that never executes.
     ("bot_health_monitor", bot_health_monitor.run),
+    # The daily workflow prepares the Comptroller roll before this runner
+    # starts, so land acquisition reads it directly. It runs here, ahead of
+    # the long scrapers, because on a run that hits the time budget the old
+    # late slot never executed. The review then cross-matches every land
+    # tract against current tax, foreclosure, partition and estate events on
+    # the exact parcel (notices staged by earlier runs) and writes the land
+    # pilot_review cards.
+    ("land_lane", land_lane_bot.run),
+    ("land_review", land_review_bot.run),
     # Lead sources
     ("hud_reo", hud_reo_bot.run),
     ("shelby_receiver_roster", shelby_receiver_roster_bot.run),
@@ -266,9 +276,6 @@ NEW_BOTS = [
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
     ("comptroller_parcels", comptroller_parcels_bot.run),
-    # Free: Middle TN farm/timber tracts owned by heirs, family groups or
-    # long-held absentees, from the same Comptroller index.
-    ("land_lane", land_lane_bot.run),
     # Free: closed United Methodist churches; property vested in the
     # Conference Trustees (one seller for every building).
     ("church_closure", church_closure_bot.run),
