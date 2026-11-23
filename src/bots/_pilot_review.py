@@ -44,7 +44,9 @@ EVENT_STATUS = ("active", "postponed", "resolved", "unknown")
 DEBT_KINDS = ("delinquent_tax", "mortgage_original", "mortgage_estimate", "judgment", "lien", "other")
 
 # Higher wins when two automatic cards compete for the same row.
-_ROUTE_STRENGTH = {"removed": 3, "first_trace_review": 2, "professional_relationship": 2, "research_hold": 1}
+# Between two lanes the cautious card wins: a lane that found a gap in the
+# evidence is not overruled by a lane that did not look for it.
+_ROUTE_STRENGTH = {"removed": 3, "research_hold": 2, "first_trace_review": 1, "professional_relationship": 1}
 
 _SUFFIX = re.compile(
     r"\b(JR|SR|II|III|IV|ETUX|ET UX|ETAL|ET AL|ETVIR|ET VIR|TRUSTEE|TR|TRS|ESTATE OF|EST OF|EST|"
@@ -309,8 +311,9 @@ def merge_review(existing: Optional[Dict[str, Any]], new: Dict[str, Any]) -> Dic
 
     - A manual card (existing["manual"] is true) always stays.
     - A re-run by the same reviewer replaces its own card (fresh check date).
-    - Between two reviewers, "removed" beats everything, a recommendation
-      beats a research hold, and a tie keeps the existing card.
+    - Between two reviewers, "removed" beats everything, a research hold
+      beats a recommendation (one lane's unresolved gap is not overruled by
+      another lane's weaker check), and a tie keeps the existing card.
     """
     if not existing or not isinstance(existing, dict):
         return new
