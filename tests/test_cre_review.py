@@ -190,6 +190,16 @@ class HamiltonTaxCases(unittest.TestCase):
         self.assertEqual(card["economics"]["known_debt"][0]["kind"], "delinquent_tax")
         self.assertEqual(card["economics"]["known_debt"][0]["amount"], 3000.0)
         self.assertIsNone(card["economics"]["deadline"])
+        self.assertEqual(card["economics"]["deadline_kind"], "none scheduled")
+        what = card["event"]["what"]
+        self.assertIn("Delinquent on the Trustee file dated 2026-11-01 for bill years 2023 to 2025, $3,000", what)
+        self.assertIn("years 2023 and 2024 are past the statutory turnover date; the tax suit docket for this parcel "
+                      "has not been read", what)
+        self.assertIn("Tax suit docket and any scheduled sale not verified; next Hamilton sale list expected May 2027",
+                      card["economics"]["unknowns"])
+        text = " ".join([what, card["route_reason"], card["availability"]["first_call_question"]]).lower()
+        for claim in ("turned over to", "with the clerk and master", "next tax sale", "before the"):
+            self.assertNotIn(claim, text)
         self.assertEqual(facts["roll"]["turned_over_years"], [2023, 2024])
         self.assertIn(LISTING_CHECK, card["availability"]["verify_next"])
 
@@ -219,7 +229,7 @@ class HamiltonTaxCases(unittest.TestCase):
     def test_holds_and_removals(self):
         cases = [
             (evidence(roll=roll_status([])), "removed", "no longer on the Trustee"),
-            (evidence(roll=roll_status(bills(2025))), "research_hold", "Only the current year"),
+            (evidence(roll=roll_status(bills(2025))), "research_hold", "no year is past the statutory turnover date"),
             (evidence(roll=roll_status(bills(2023))), "research_hold", "single delinquent year"),
             (evidence(assessor=None), "research_hold", "not matched to exactly one parcel"),
             (evidence(duplicate_parcel=True), "research_hold", "not matched to exactly one parcel"),
@@ -253,6 +263,13 @@ class HamiltonTaxCases(unittest.TestCase):
             self.assertEqual(card["route"], route, owner)
             self.assertIn(phrase, card["route_reason"])
         self.assertEqual(owner_kind("DELTA REAL ESTATE GP"), "entity")
+
+    def test_business_names_without_a_legal_suffix_are_not_people(self):
+        for name in ("HIXSON AUTO CENTER", "LAKSHWATI CORPORATION", "OM MD PLAZA", "18TH PAULINA LIMITED PARTNERSHIP"):
+            self.assertEqual(owner_kind(name), "entity", name)
+        for name in ("MILLER CHARLES", "MC ALLISTER ANGELA L", "BYRD TYRONE & BETH DENISE", "LUKEN HENRY G III",
+                     "WILSON DEMETIRUS & GHOLSTON WILLIE P", "FRYAR BOBBY H & & SHERELENE T", "GINN JERRY HERBERT JR"):
+            self.assertEqual(owner_kind(name), "person", name)
 
     def test_county_files_unavailable_leaves_the_row_alone(self):
         self.assertIsNone(review_row(hamilton_row(), None, today=TODAY))

@@ -11,8 +11,9 @@ What a commercial card must establish before anyone buys contact data:
             signer until the Secretary of State record is read by a person;
             the card then says "path: SOS registered agent lookup" and holds.
   distress  current, and on the BUILDING OWNER's parcel: a trustee sale
-            notice, or real property tax the Trustee has turned over for the
-            delinquent tax suit. A tenant's WARN notice, a business closure or
+            notice, or real property tax unpaid on the current Trustee file
+            for two or more years, one past the statutory turnover date (the
+            suit docket itself is not read, and the card says so). A tenant's WARN notice, a business closure or
             a tenant's personal property tax account is not owner distress.
   value     the county appraisal, labeled as such
   deadline  the advertised sale date, or the next annual tax sale
@@ -52,7 +53,17 @@ _CO_OWNERS = re.compile(r"\b(ET\s*AL|ETAL|ET\s*UX|ETUX|ET\s*VIR|ETVIR)\b", re.I)
 _FIDUCIARY = re.compile(r"\b(TR|TRS|TRUSTEE|TRUSTEES|TRUST|LIFE\s+EST(ATE)?|REM|REMAINDER)\b", re.I)
 _ESTATE = re.compile(r"\b((?<!REAL )ESTATE|EST\s+OF|HEIRS|DECEASED|DECD)\b", re.I)
 _COMPANY = re.compile(r"\b(LIMITED PARTNERSHIP|PARTNERSHIP|PARTNERS|INCORPORATED|GP|LP|LLLP|PLLC|PC|ASSOCIATES|"
-                      r"REAL ESTATE|VENTURES?|ENTERPRISES?)\b", re.I)
+                      r"REAL ESTATE|VENTURES?|ENTERPRISES?|"
+                      # A business name with no legal suffix ("HIXSON AUTO CENTER", "OM MD PLAZA") is not a person.
+                      r"CORPORATION|CORP|COMPANY|CO|INC|LLC|LTD|PLAZA|CENTER|CENTRE|CENTERS|AUTO|AUTOMOTIVE|MOTORS?|GARAGE|"
+                      r"TIRES?|TOWING|BODY SHOP|SHOP|SHOPPE|STORE|MARKET|MART|GROCERY|FOODS?|RESTAURANT|CAFE|GRILL|BAR|"
+                      r"TAVERN|HOTEL|MOTEL|INN|SUITES|LODGE|APARTMENTS?|VILLAGE|MALL|SQUARE|TOWER|BUILDING|WAREHOUSE|"
+                      r"STORAGE|SERVICES?|SALES|SUPPLY|SUPPLIES|EQUIPMENT|CONSTRUCTION|BUILDERS|CONTRACTORS?|ROOFING|"
+                      r"PLUMBING|ELECTRIC|PAVING|TRUCKING|TRANSPORT|LOGISTICS|MANUFACTURING|INDUSTRIES|INDUSTRIAL|"
+                      r"STEEL|PLATING|MACHINE|CLINIC|MEDICAL|DENTAL|PHARMACY|HEALTH ?CARE|FUNERAL|CHAPEL|ACADEMY|"
+                      r"DAY ?CARE|SALON|BARBER|LAUNDRY|CLEANERS|CAR WASH|STUDIO|CLUB|RENTALS?|LEASING|FINANCIAL|"
+                      r"INSURANCE|AGENCY|REALTY|HOMES|DEVELOPMENT|DEVELOPERS|MANAGEMENT|GROUP|FUND|CAPITAL|"
+                      r"INTERNATIONAL|NATIONAL|AMERICAN?|SOUTHERN|CHATTANOOGA|TENNESSEE|MD|DDS|DBA)\b|\d", re.I)
 _CARE_OF = re.compile(r"^\s*(ATTN\b|ATTENTION\b|C/O|%)", re.I)
 # The ranked list drops anything under this value (lead_quality_reasons: below_fee_floor).
 FEE_FLOOR_VALUE = 150_000
@@ -116,7 +127,7 @@ def owner_kind(name: Optional[str], owner_class: Optional[str] = None) -> str:
     if _ESTATE.search(text):
         return "estate"
     if base == "entity":
-        return "fiduciary" if re.search(r"\bTRUST\b", text, re.I) else "entity"
+        return "fiduciary" if re.search(r"\b(TRUST|TRS|TRUSTEES?)\b", text, re.I) else "entity"
     if _FIDUCIARY.search(text):
         return "fiduciary"
     if _CO_OWNERS.search(text):
@@ -190,10 +201,11 @@ def roll_index(rows, parcels) -> Dict[str, List[Dict[str, Any]]]:
 def roll_status(bills: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
     """Current real property tax position from the Trustee file.
 
-    The Trustee stamps a bill's memo date with March of the second year after
-    the bill year when it turns that year over to the Clerk and Master for
-    the delinquent tax suit (2023 bills carry 03/2025). Only those years are
-    counted as suit-stage; a current-year bill is delinquent but not in suit.
+    turned_over_years are the bill years whose memo date is March of the second
+    year after the bill year (2023 bills carry 03/2025), which is when state
+    law has the Trustee hand unpaid years to the delinquent tax attorney. That
+    is a reading of the file, not of a court docket: cards say the year is
+    past the statutory turnover date and that the docket has not been read.
     """
     owed = sorted((b for b in (bills or []) if b["owed"] > 0), key=lambda b: b["year"])
     turned = [b["year"] for b in owed if b["memo"] == f"03{b['year'] + 2}"]
@@ -478,20 +490,24 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
     known_debt = [debt("delinquent_tax", roll["balance"], ev.get("roll_date"), roll_src,
                        f"Bill years {span}; excludes interest, fees and costs added since the file date. Not a payoff.")] \
         if roll.get("on_roll") else []
-    unknowns = ["Clerk and Master docket number and payoff for the turned-over years",
+    next_list = (list_year or today.year) + 1
+    unknowns = [f"Tax suit docket and any scheduled sale not verified; next Hamilton sale list expected May {next_list}",
+                "Payoff with the Clerk and Master for any year already in suit",
                 "Payments made since the Trustee file date",
-                "Mortgage and other liens not searched (Hamilton Register of Deeds is a paid subscription)",
-                "The 2027 tax sale date: the list is published each May for a June sale"]
+                "Mortgage and other liens not searched (Hamilton Register of Deeds is a paid subscription)"]
+    past = " and ".join(str(y) for y in turned)
+    on_file = (f"Delinquent on the Trustee file dated {ev.get('roll_date') or 'unknown'} for bill years {span}, "
+               f"{money(roll['balance'])}") if roll.get("on_roll") else ""
     verify = [LISTING_CHECK,
-              "Confirm the docket, payoff and any sale order with the Hamilton County Clerk and Master tax office",
+              "Read the tax suit docket for this parcel at the Hamilton County Clerk and Master tax office",
               "Recheck the Trustee file when it refreshes; a paid parcel drops off"]
     card = dict(
         lane="cre", reviewed_by=REVIEWER, county="hamilton", today=today,
         owner_names=owner_names_as_sourced([raw.get("owner_name_1"), raw.get("owner_name_2")]) or
         owner_names_as_sourced(roll_owner),
-        event={"what": (f"Delinquent real property tax for bill years {span}, {money(roll['balance'])} on the Trustee file"
-                        + (f"; {', '.join(str(y) for y in turned)} turned over to the Clerk and Master for the delinquent tax suit"
-                           if turned else "; not yet turned over for suit")) if roll.get("on_roll")
+        event={"what": (on_file + (f"; year{'s' if len(turned) > 1 else ''} {past} {'are' if len(turned) > 1 else 'is'} past the "
+                                   "statutory turnover date; the tax suit docket for this parcel has not been read"
+                                   if turned else "; no year is past the statutory turnover date")) if roll.get("on_roll")
                else "Delinquent real property tax no longer on the Trustee file",
                "status": "active" if roll.get("on_roll") else "resolved", "checked_on": today, "source": roll_src},
         asset={"description": f"Commercial parcel at {a.get('property_address') or row.get('property_address')}"
@@ -504,7 +520,7 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
                  "basis": (f"Assessor export lists {a.get('owner')} as owner of parcel {parcel}; the Trustee bills the same name"
                            if a else "Taxpayer name on the Trustee file only; assessor parcel not matched"),
                  "verified": bool(a) and kind == "person", "source": asr_src if a else roll_src},
-        economics={"deadline": None, "deadline_kind": "annual Clerk and Master tax sale (June); 2027 list not published",
+        economics={"deadline": None, "deadline_kind": "none scheduled",
                    "value": value, "value_basis": basis, "value_is_estimate": False,
                    "value_source": asr_src if value else None, "known_debt": known_debt, "unknowns": unknowns},
         availability={"evidence": (f"Assessor export shows no transfer since {sold or 'the last recorded sale'}"
@@ -512,10 +528,10 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
                                    + ". Listing status not verified."),
                       "checked_on": today, "conflicts": [],
                       "first_call_question": (f"The county shows {span} property taxes unpaid on {str(row.get('property_address') or '').split(',')[0]}. "
-                                              "Are you planning to clear them before the Clerk and Master's next tax sale, "
-                                              "or would you consider selling the building first?"),
+                                              "Are you planning to bring them current, or would you consider selling the building?"),
                       "verify_next": verify})
-    tie = (f"real property tax on the owner's parcel; years {span}; turned over {turned}" if roll.get("on_roll") else "paid or removed")
+    tie = (f"real property tax on the owner's parcel; years {span}; past the statutory turnover date {turned}; docket not read"
+           if roll.get("on_roll") else "paid or removed")
     facts = _facts(row, parcel or None, owner, kind, tie, value, basis, None, signer)
     facts.update(roll=roll, roll_date=ev.get("roll_date"), assessor_date=ev.get("assessor_date"),
                  sale_list=listed, sale_list_year=list_year)
@@ -537,8 +553,8 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
                      ["Ask the Clerk and Master for the sale result and the redemption deadline"],
                      [f"On the {list_year} tax sale list, docket {listed['docket']}"]), facts
     if not turned:
-        return _hold(card, "research_hold", "Only the current year is delinquent; nothing has been turned over for the tax suit.",
-                     ["Recheck after the Trustee's March turnover to the Clerk and Master"]), facts
+        return _hold(card, "research_hold", "Only the current year is delinquent; no year is past the statutory turnover date.",
+                     ["Recheck the Trustee file after the next March turnover date"]), facts
     if len(years) < 2:
         return _hold(card, "research_hold", "A single delinquent year is on file; no pattern of non-payment yet.",
                      ["Recheck the Trustee file next cycle"]), facts
@@ -554,7 +570,7 @@ def hamilton_tax_card(row: Dict[str, Any], ev: Dict[str, Any], today: date) -> T
     if value < FEE_FLOOR_VALUE:
         return _under_fee_floor(card, value), facts
     reason = (f"Owner of record owes {len(years)} years of real property tax ({money(roll['balance'])}) on a commercial parcel "
-              f"appraised at {money(value)}; {len(turned)} year(s) are with the Clerk and Master for the tax suit.")
+              f"appraised at {money(value)}; {len(turned)} year(s) are past the statutory turnover date. The tax suit docket has not been read.")
     return build_review(route="first_trace_review", route_reason=reason, **card), facts
 
 
