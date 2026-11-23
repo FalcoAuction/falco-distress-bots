@@ -53,7 +53,7 @@ class StatusTests(unittest.TestCase):
         self.assertIn("redemption", card["economics"]["deadline_kind"])
         self.assertIn("before the sale", card["economics"]["deadline_kind"])
         self.assertEqual([(d["kind"], d["amount"], d["as_of"]) for d in card["economics"]["known_debt"]],
-                         [("delinquent_tax", 90794.06, "2026-11-21")])
+                         [("delinquent_tax", 42003.3, "2026-11-21")])
         self.assertIn("Not a payoff", card["economics"]["known_debt"][0]["note"])
         self.assertTrue(any(u.startswith("Mortgage payoff") for u in card["economics"]["unknowns"]))
         self.assertEqual(card["decider"]["role"], "owner of record on the county tax roll")

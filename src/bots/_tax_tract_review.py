@@ -254,13 +254,18 @@ def shelby_card(row: Dict[str, Any], status: Dict[str, Any], day: date, list_url
     else:
         basis += " The taxpayer named in the tax suit has not been read."
     known = []
-    if balance is not None:
-        note = "Total balance on the Trustee parcel page, all visible years."
-        if prior_years:
-            note += " Prior-year Shelby County bills: " + ", ".join(
-                f"{y} ${prior_years[y]:,.2f}" for y in sorted(prior_years)) + "."
+    if prior_years:
+        # Only bills from earlier years are delinquent; the current-year bill is not yet.
+        note = "Unpaid Shelby County bills from prior years: " + ", ".join(
+            f"{y} ${prior_years[y]:,.2f}" for y in sorted(prior_years)) + "."
+        if balance is not None:
+            note += f" The Trustee page total, with the current-year bill, is ${balance:,.2f}."
         note += " Excludes city taxes and court costs not yet posted. Not a payoff and not total debt."
-        known.append(debt("delinquent_tax", balance, detail.get("checked_on"), page, note))
+        known.append(debt("delinquent_tax", sum(prior_years.values()), detail.get("checked_on"), page, note))
+    elif balance is not None:
+        known.append(debt("delinquent_tax", balance, detail.get("checked_on"), page,
+                          "Total balance on the Trustee parcel page; no prior-year bill is itemized, so the "
+                          "delinquent part is not established. Not a payoff and not total debt."))
     evidence = ""
     if status["status"] in ("listed", "postponed"):
         evidence = ("The tax case is still open: the parcel was on the county sale list on " + status["checked_on"]
