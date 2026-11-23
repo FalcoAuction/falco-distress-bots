@@ -98,6 +98,7 @@ from . import land_lane_bot
 from . import church_closure_bot
 from . import stalled_build_bot
 from . import probate_property_enricher_bot
+from . import probate_pilot_review_bot
 from . import asset_profile_bot
 from . import bankruptcy_property_enricher_bot
 from . import owner_classifier_bot
@@ -279,6 +280,10 @@ NEW_BOTS = [
     # write defensible values; the order was inverted vs the intended
     # chain HMDA -> Ledger -> amortizer -> estimator.
     ("probate_property_enricher", probate_property_enricher_bot.run),
+    # Probate lane card: rechecks the county roll for each matched estate
+    # parcel and writes raw_payload.pilot_review (first trace, professional,
+    # research hold or removed). Runs after the matcher above.
+    ("probate_pilot_review", probate_pilot_review_bot.run),
     ("asset_profile", asset_profile_bot.run),
     ("bankruptcy_property_enricher", bankruptcy_property_enricher_bot.run),
     ("owner_classifier", owner_classifier_bot.run),
