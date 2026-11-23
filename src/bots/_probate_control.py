@@ -502,7 +502,14 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
         + ". No petition or order to sell was found in the published notices. Listing status not verified.")
 
     # 4. Known listing, contract or sale.
+    if order:
+        decider["basis"] += f" Court order entered {order.get('date')}: {order.get('summary')}"
+        if order.get("source"):
+            decider["source"] = source(f"Court docket {f['docket']}", order["source"], order.get("date"))
+        unknowns[0] = "Scope of the court order and any further approval needed before a closing"
     if listing:
+        availability["verify_next"] = [v for v in verify_next if v != LISTING_UNVERIFIED]
+        verify_next[:] = availability["verify_next"]
         status = str(listing.get("status") or "").lower()
         label = (f"{listing.get('brokerage') or 'a broker'}"
                  f"{' MLS ' + str(listing['mls']) if listing.get('mls') else ''}"
@@ -513,7 +520,8 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
             return card("removed", f"The property was sold through {label}.")
         availability["evidence"] = (f"Listed through {label}, status {listing.get('status')} when recorded "
                                     f"{listing.get('recorded_on') or evidence.get('recorded_on')}. "
-                                    "The assignment is not open.")
+                                    "The assignment is not open."
+                                    + (f" Source: {listing['source']}" if listing.get("source") else ""))
         return hold(f"Already listed through {label}.",
                     "Recheck the docket for court approval of a closing and whether the listing is still active",
                     f"Broker listing: {label}")
