@@ -45,6 +45,7 @@ from ._preforeclosure_review import (COUNTY_KEY, EVIDENCE_KEY, LINK_KEY, REVIEWE
                                      appointment_card, link_notice, notice_identity, sale_card, sale_state,
                                      same_card, track_of)
 from ._preforeclosure_review import shelby_parcel
+from ._register_index_review import review_register_index
 from ._shelby_trustee_value import HOST, lookup
 from ._trustee_list_match import LIST_KEY, all_staged_books, check_notices, effective_date, page_book
 
@@ -208,10 +209,12 @@ class PreforeclosureReviewBot(BotBase):
 
     def review(self, client, *, dry_run: bool = False, only_ids: Optional[List[str]] = None,
                owner_checks: Optional[int] = None, now: Optional[datetime] = None,
-               seeds: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
+               seeds: Optional[Dict[str, Dict[str, Any]]] = None, register_index: bool = False) -> Dict[str, Any]:
         """One pass. dry_run plans without writing (county lookups still run
         unless owner_checks=0). seeds attaches reviewed county evidence to
-        named sale records that have none (the one-time baseline backfill)."""
+        named sale records that have none (the one-time baseline backfill).
+        register_index adds the county Register index rows (see
+        _register_index_review); the Shelby pass is the same either way."""
         now = now or datetime.now(timezone.utc)
         today = now.astimezone(gettz("America/Chicago")).date()
         only = set(only_ids) if only_ids is not None else None
@@ -291,6 +294,9 @@ class PreforeclosureReviewBot(BotBase):
                              "keys": sorted(patch), "route": (patch.get("pilot_review") or raw.get("pilot_review") or {}).get("route"),
                              "link": link["status"]})
 
+        if register_index:
+            review_register_index(self, client, today, only, sales, linked_to, patches, plan, counts)
+
         last_read: Dict[str, Optional[datetime]] = {}
         for row in sales.values():
             tracking = row.get("notice_tracking") if isinstance(row.get("notice_tracking"), dict) else {}
@@ -365,7 +371,7 @@ class PreforeclosureReviewBot(BotBase):
             return {"name": self.name, "status": "no_supabase", "staged": 0, "duplicates": 0, "fetched": 0}
         error, result = None, {}
         try:
-            result = self.review(client)
+            result = self.review(client, register_index=True)
         except BotTimeout:
             raise
         except Exception as exc:  # noqa: BLE001

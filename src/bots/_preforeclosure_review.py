@@ -742,7 +742,8 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
                  f"{on_firm_list.get('prior_date') or on_firm_list.get('notice_date')}; "
                  f"{on_firm_list.get('firm')}'s own list was read {on_firm_list.get('checked_on')}.").replace("  ", " ")
     if appointment and lead_time(appointment):
-        what += (f" The appointment of substitute trustee (Shelby instrument {appointment.get('instrument')}) was recorded "
+        label = appointment.get("instrument_label") or f"Shelby instrument {appointment.get('instrument')}"
+        what += (f" The appointment of substitute trustee ({label}) was recorded "
                  f"{appointment['appointment_recorded']}, {lead_time(appointment)}.")
 
     evidence = county_evidence(row)
