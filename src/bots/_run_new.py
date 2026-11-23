@@ -91,6 +91,7 @@ from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import memphis_county_value_bot
 from . import shelby_loan_value_bot
+from . import preforeclosure_review_bot
 from . import rutherford_assessor_bot
 from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
@@ -298,6 +299,9 @@ NEW_BOTS = [
     ("continuance_reaper", continuance_reaper_bot.run),
     # Review stale notices after scrapers record their latest sightings.
     ("trustee_status_reaper", trustee_status_reaper_bot.run),
+    # Pre-foreclosure lane cards: after the trustee sources, calendars and
+    # value bots have written today's sightings, dates and values.
+    ("preforeclosure_review", preforeclosure_review_bot.run),
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),

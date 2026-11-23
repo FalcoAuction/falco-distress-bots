@@ -189,9 +189,42 @@ class ScheduledSelectionTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in detail.call_args_list],
                                  [f"https://example/{i}" for i in expected])
                 self.assertEqual(fetch.call_args.kwargs["data"]["startdate"], "11/01/2026")
-                backfill.assert_called_with(1)
+                backfill.assert_called_with(3)     # 14 requests less the new filings and the retry
                 known.update(lead.pipeline_lead_key for lead in leads)
                 detail.reset_mock()
+
+
+class RequestBudgetTests(unittest.TestCase):
+    """New filings spend first, deferred filings always keep two requests,
+    and the first refused request ends the run's Register work."""
+
+    def scrape(self, new_filings, detail, retry_used=2):
+        bot = ShelbySubstituteTrusteeBot()
+        rows = [dict(parse_results(RESULTS)[0], instrument=str(i), recorded="2026-11-20",
+                     detail_url=f"https://example/{i}") for i in range(new_filings)]
+        with patch("src.bots.shelby_substitute_trustee_bot.date", wraps=date) as clock,                 patch("src.bots.shelby_substitute_trustee_bot.parse_results", return_value=rows),                 patch.object(bot, "_known", return_value=set()),                 patch.object(bot, "fetch", return_value=Mock(status_code=200)),                 patch.object(bot, "_detail", side_effect=detail) as read,                 patch.object(bot, "retry_deferred_appointment", return_value=retry_used) as retry,                 patch.object(bot, "backfill") as backfill:
+            clock.today.return_value = date(2026, 11, 22)
+            leads = bot.scrape()
+        return leads, read, retry, backfill
+
+    def test_quiet_day_gives_the_spare_requests_to_deferred_filings(self):
+        _, read, retry, backfill = self.scrape(1, lambda url: {}, retry_used=8)
+        self.assertEqual(read.call_count, 1)
+        retry.assert_called_once_with(8)            # four deferred filings, two requests each
+        backfill.assert_called_once_with(3)
+
+    def test_busy_day_still_reserves_one_deferred_filing(self):
+        linked = [parse_detail(APPT), parse_detail(DOT)] * 6
+        leads, read, retry, backfill = self.scrape(9, linked)
+        self.assertEqual((len(leads), read.call_count), (6, 12))
+        retry.assert_called_once_with(2)
+        backfill.assert_not_called()
+
+    def test_first_refused_request_stops_the_run(self):
+        leads, read, retry, backfill = self.scrape(6, [None])
+        self.assertEqual((leads, read.call_count), ([], 1))
+        retry.assert_not_called()
+        backfill.assert_not_called()
 
 
 class DeferredDetailTests(unittest.TestCase):
@@ -250,6 +283,33 @@ class DeferredDetailTests(unittest.TestCase):
         patch = self.retry([parse_detail(APPT_OLD_BOOK)], 1)
         self.assertEqual(patch["raw_payload"]["recovery"]["detail_outcome"], "no_linked_loan")
         self.assertNotIn("parcel_id", patch["raw_payload"])
+
+    def test_attempts_are_counted_and_the_original_loan_is_kept(self):
+        patch = self.retry([parse_detail(APPT), parse_detail(DOT)], 2)
+        raw = patch["raw_payload"]
+        self.assertEqual((raw["recovery"]["detail_attempts"], raw["recovery"]["last_detail_result"]),
+                         (1, "deed of trust page read"))
+        self.assertEqual(raw["loan"]["original_amount"], parse_detail(DOT)["mortgage_amount"])
+        self.assertTrue(raw["loan"]["loan_date"])
+
+    def test_refused_page_is_recorded_and_ends_the_queue(self):
+        self.raw["recovery"]["detail_attempts"] = 1
+        second = {"id": "id2", "raw_payload": dict(self.raw, instrument="26000009"), "property_address": None}
+        self.rows.return_value = [self.row, second]
+        self.detail.side_effect = lambda *a: setattr(self.bot, "_register_down", True)
+        self.assertEqual(self.bot.retry_deferred_appointment(8), 1)
+        self.rows.assert_called_once_with(self.client, 4)
+        recovery = self.query.update.call_args.args[0]["raw_payload"]["recovery"]
+        self.assertEqual((recovery["detail_attempts"], recovery["last_detail_result"]), (2, "appointment page not served"))
+        self.assertEqual(self.query.update.call_count, 1)        # the second filing was not requested
+
+    def test_several_deferred_filings_within_the_budget(self):
+        second = {"id": "id2", "raw_payload": dict(self.raw, instrument="26000001"), "property_address": None}
+        third = {"id": "id3", "raw_payload": dict(self.raw), "property_address": None}
+        self.rows.return_value = [self.row, second, third]
+        self.detail.side_effect = [parse_detail(APPT), parse_detail(DOT)] * 3
+        self.assertEqual(self.bot.retry_deferred_appointment(4), 4)
+        self.assertEqual(self.query.update.call_count, 2)
 
     def test_empty_queue_uses_no_requests_or_writes(self):
         self.rows.return_value = []
