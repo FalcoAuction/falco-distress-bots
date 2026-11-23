@@ -61,6 +61,16 @@ VALUE_BASIS = {
     "xref_avm_enricher": ("Value carried over from another record at the same address. An estimate", True),
 }
 
+COUNTY_MISS = {
+    "no_current_match": "no current realty bill was found for the street",
+    "notice_parcel_conflict": "the bill for this street is on a different parcel number than the deed of trust",
+    "ambiguous_parcels": "more than one parcel is billed at this street",
+    "conflicting_current_bills": "the parcel has more than one current bill or billed name",
+    "unit_requires_parcel": "the street has units and the parcel number is needed to pick one",
+    "detail_identity_conflict": "the bill detail page does not match the search result",
+    "invalid_address": "the street on the deed of trust is not a usable address",
+}
+
 _NAME_NOISE = {"AND", "THE", "OF", "MR", "MRS", "MS", "ETUX", "ETVIR", "ETAL", "UX", "VIR", "ET", "AL"}
 
 
@@ -531,8 +541,11 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
                         "so the parcel is not identified")
                 verify.append("Wait for the published sale notice, which names the street, or read the recorded appointment image in person")
         elif not owner:
-            hold = "Parcel and street are known, but the current county bill has not confirmed who holds the property"
-            verify.append("Scheduled county bill check for this street and parcel")
+            found = COUNTY_MISS.get(county.get("status"))
+            hold = ("Parcel and street are known, but the current county bill has not confirmed who holds the property"
+                    + (f": {found}" if found else ""))
+            verify.append("Open the county realty bill for this street by hand and compare the parcel number"
+                          if found else "Scheduled county bill check for this street and parcel")
         elif any(is_entity(n) for n in [owner] + borrowers):
             hold = "The owner is a company. Who signs for it is not established"
             verify.append("Look up the entity with the Tennessee Secretary of State for its registered agent and members")
@@ -550,7 +563,7 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
                      + "Listing status has not been checked.").strip(),
         "checked_on": county.get("checked_on") if owner else today.isoformat(), "conflicts": conflicts,
         "first_call_question": (f"A substitute trustee was appointed on your loan"
-                                + (f" with {lender.title()}" if lender else "") + f" on {recorded}. "
+                                + (f" with {lender}" if lender else "") + f" on {recorded}. "
                                 "Have you been able to work anything out with the lender since then?"),
         "verify_next": verify + ["Check for an active listing or contract before buying contact data",
                                  "Check the Register for a release, a new deed or a trustee's deed since the appointment"],
