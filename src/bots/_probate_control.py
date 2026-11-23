@@ -7,15 +7,21 @@ heirs or devisees at death unless the will directs otherwise or the court
 orders a sale. This module turns one estate (its published notice, the matched
 parcel, and today's county roll record) into a pilot_review card:
 
-  first_trace_review         the parcel is tied to the decedent by the county
-                             roll, the decedent is still the sole owner of
-                             record, a fiduciary is named without an identity
-                             conflict, the value is sourced, and no listing,
-                             transfer or contract conflict is known. Authority
-                             over the parcel is still listed as unverified.
+  first_trace_review         only when a record evidences authority over the
+                             exact parcel: a will power of sale, a court order
+                             to sell it, the fiduciary shown as sole heir or
+                             devisee, or the named fiduciary plainly on today's
+                             county roll as the surviving co-owner (the decider
+                             is then that owner of record, not the fiduciary).
+                             Letters alone are never enough.
   professional_relationship  the fiduciary is an institution or is also the
                              estate's counsel: the path is the professional.
-  research_hold              a named gap: co-owner on the roll, name-only tie,
+  research_hold              "Estate candidate: ..." when everything but the
+                             authority record is established (decedent still
+                             sole owner, named fiduciary, sourced value, no
+                             conflict), with the one document that would clear
+                             it; otherwise a named gap: co-owner on the roll,
+                             name-only tie,
                              pending petition, broker listing, identity
                              conflict, unclear signer, roll not available.
   removed                    the parcel left the decedent's name, the estate
@@ -38,6 +44,13 @@ from . import _owner_lookup as owner_lookup
 from ._pilot_review import build_review, source
 
 REVIEWER = "probate_pilot_review"
+RULES = "authority-record-2"                # bump to re-review every card under a changed rule
+CANDIDATE_PREFIX = "Estate candidate: "
+CO_OWNERSHIP_UNKNOWN = ("Form of co-ownership (survivorship vs tenancy in common) not verified; if tenancy in "
+                        "common the estate holds the decedent's share")
+AUTHORITY_KINDS = {"will_power_of_sale": "the will gives the personal representative power of sale",
+                   "court_order": "a court order authorizes the sale of this parcel",
+                   "sole_heir_or_devisee": "the named fiduciary is the sole heir or devisee"}
 EVIDENCE_KEY = "probate_control_evidence"   # recorded court/listing evidence, read on every run
 CHECK_KEY = "probate_asset_check"           # the latest county roll check and counsel grouping
 
@@ -507,6 +520,18 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
         if order.get("source"):
             decider["source"] = source(f"Court docket {f['docket']}", order["source"], order.get("date"))
         unknowns[0] = "Scope of the court order and any further approval needed before a closing"
+    # Record evidence of authority over this exact parcel, recorded with its
+    # source: the will's power of sale, a sale order, or a sole heir/devisee.
+    authority = evidence.get("authority") if isinstance(evidence.get("authority"), dict) else None
+    if authority and authority.get("kind") not in AUTHORITY_KINDS:
+        authority = None
+    if authority:
+        decider["basis"] += (f" Record evidence: {AUTHORITY_KINDS[authority['kind']]}"
+                             f"{' (' + str(authority['summary']) + ')' if authority.get('summary') else ''}.")
+        if authority.get("source"):
+            decider["source"] = source("Court file: " + AUTHORITY_KINDS[authority["kind"]], authority["source"],
+                                       authority.get("date"))
+        unknowns[0] = "Any further court approval needed before a closing"
     if listing:
         availability["verify_next"] = [v for v in verify_next if v != LISTING_UNVERIFIED]
         verify_next[:] = availability["verify_next"]
@@ -530,6 +555,34 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
     outside = co_owner_signal(f["decedent"], roll_owner)
     if outside:
         named = [r["name"] for r in reps if name_tie(r["name"], roll_owner) != "none"]
+        survivor_ready = (named and roll and roll.get("status") == "ok" and tie == "middle_confirmed"
+                          and not _NON_PROBATE_RE.search(_ESTATE_RE.sub(" ", roll_owner or ""))
+                          and value is not None and value_basis and roll_src)
+        if survivor_ready:
+            # The named fiduciary is on today's roll as an owner beside the
+            # decedent: an owner of record now, whatever the estate holds.
+            survivor = named[0]
+            decider.update({
+                "name": survivor, "role": "surviving co-owner of record",
+                "basis": (f"Today's county roll lists \"{roll_owner}\": {survivor} is an owner of record beside the "
+                          f"decedent, and is also the named fiduciary. The decision rests on that ownership, not "
+                          "on the letters."),
+                "source": roll_src})
+            economics["unknowns"] = [CO_OWNERSHIP_UNKNOWN] + unknowns[1:]
+            availability["evidence"] = (
+                f"County record checked {roll.get('checked_on') or day}: \"{roll_owner}\" are the owners of "
+                "record and no sale is recorded after the death. No petition or order to sell was found in the "
+                "published notices. Listing status not verified.")
+            availability["first_call_question"] = (
+                f"You are on the title to {address or 'the property'} with {f['decedent']}: did it pass to you "
+                "by survivorship, or does the estate hold a share, and is it listed or promised to anyone?")
+            availability["verify_next"] = [
+                "Register of Deeds: read the vesting deed for tenancy by the entirety or survivorship wording"
+            ] + [v for v in verify_next if not v.startswith("Register of Deeds")]
+            return card("first_trace_review",
+                        f"{survivor} is on today's county roll as co-owner of this parcel with the decedent and is "
+                        "the named fiduciary: a surviving owner of record. Form of co-ownership is the first "
+                        "question.")
         decedent_last = _norm(f["decedent"]).split()[-1:] if f["decedent"] else []
         shared = [r["name"] for r in reps if _norm(r["name"]).split()[-1:] != decedent_last
                   and _norm(r["name"]).split()[-1] in _norm(roll_owner).split()]
@@ -563,10 +616,23 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
                     f"The fiduciary is a professional ({pro['role']}): reach {pro['name']} as a relationship, "
                     "not as an owner trace.", owner_names=[pro["name"]])
 
-    return card("first_trace_review",
-                "Parcel tied to the decedent by the county roll, decedent still the sole owner of record, named "
-                "fiduciary without an identity conflict, sourced value, no listing or transfer conflict known. "
-                "Authority over this parcel is the first question, not a given.")
+    if order or authority:
+        basis = "a court order on this parcel" if order else AUTHORITY_KINDS[authority["kind"]]
+        return card("first_trace_review",
+                    f"Authority over this parcel is evidenced by a record ({basis}); the decedent is still the "
+                    "owner of record, the fiduciary is named without an identity conflict, the value is sourced "
+                    "and no listing or transfer conflict is known.")
+
+    # Everything is established except authority over the parcel. Letters
+    # alone do not give it, so this is the nearest hold, not a recommendation.
+    clerk = f"{county.title()} County probate clerk"
+    return hold(f"{CANDIDATE_PREFIX}the decedent is still the sole owner of record on the {county.title()} County "
+                f"roll, {_people(reps)} is named as {_role(reps).replace(' (role as printed)', '')} without an "
+                f"identity conflict, the value is sourced (${int(value):,}, {value_basis}) and no transfer or "
+                "listing conflict is known. Authority over this parcel is not evidenced by a record: letters "
+                "alone do not give it.",
+                f"Read the will/letters at the {clerk} (docket {f['docket'] or 'not printed'}) for a power of "
+                "sale, or confirm all heirs/devisees")
 
 
 def duplicate_card(row: Dict[str, Any], primary_id: str, today: date) -> Dict[str, Any]:

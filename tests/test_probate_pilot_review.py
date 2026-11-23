@@ -93,10 +93,17 @@ PETITION = ["IN THE PROBATE COURT OF SHELBY COUNTY, TENNESSEE", "PR-99589-II", "
 
 
 class CleanCandidateTests(unittest.TestCase):
-    def test_sole_owner_estate_is_first_trace_with_authority_as_the_open_question(self):
+    def test_letters_alone_make_an_estate_candidate_hold_not_a_recommendation(self):
         card = only(plan([estate()]))
         self.assertEqual(card["lane"], "probate")
-        self.assertEqual(card["route"], "first_trace_review")
+        self.assertEqual(card["route"], "research_hold")
+        self.assertTrue(card["route_reason"].startswith("Estate candidate: "))
+        self.assertIn("still the sole owner of record", card["route_reason"])
+        self.assertIn("$612,300", card["route_reason"])
+        self.assertEqual(card["availability"]["verify_next"][0],
+                         "Read the will/letters at the Davidson County probate clerk (docket 26P9001) for a power "
+                         "of sale, or confirm all heirs/devisees")
+        self.assertEqual(card["availability"]["conflicts"], [])
         self.assertEqual(card["decider"]["name"], "Fay Fictional")
         self.assertFalse(card["decider"]["verified"])
         self.assertIn("Letters alone do not give authority", card["decider"]["basis"])
@@ -110,6 +117,38 @@ class CleanCandidateTests(unittest.TestCase):
         # Counsel is recorded as its own route, never as the decider.
         self.assertTrue(any("Estate counsel as printed: Gus Allen Counsel Jr." in v
                             for v in card["availability"]["verify_next"]))
+
+    def authority(self, kind):
+        row = estate()
+        row["raw_payload"][control.EVIDENCE_KEY] = {
+            "recorded_on": "2026-11-22",
+            "authority": {"kind": kind, "summary": "Article IV of the will", "date": "2026-11-21",
+                          "source": "https://example.test/court-file"}}
+        return only(plan([row]))
+
+    def test_recorded_will_power_of_sale_clears_first_trace(self):
+        card = self.authority("will_power_of_sale")
+        self.assertEqual(card["route"], "first_trace_review")
+        self.assertIn("evidenced by a record", card["route_reason"])
+        self.assertIn("the will gives the personal representative power of sale", card["decider"]["basis"])
+        self.assertEqual(card["decider"]["source"]["url"], "https://example.test/court-file")
+        self.assertNotIn(control.AUTHORITY_UNKNOWN, card["economics"]["unknowns"])
+
+    def test_sole_heir_record_clears_and_an_unknown_kind_does_not(self):
+        self.assertEqual(self.authority("sole_heir_or_devisee")["route"], "first_trace_review")
+        loose = self.authority("letters_issued")
+        self.assertEqual(loose["route"], "research_hold")
+        self.assertTrue(loose["route_reason"].startswith("Estate candidate: "))
+
+    def test_court_order_on_the_parcel_clears_first_trace(self):
+        row = estate()
+        row["raw_payload"][control.EVIDENCE_KEY] = {
+            "recorded_on": "2026-11-22",
+            "order": {"date": "2026-11-19", "summary": "Order authorizes the sale of 100 Sample Park W.",
+                      "source": "https://example.test/docket"}}
+        card = only(plan([row]))
+        self.assertEqual(card["route"], "first_trace_review")
+        self.assertIn("a court order on this parcel", card["route_reason"])
 
     def test_no_em_dashes_in_card_text(self):
         import json
@@ -128,11 +167,29 @@ class HoldTests(unittest.TestCase):
             self.assertTrue(card["availability"]["conflicts"])
             self.assertIn("Register of Deeds", card["availability"]["verify_next"][0])
 
-    def test_co_owner_who_is_the_fiduciary_is_named(self):
+    def test_fiduciary_plainly_on_the_roll_is_a_surviving_co_owner_of_record(self):
         owner = "PERSON, EVE F & FICTIONAL, FAY"
         card = only(plan([estate(owner=owner)], roll(owner=owner)))
+        self.assertEqual(card["route"], "first_trace_review")
+        self.assertEqual(card["decider"]["name"], "Fay Fictional")
+        self.assertEqual(card["decider"]["role"], "surviving co-owner of record")
+        self.assertIn("not on the letters", card["decider"]["basis"])
+        self.assertEqual(card["decider"]["source"]["url"], "https://portal.padctn.org/OFS/WP/Print/501")
+        self.assertEqual(card["economics"]["unknowns"][0], control.CO_OWNERSHIP_UNKNOWN)
+        self.assertEqual(card["owner_names"], [owner])
+        self.assertEqual(card["availability"]["conflicts"], [])
+
+    def test_truncated_or_staged_only_co_owner_name_stays_held(self):
+        # "FICTIONAL, FA" does not plainly name Fay Fictional.
+        cut = "PERSON, EVE F & FICTIONAL, FA"
+        card = only(plan([estate(owner=cut)], roll(owner=cut)))
         self.assertEqual(card["route"], "research_hold")
-        self.assertIn("Fay Fictional, is also the named fiduciary", card["route_reason"])
+        self.assertIn("surname of the named fiduciary", card["route_reason"])
+        # Named on the staged capture only: the roll could not be read today.
+        owner = "PERSON, EVE F & FICTIONAL, FAY"
+        staged = only(plan([estate(owner=owner)], roll(status="unavailable")))
+        self.assertEqual(staged["route"], "research_hold")
+        self.assertIn("staged capture", staged["route_reason"])
 
     def test_identity_conflict_hold_is_preserved_without_a_lookup(self):
         lines = ["ESTATE OF Kay-Joong Sample, (Deceased)", "Case No. MC-CH-CV-PB-26-999",
@@ -224,7 +281,7 @@ class CourtEvidenceTests(unittest.TestCase):
         del row["raw_payload"][control.EVIDENCE_KEY]["listing"]
         bot = ProbatePilotReviewBot()
         fresh = only(bot.plan([copy.deepcopy(row)], TODAY))
-        self.assertEqual(fresh["route"], "first_trace_review")
+        self.assertEqual(fresh["route"], "first_trace_review")   # court order on this parcel, no listing
         stale = only(bot.plan([copy.deepcopy(row)], TODAY + timedelta(days=45)))
         self.assertEqual(stale["route"], "research_hold")
         self.assertIn("more than 30 days old", stale["route_reason"])
@@ -263,7 +320,7 @@ class TransferAndRepeatTests(unittest.TestCase):
     def test_repeat_run_writes_nothing_then_a_later_transfer_flips_the_card(self):
         rows = [estate()]
         first = plan(rows)
-        self.assertEqual(only(first)["route"], "first_trace_review")
+        self.assertTrue(only(first)["route_reason"].startswith("Estate candidate: "))
         write(rows, first)
         self.assertEqual(plan(rows), [])
         self.assertEqual(plan(rows, today=TODAY + timedelta(days=3)), [])
@@ -278,6 +335,12 @@ class TransferAndRepeatTests(unittest.TestCase):
         card = only(plan(rows, today=TODAY + timedelta(days=1)))
         self.assertEqual(card["route"], "research_hold")
         self.assertIn("Already listed", card["route_reason"])
+
+    def test_a_rule_change_re_reviews_cards_written_under_the_old_rule(self):
+        rows = [estate()]
+        write(rows, plan(rows))
+        rows[0]["raw_payload"][control.CHECK_KEY]["rules"] = "older-rule"
+        self.assertEqual(len(plan(rows)), 1)
 
     def test_failed_county_fetch_leaves_the_existing_card(self):
         rows = [estate()]
@@ -312,13 +375,13 @@ class DuplicateNoticeTests(unittest.TestCase):
                                    "owner_match": copy.deepcopy(primary["raw_payload"]["owner_match"])}}
         rows = [earlier, excerpt, primary]
         items = plan(rows)
-        self.assertEqual(only(items, "row-1")["route"], "first_trace_review")
+        self.assertTrue(only(items, "row-1")["route_reason"].startswith("Estate candidate: "))
         for dup in ("row-0", "row-x"):
             card = only(items, dup)
             self.assertEqual(card["route"], "removed")
             self.assertIn("review is on staging row row-1", card["route_reason"])
             self.assertEqual(card["property_key"], only(items, "row-1")["property_key"])
-        self.assertEqual(len(dedupe_worklist(i["after"] for i in items)), 1)
+        self.assertEqual(len(dedupe_worklist(i["after"] for i in items)), 0)   # a hold is not on the worklist
         write(rows, items)
         self.assertEqual(plan(rows), [])
 
