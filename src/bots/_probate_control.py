@@ -167,10 +167,10 @@ def estate_parcels(row: Dict[str, Any]) -> List[Dict[str, Any]]:
     seen = set()
 
     def add(parcel, address, owner, value, account_id, basis, match, extra=None):
-        key = _norm(parcel) or _norm(address)
-        if not key or key in seen:
+        keys = {k for k in (_norm(parcel), _norm(address)) if k}
+        if not keys or keys & seen:
             return
-        seen.add(key)
+        seen.update(keys)
         out.append({"parcel": parcel, "address": address, "owner": owner, "value": _money(value),
                     "account_id": account_id, "basis": basis, "match": match, **(extra or {})})
 
@@ -187,17 +187,20 @@ def estate_parcels(row: Dict[str, Any]) -> List[Dict[str, Any]]:
             add(p.get("parcel"), p.get("address"), p.get("owner"), p.get("value"),
                 (p.get("extra") or {}).get("account_id"), "county assessor appraisal",
                 match.get("confidence") or "name_only")
+    comp = raw.get("comptroller_parcel") if isinstance(raw.get("comptroller_parcel"), dict) else {}
+    if comp.get("parcelid") or comp.get("parcels"):
+        # The parcel id and owner are kept exactly as the state file prints
+        # them so the card shares a property and owner key with other lanes.
+        for p in comp.get("parcels") or [comp]:
+            sold = parse_date(p.get("last_sale_date"))
+            add(p.get("parcelid"), p.get("address"), p.get("owner"), p.get("appraisal"), None,
+                "county assessor appraisal (state Comptroller parcel file)",
+                "address" if comp.get("method") == "address" else None,
+                {"last_sale_date": sold.isoformat() if sold else None})
     padctn = raw.get("padctn_owner_match") if isinstance(raw.get("padctn_owner_match"), dict) else {}
     if padctn.get("parcel"):
         add(padctn.get("parcel"), padctn.get("property_address"), padctn.get("owner"), padctn.get("appraised"),
             padctn.get("account_id"), "county assessor appraisal", None)
-    comp = raw.get("comptroller_parcel") if isinstance(raw.get("comptroller_parcel"), dict) else {}
-    if comp.get("method") == "owner_name":
-        for p in comp.get("parcels") or []:
-            sold = parse_date(p.get("last_sale_date"))
-            add(p.get("parcelid"), p.get("address"), p.get("owner"), p.get("appraisal"), None,
-                "county assessor appraisal (state Comptroller parcel file)", None,
-                {"last_sale_date": sold.isoformat() if sold else None})
     return out
 
 
@@ -241,10 +244,10 @@ def co_owner_signal(decedent: str, owner: Optional[str]) -> Optional[str]:
 
 def petition_deadline(text: str) -> Optional[date]:
     """Response date printed in an order of publication on a petition to sell."""
-    m = re.search(r"on or before\s+([A-Z][a-z]+\.? \d{1,2},? \d{4})", text or "", re.I)
+    m = re.search(r"on or before\s+([A-Z][a-z]+\.?) (\d{1,2})(?:st|nd|rd|th)?,? (\d{4})", text or "", re.I)
     if not m:
         return None
-    return parse_date(re.sub(r"(\d),? (\d{4})", r"\1, \2", m.group(1)))
+    return parse_date(f"{m.group(1)} {m.group(2)}, {m.group(3)}")
 
 
 def shelby_docket_url(docket: Optional[str]) -> Optional[str]:
@@ -336,7 +339,7 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
     tie = name_tie(f["decedent"], roll_owner) if roll_owner else "none"
     if primary and primary.get("match") == "middle_initial" and tie == "name_only":
         tie = "middle_confirmed"
-    if primary and primary.get("recorded") and tie == "none":
+    if primary and primary.get("match") == "court_record" and tie == "none":
         tie = "court_record"
     more = [p for p in (other_parcels if other_parcels is not None else parcels[1:]) if p]
     description = " ".join(x for x in (
@@ -438,7 +441,7 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
                     check)
 
     if not reps:
-        return hold("The notice does not print a clear signer role, so no fiduciary is named.",
+        return hold("No fiduciary is named in the stored notice (excerpt only, or the signer's role is unclear).",
                     f"{docket_label}: confirm who holds letters and in what role")
     if not primary:
         return None
@@ -446,8 +449,23 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
     # 3. Today's county record.
     if roll and roll.get("status") == "ok":
         current = roll.get("owner") or ""
-        if current and name_tie(f["decedent"], current) == "none" and not (
-                _ESTATE_RE.search(current) and _norm(f["decedent"]).split()[-1] in _norm(current)):
+        # "PERSON EVE F TRUSTEE" or "... LIFE ESTATE FOR PERSON EVE F" still
+        # names her; the trust or life estate is handled as title outside probate.
+        person = owner_lookup.parse_person(f["decedent"])
+        names_decedent = name_tie(f["decedent"], current) != "none" or bool(
+            person and (_ESTATE_RE.search(current) or _NON_PROBATE_RE.search(current))
+            and {person.last, person.first} <= set(_norm(current).split()))
+        staged_owner = primary.get("owner") or ""
+        if current and not names_decedent and (
+                not staged_owner or _norm(staged_owner) == _norm(current)
+                or name_tie(f["decedent"], staged_owner) == "none"):
+            # Never the decedent's on the roll: the staged match is the problem.
+            return hold(f"The county roll owner \"{current}\" does not name the decedent \"{f['decedent']}\" "
+                        "(different middle name or a different person), so this parcel is not tied to the estate.",
+                        "Confirm which parcel, if any, the decedent owned: vesting deed or the inventory in the "
+                        "court file",
+                        "Roll owner does not match the decedent")
+        if current and not names_decedent:
             event["status"] = "resolved"
             availability["evidence"] = (f"County record checked {day}: owner of record is now \"{current}\""
                                         + (f", last sale {roll['last_sale_date']}" if roll.get("last_sale_date") else "")
@@ -463,6 +481,14 @@ def review_estate(row: Dict[str, Any], roll: Optional[Dict[str, Any]], today: da
                         f"Recorded sale {sold.isoformat()} after the date of death")
     elif roll is not None or not (primary.get("recorded") and primary.get("checked_on")):
         note = (roll or {}).get("note") or "no free current-owner check is wired for this county"
+        staged_outside = co_owner_signal(f["decedent"], roll_owner)
+        if staged_outside:
+            return hold("Title may have passed outside probate to a surviving owner or under a trust or life "
+                        f"estate, so the fiduciary may not control this parcel: {staged_outside}. This is the "
+                        f"staged capture; the roll could not be rechecked today ({note}).",
+                        "Register of Deeds: read the vesting deed for tenancy by the entirety, survivorship, trust "
+                        "or life estate wording, and confirm whether the co-owner is living",
+                        "Co-owner, trust or life estate on the county roll")
         return hold(f"Current owner of record could not be rechecked today ({note}); the staged match is an "
                     "earlier capture.",
                     f"Recheck the {county.title()} County roll for parcel {parcel_id}: current owner and any "

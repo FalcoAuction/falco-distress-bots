@@ -30,21 +30,28 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import traceback as tb
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ._base import BotBase, _supabase
+from . import _owner_lookup as owner_lookup
 from . import _probate_control as control
 from ._pilot_review import merge_review
 from ._probate_staging import guard_raw
 
 RECHECK_DAYS = 7
+PAGE = 1000
 RECORDED_EVIDENCE_DAYS = 30
 SOURCES = ("court_notices", "tn_public_notice")
 STAGES = ("appointment_reported", "sale_authority_requested", "estate_inactive_reported")
 COLUMNS = ("id,bot_source,distress_type,county,full_name,property_address,property_value,"
            "source_url,staging_status,raw_payload")
+ROLL_SOURCE = {
+    "rutherford": owner_lookup.RUTHERFORD_URL,
+    "williamson": owner_lookup.WILLIAMSON_BASE,
+}
 NO_ROLL_NOTE = {
     "montgomery": "Montgomery County GIS now requires a token and the county property search refuses "
                   "automated requests",
@@ -68,6 +75,13 @@ def estate_group_key(row: Dict[str, Any]) -> Optional[str]:
     if not f["county"] or not name:
         return None
     return f"{f['county']}|{name}"
+
+
+def _docket(row: Dict[str, Any]) -> Optional[str]:
+    """Docket for comparison only: "MC-CH-CV-PB-26-428" and
+    "MCCHCVPB260000428" are the same case."""
+    text = re.sub(r"[^A-Z0-9]", "", str(control.estate_facts(row)["docket"] or "").upper()).replace("0", "")
+    return text or None
 
 
 def _rank(row: Dict[str, Any]) -> tuple:
@@ -123,16 +137,10 @@ class ProbatePilotReviewBot(BotBase):
 
     # ── County roll ───────────────────────────────────────────────────────
 
-    def roll_for(self, county: str, parcel: Dict[str, Any], today: date) -> Optional[Dict[str, Any]]:
+    def roll_for(self, county: str, parcel: Dict[str, Any], today: date,
+                 decedent: str = "") -> Optional[Dict[str, Any]]:
         """Today's county record for one parcel. None means the fetch failed
         and the estate should be left as it is until the next run."""
-        if parcel.get("recorded"):
-            checked = control.parse_date(parcel.get("checked_on"))
-            if checked and (today - checked).days <= RECORDED_EVIDENCE_DAYS:
-                return {"status": "recorded"}
-            return {"status": "unavailable",
-                    "note": f"the recorded county check of {parcel.get('checked_on')} is more than "
-                            f"{RECORDED_EVIDENCE_DAYS} days old"}
         if county == "davidson":
             if not parcel.get("account_id"):
                 return {"status": "unavailable", "note": "the staged match has no assessor account number"}
@@ -150,13 +158,30 @@ class ProbatePilotReviewBot(BotBase):
                     "last_sale_date": card.get("last_sale_date"), "last_sale_price": card.get("last_sale_price"),
                     "deed_reference": card.get("deed_reference"), "source_url": url,
                     "checked_on": today.isoformat()}
+        if county in owner_lookup.supported_counties() and county not in NO_ROLL_NOTE and decedent:
+            # These county systems search by owner name. The parcel still
+            # coming back under the decedent's name is the check; they do not
+            # say who holds a parcel that no longer does.
+            result = owner_lookup.lookup(self.fetch, county, decedent)
+            if result.get("status") == "source_error":
+                return None
+            for cand in result.get("parcels") or []:
+                if control._norm(cand.get("parcel")) == control._norm(parcel.get("parcel")):
+                    return {"status": "ok", "owner": cand.get("owner"), "parcel": cand.get("parcel"),
+                            "address": parcel.get("address") or cand.get("address"),
+                            "value": cand.get("value") or parcel.get("value"),
+                            "value_basis": f"{county.title()} County assessor appraisal",
+                            "source_url": ROLL_SOURCE.get(county), "checked_on": today.isoformat()}
+            return {"status": "unavailable",
+                    "note": f"the {county.title()} County owner search no longer returns this parcel under the "
+                            "decedent's name, which can mean a transfer"}
         return {"status": "unavailable",
                 "note": NO_ROLL_NOTE.get(county, f"no free current-owner check is wired for {county.title()} County")}
 
     # ── Planning (no writes) ──────────────────────────────────────────────
 
     def plan(self, rows: List[Dict[str, Any]], today: date,
-             roll_for: Optional[Callable[[str, Dict[str, Any], date], Optional[Dict[str, Any]]]] = None,
+             roll_for: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
              only_ids: Optional[set] = None) -> List[Dict[str, Any]]:
         """Decide every card for these rows. Returns one entry per row that
         would change: {id, role, primary_id, before, after, raw_before, raw_after}."""
@@ -168,6 +193,15 @@ class ProbatePilotReviewBot(BotBase):
             key = estate_group_key(row)
             if key:
                 groups.setdefault(key, []).append(row)
+        # Two estates of the same name in one county are different people when
+        # their dockets differ; rows with no docket then stand alone.
+        for key in list(groups):
+            members = groups[key]
+            dockets = {_docket(m) for m in members} - {None}
+            if len(dockets) > 1:
+                del groups[key]
+                for m in members:
+                    groups.setdefault(f"{key}|{_docket(m) or 'row ' + str(m['id'])}", []).append(m)
 
         # One relationship per professional across every estate in view.
         professionals: Dict[str, List[str]] = {}
@@ -193,8 +227,9 @@ class ProbatePilotReviewBot(BotBase):
             if only_ids is not None and not ({m["id"] for m in members} & only_ids):
                 continue
             f = control.estate_facts(primary)
-            if not (f["representatives"] or f["stage"] in STAGES or f["evidence"]):
-                continue  # excerpt-only estate: no fiduciary is named, nothing to review
+            if not (f["representatives"] or f["stage"] in STAGES or f["evidence"]
+                    or control.estate_parcels(primary)):
+                continue  # no fiduciary, no court event and no parcel: nothing to review
             if needs_review(primary, today, "primary"):
                 parcels = control.estate_parcels(primary)
                 roll = None
@@ -204,12 +239,18 @@ class ProbatePilotReviewBot(BotBase):
                 if parcels and gate_open:
                     if checks >= self.max_roll_checks:
                         continue
-                    checks += 1
-                    roll = roll_for(f["county"], parcels[0], today)
-                    if roll is None:
-                        continue  # county source failed: keep whatever card is there
-                    if roll.get("status") == "recorded":
-                        roll = None
+                    recorded = control.parse_date(parcels[0].get("checked_on")) if parcels[0].get("recorded") else None
+                    if recorded and (today - recorded).days <= RECORDED_EVIDENCE_DAYS:
+                        roll = None  # a dated county check recorded with the court evidence stands for now
+                    elif parcels[0].get("recorded"):
+                        roll = {"status": "unavailable",
+                                "note": f"the recorded county check of {parcels[0].get('checked_on')} is more than "
+                                        f"{RECORDED_EVIDENCE_DAYS} days old"}
+                    else:
+                        checks += 1
+                        roll = roll_for(f["county"], parcels[0], today, f["decedent"])
+                        if roll is None:
+                            continue  # county source failed: keep whatever card is there
                 pro = control.professional_of(f)
                 new = control.review_estate(primary, roll, today,
                                             professional_estates=professionals.get(pro["key"]) if pro else None)
@@ -261,20 +302,42 @@ class ProbatePilotReviewBot(BotBase):
         return written
 
     def load_rows(self, client) -> List[Dict[str, Any]]:
-        """Estates with a full notice or recorded court evidence, plus the
-        other pending notices for the same decedents (repeat publications)."""
+        """Estates with a full notice, a matched parcel or recorded court
+        evidence, plus the other pending notices for the same decedents
+        (repeat publications)."""
         table = "homeowner_requests_staging"
         rows: Dict[str, Dict[str, Any]] = {}
-        stage_filter = ("raw_payload->probate_review->>stage.in.(" + ",".join(STAGES) + "),"
-                        f"raw_payload->{control.EVIDENCE_KEY}.not.is.null")
-        for offset in range(0, 5000, 500):
-            page = (client.table(table).select(COLUMNS).in_("distress_type", ["PROBATE", "COURT_SALE"])
-                    .in_("bot_source", list(SOURCES)).eq("staging_status", "pending").or_(stage_filter)
-                    .order("id").range(offset, offset + 499).execute().data or [])
-            for row in page:
+        # Ids first, one narrow JSON filter per query, then the rows by id: a
+        # single OR across JSON paths, or selecting raw_payload while
+        # filtering, runs past the API statement timeout on the backlog.
+        filters = ["raw_payload->probate_review->>stage.eq." + stage for stage in STAGES] + [
+            "raw_payload->owner_match->>status.eq.matched",
+            "raw_payload->comptroller_parcel.not.is.null",
+            f"raw_payload->{control.EVIDENCE_KEY}.not.is.null",
+        ]
+        ids: List[str] = []
+        # Per source: court_notices is a few hundred rows, so even a filter
+        # that matches almost nothing is quick there. On the tn_public_notice
+        # backlog a rare filter can scan everything and time out.
+        for source_name in SOURCES:
+            for condition in filters:
+                try:
+                    for offset in range(0, 10000, PAGE):
+                        page = (client.table(table).select("id").in_("distress_type", ["PROBATE", "COURT_SALE"])
+                                .eq("bot_source", source_name).eq("staging_status", "pending").or_(condition)
+                                .order("staged_at", desc=True).range(offset, offset + PAGE - 1)
+                                .execute().data or [])
+                        ids.extend(r["id"] for r in page if r["id"] not in ids)
+                        if len(page) < PAGE:
+                            break
+                except Exception as exc:
+                    # Rows it would have found keep their current card until
+                    # the next run.
+                    self.logger.warning("probate row filter skipped (%s): %s %s", type(exc).__name__,
+                                        source_name, condition)
+        for offset in range(0, len(ids), 50):
+            for row in (client.table(table).select(COLUMNS).in_("id", ids[offset:offset + 50]).execute().data or []):
                 rows[row["id"]] = row
-            if len(page) < 500:
-                break
         wanted = {estate_group_key(r) for r in rows.values() if is_tennessee(r)} - {None}
         counties = sorted({k.split("|", 1)[0] for k in wanted})
         extra: List[str] = []
