@@ -73,22 +73,34 @@ def owner_group_key(names: Any, county: Any, state: str = "TN") -> Optional[str]
     """
     if isinstance(names, str):
         names = re.split(r"\s*(?:;|&| and |/)\s*", names, flags=re.I)
+    else:
+        # A list entry can itself be a joint roll name ("PERCER BOBBIE E JR & DONNA M").
+        names = [seg for raw in (names or []) for seg in re.split(r"\s*(?:;|&| and |/)\s*", str(raw or ""), flags=re.I)]
     parts: List[str] = []
+    last_surname: Optional[str] = None
     for raw in names or []:
         text = _clean(raw)
         if not text:
             continue
         if _ENTITY.search(text):
             parts.append("E:" + _ENTITY.sub(" ", text).strip().replace("  ", " "))
+            last_surname = None
             continue
         comma = "," in str(raw)
         text = _SUFFIX.sub(" ", text)
         tokens = [t for t in text.split() if len(t) > 1 or t.isalpha()]
-        if len(tokens) < 2:
-            continue
         # County rolls and "LAST, FIRST" put the surname first; prose puts it last.
         roll_order = comma or str(raw).strip() == str(raw).strip().upper()
+        # On a roll, a joint owner is often printed without the shared surname:
+        # "HERIN JOHN B & TINA", "PERCER BOBBIE E JR & DONNA M". A lone given
+        # name, or a given name plus an initial, takes the surname before it.
+        if roll_order and last_surname and tokens and (len(tokens) == 1 or (len(tokens) == 2 and len(tokens[1]) == 1)):
+            parts.append(f"P:{last_surname} {tokens[0][0]}")
+            continue
+        if len(tokens) < 2:
+            continue
         surname, first = (tokens[0], tokens[1]) if roll_order else (tokens[-1], tokens[0])
+        last_surname = surname if roll_order else None
         parts.append(f"P:{surname} {first[0]}")
     if not parts:
         return None
@@ -224,13 +236,29 @@ def build_review(
     if route == "research_hold" and not av["verify_next"]:
         raise ValueError("a research hold must say what to check next")
 
+    names_in = owner_names if owner_names is not None else dec["name"]
     return {
         "version": VERSION, "lane": lane, "route": route, "route_reason": route_reason.strip(),
-        "owner_group_key": owner_group_key(owner_names if owner_names is not None else dec["name"], county),
+        # Names as sourced, kept so the owner key can be recomputed if the rule improves.
+        "owner_names": [names_in] if isinstance(names_in, str) else [str(n) for n in (names_in or []) if n],
+        "county": _county(county),
+        "owner_group_key": owner_group_key(names_in, county),
         "property_key": property_key(county, ast["parcel"], ast["address"]),
         "event": ev, "asset": ast, "decider": dec, "economics": eco, "availability": av,
         "reviewed_by": reviewed_by, "reviewed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
+
+
+def rekey(card: Dict[str, Any], county: Any = None) -> Dict[str, Any]:
+    """Recompute both keys from what the card stores, so cards written under
+    an older key rule still dedupe. Uses owner_names when the card has them,
+    else the decider name. Returns a copy; the card itself is not changed."""
+    c = card.get("county") or county
+    names = card.get("owner_names") or (card.get("decider") or {}).get("name")
+    asset = card.get("asset") or {}
+    return {**card, "owner_group_key": owner_group_key(names, c) if c else card.get("owner_group_key"),
+            "property_key": (property_key(c, asset.get("parcel"), asset.get("address")) if c else None)
+            or card.get("property_key")}
 
 
 def first_trace_gaps(ev, ast, dec, eco, av) -> List[str]:

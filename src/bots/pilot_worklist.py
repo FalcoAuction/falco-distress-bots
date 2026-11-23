@@ -26,7 +26,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ._pilot_review import dedupe_worklist, owner_group_key, property_key, runway_days
+from ._pilot_review import dedupe_worklist, owner_group_key, property_key, rekey, runway_days
 
 CRM = "https://falco.llc/crm/leads/"
 LANE_LABEL = {"pre_foreclosure": "Pre-foreclosure", "tax": "Delinquent tax", "cre": "Commercial",
@@ -85,7 +85,7 @@ def build_worklist(rows: List[Dict[str, Any]], baseline: Optional[List[Dict[str,
         card = r.get("pilot_review")
         if not isinstance(card, dict) or card.get("version") != "pilot-review-1":
             continue
-        card = {**card, "_id": r["id"], "_county": r.get("county")}
+        card = {**rekey(card, r.get("county")), "_id": r["id"], "_county": r.get("county")}
         lane = route_counts.setdefault(card.get("lane", "?"), {})
         lane[card.get("route", "?")] = lane.get(card.get("route", "?"), 0) + 1
         cards.append(card)

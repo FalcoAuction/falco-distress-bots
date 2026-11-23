@@ -88,6 +88,13 @@ class WorklistTests(unittest.TestCase):
         self.assertTrue(x["value_basis"].startswith("Estimate: "))
         self.assertEqual(x["missing_evidence"], "payoff; Recheck the trustee calendar")
 
+    def test_stale_stored_keys_are_recomputed(self):
+        a, b = row("a", owner="PERCER BOBBIE E JR & DONNA M"), row("b", owner="PERCER BOBBIE E JR & DONNA M", lane="tax", by="t")
+        a["pilot_review"]["owner_group_key"] = "tn|shelby|P:DONNA M+P:PERCER B"   # written under the old rule
+        a["pilot_review"]["property_key"] = "stale"
+        r = build_worklist([a, b], None, TODAY)
+        self.assertEqual((r["owner_groups"], r["properties"]), (1, 1))
+
     def test_malformed_cards_are_ignored(self):
         r = build_worklist([{"id": "x", "county": "Knox", "pilot_review": {"version": "old"}},
                             {"id": "y", "county": "Knox", "pilot_review": None}], None, TODAY)
