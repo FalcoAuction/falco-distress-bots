@@ -132,7 +132,8 @@ class SaleStateTests(unittest.TestCase):
         self.assertEqual((card["route"], card["event"]["status"]), ("first_trace_review", "active"))
         self.assertEqual(card["economics"]["deadline"], "2026-12-18")
         self.assertEqual(card["property_key"], "tn|sumner|p:083137JD01500000")
-        self.assertEqual(card["owner_group_key"], "tn|sumner|P:GERDES K")   # same key the Nov 22 baseline gives
+        self.assertEqual(card["owner_group_key"], "tn|sumner|P:GERDES C+P:GERDES K")   # both joint roll owners
+        self.assertEqual(card["owner_names"], ["GERDES KEITH & GERDES CHRISTIENE ETUX"])   # as sourced
         self.assertIn("does not name the borrower", card["decider"]["role"])
 
     def test_postponement_updates_the_same_record(self):
