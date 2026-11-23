@@ -75,6 +75,7 @@ from . import warn_notices_bot
 from . import davidson_tax_sale_bot
 from . import montgomery_tax_sale_bot
 from . import shelby_tax_sale_bot
+from . import cheatham_tax_sale_bot
 from . import hardeman_tax_notice_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
@@ -111,6 +112,7 @@ from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import davidson_tax_stack_bot
 from . import property_lane_bot
+from . import cre_review_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
 from . import ffl_overlay_bot
@@ -212,6 +214,9 @@ NEW_BOTS = [
     ("davidson_tax_sale", davidson_tax_sale_bot.run),
     ("montgomery_tax_sale", montgomery_tax_sale_bot.run),
     ("shelby_tax_sale", shelby_tax_sale_bot.run),
+    # After court_notices, which stages the Cheatham tracts this bot dates
+    # from the county's posted sale notice. Stages nothing itself.
+    ("cheatham_tax_sale", cheatham_tax_sale_bot.run),
     ("hardeman_tax_notice", hardeman_tax_notice_bot.run),
     # Middle TN secondary cities — only Mt Juliet has a public scrapable
     # code-enforcement feed (SeeClickFix). Other 5 cities documented as
@@ -297,6 +302,9 @@ NEW_BOTS = [
     # so grades see the owner's land use and verified phones.
     ("davidson_tax_stack", davidson_tax_stack_bot.run),
     ("property_lane", property_lane_bot.run),
+    # Commercial review cards: parcel, owner entity, signer path, distress tie
+    # on the building owner's parcel. Reads the lane tags written just above.
+    ("cre_review", cre_review_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),

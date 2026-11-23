@@ -1,5 +1,4 @@
 """Project receiver research onto the existing exact Trustee staging identity."""
-import json
 from uuid import NAMESPACE_URL, uuid5
 
 from ._base import BotBase
@@ -78,11 +77,12 @@ def publish(client, current, day):
                               receiver_appointment_verified=False, sale_authority_verified=False)
             if prior == review or prior.get("checked_on", "") > day.isoformat():
                 continue
-            # Compare the complete compact Trustee payload before replacing its one
-            # review key. A concurrent update must be retried with a fresh snapshot.
-            result = (table.update({"raw_payload": {**raw, FIELD: review}}).eq("bot_source", SOURCE)
-                      .eq("id", rid).filter("raw_payload", "eq", json.dumps(raw, separators=(",", ":"))).execute())
-            if not result.data:
-                raise RuntimeError("Receiver review concurrent update: " + rid)
+            # Merge the one review key inside PostgreSQL. The row also carries the
+            # tax status and review card, so the whole payload no longer fits an
+            # equality filter in the request URL, and a key merge cannot lose
+            # another writer's keys.
+            merged = client.rpc("apply_staging_enrichment", {"p_rows": [{"id": rid, "raw_patch": {FIELD: review}}]}).execute()
+            if not merged.data:
+                raise RuntimeError("Receiver review was not written: " + rid)
             updated.append(rid)
     return {"updated_staging_ids": updated, "missing_staging_ids": sorted(current.keys() - found)}
