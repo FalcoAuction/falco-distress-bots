@@ -32,6 +32,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from ._pilot_review import _ENTITY, _SUFFIX, build_review, debt, source
 from ._shelby_register import detail_url
 from ._shelby_trustee_value import parcel_key, street_key
+from ._trustee_list_match import LIST_STALE_DAYS
 
 LANE = "pre_foreclosure"
 REVIEWER = "preforeclosure_review"
@@ -316,6 +317,14 @@ def sale_state(row: Dict[str, Any], source_last_read: Optional[datetime], now: d
     if calendar.get("status") == "postponed" and listing.get("prior_date") and listing.get("date") == sale:
         if listing["prior_date"] not in dates:
             dates.append(listing["prior_date"])
+    # The notice's own trustee list (see _trustee_list_match). It counts only
+    # while the read is recent.
+    check = row.get("list_check") if isinstance(row.get("list_check"), dict) else {}
+    if not check.get("checked_on") or (today - date.fromisoformat(check["checked_on"])).days >= LIST_STALE_DAYS:
+        check = {}
+    if check.get("status") == "postponed" and check.get("prior_date") and check.get("date") == sale:
+        if check["prior_date"] not in dates:
+            dates.append(check["prior_date"])
     if sale and sale not in dates:
         dates.append(sale)
     elif sale and dates[-1] != sale:
@@ -341,14 +350,23 @@ def sale_state(row: Dict[str, Any], source_last_read: Optional[datetime], now: d
             return {**state, "status": "withdrawn", "source_read_on": source_last_read.date().isoformat()}
     elif calendar.get("status") == "omitted" and calendar.get("checked_on"):
         return {**state, "status": "withdrawn", "source_read_on": calendar["checked_on"]}
+    elif check.get("status") == "dropped":
+        return {**state, "status": "withdrawn", "source_read_on": check["checked_on"]}
     else:
         # A newspaper notice keeps its printed date after a sale is pulled or
         # moved, so the date counts only when the trustee's own calendar shows it.
         seed = row.get("seed") if isinstance(row.get("seed"), dict) else {}
         seen_on_list = (seed.get("sale_list") or {}).get("date") == sale
         on_calendar = calendar.get("status") in ("corroborated", "postponed") and listing.get("date") == sale
-        if not (on_calendar or seen_on_list):
-            return {**state, "status": "publisher_only", "prior_date": prior}
+        on_firm_list = check.get("status") in ("confirmed", "postponed") and check.get("date") == sale
+        if not (on_calendar or seen_on_list or on_firm_list):
+            note = check.get("reason")
+            if check.get("status") == "postponed":
+                note = (f"{check.get('firm')}'s sale list shows {check.get('date')}; the record still carries {sale} "
+                        "and has not been updated")
+            return {**state, "status": "publisher_only", "prior_date": prior, "list_note": note}
+        if on_firm_list:
+            state.update(firm_list=check, last_listed_on=check.get("last_listed_on") or check["checked_on"])
     if prior and sale > prior:
         return {**state, "status": "postponed", "prior_date": prior}
     return {**state, "status": "listed"}
@@ -683,6 +701,12 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
     seen = seed.get("sale_list") if isinstance(seed.get("sale_list"), dict) else {}
     if seen.get("date") == sale and (seen.get("checked_on") or "") >= (listed_on or "") and src_name not in FIRMS:
         list_url, list_label, listed_on = seen.get("url"), seen.get("label") or f"{firm} sale calendar", seen["checked_on"]
+    on_firm_list = state.get("firm_list") if isinstance(state.get("firm_list"), dict) else None
+    if on_firm_list:
+        list_url = on_firm_list.get("list_url")
+        list_label = (f"{on_firm_list.get('firm')} sale list" + (f", file {on_firm_list['file']}" if on_firm_list.get("file") else "")
+                      + f", {on_firm_list.get('listed_address')}, matched to notice {row.get('notice_id')} by trustee, "
+                        "exact street and ZIP")
     event_src = source(list_label, list_url, listed_on)
 
     what = f"Substitute trustee sale by {firm}" + (f" ({'file' if src_name in FIRMS else 'notice'} {case})" if case else "")
@@ -713,6 +737,10 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
     else:
         what += f", last advertised for {sale}. The trustee's list has not been read since {listed_on}, so today's status is not confirmed."
         event_status = "unknown"
+    if on_firm_list:
+        what += (f" The Memphis Daily News notice {row.get('notice_id') or ''} advertised "
+                 f"{on_firm_list.get('prior_date') or on_firm_list.get('notice_date')}; "
+                 f"{on_firm_list.get('firm')}'s own list was read {on_firm_list.get('checked_on')}.").replace("  ", " ")
     if appointment and lead_time(appointment):
         label = appointment.get("instrument_label") or f"Shelby instrument {appointment.get('instrument')}"
         what += (f" The appointment of substitute trustee ({label}) was recorded "
@@ -789,7 +817,8 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
         hold = (f"No longer on {firm}'s sale list as of {state.get('source_read_on')}. Likely cancelled or reinstated, not confirmed")
         availability["verify_next"].insert(0, "Check the publisher's notice and the trustee for a new date or a cancellation")
     elif status == "publisher_only":
-        hold = "The sale date rests on the newspaper notice alone. No trustee calendar confirms it is still set"
+        hold = ("The sale date rests on the newspaper notice alone. "
+                + (state.get("list_note") or "No trustee calendar confirms it is still set"))
         availability["verify_next"].insert(0, "Match the notice to the trustee's own sale calendar by street, ZIP and date")
     elif seed.get("hold"):
         hold = seed["hold"]
