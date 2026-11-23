@@ -66,6 +66,13 @@ class KeyTests(unittest.TestCase):
         # A second full name keeps its own surname.
         self.assertEqual(owner_group_key("SMITH JOHN & JONES MARY", "Knox"), "tn|knox|P:JONES M+P:SMITH J")
 
+    def test_two_piece_surnames(self):
+        self.assertEqual(owner_group_key("MC ALLISTER JAMES R", "Hamilton"), "tn|hamilton|P:MCALLISTER J")
+        self.assertEqual(owner_group_key("MC ALLISTER JAMES R", "Hamilton"), owner_group_key("James McAllister", "Hamilton"))
+        self.assertEqual(owner_group_key("ST JOHN MARY", "Knox"), "tn|knox|P:STJOHN M")
+        # Two tokens only: "DE" is the surname's start only when a given name follows.
+        self.assertEqual(owner_group_key("VAN DYKE", "Knox"), "tn|knox|P:VAN D")
+
     def test_unknown_owner_has_no_key(self):
         self.assertIsNone(owner_group_key("", "Shelby"))
         self.assertIsNone(owner_group_key(None, "Shelby"))

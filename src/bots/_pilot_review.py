@@ -54,6 +54,9 @@ _ENTITY = re.compile(r"\b(LLC|L L C|INC|CORP|CORPORATION|COMPANY|CO|LP|LLP|LTD|T
                      r"CHURCH|MINISTRIES|BANK|ASSOCIATION|ASSN|HOLDINGS|PROPERTIES|INVESTMENTS)\b")
 
 
+_SURNAME_PREFIX = ("MC", "ST", "VAN", "VON", "DE", "DEL", "LA", "DI", "O")
+
+
 def _clean(text: Any) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", str(text or "").upper())).strip()
 
@@ -89,6 +92,14 @@ def owner_group_key(names: Any, county: Any, state: str = "TN") -> Optional[str]
         comma = "," in str(raw)
         text = _SUFFIX.sub(" ", text)
         tokens = [t for t in text.split() if len(t) > 1 or t.isalpha()]
+        # Rolls print some surnames in two pieces: "MC ALLISTER JAMES", "ST JOHN MARY".
+        merged: List[str] = []
+        for t in tokens:
+            if merged and merged[-1] in _SURNAME_PREFIX and len(tokens) >= 3:
+                merged[-1] += t
+            else:
+                merged.append(t)
+        tokens = merged
         # County rolls and "LAST, FIRST" put the surname first; prose puts it last.
         roll_order = comma or str(raw).strip() == str(raw).strip().upper()
         # On a roll, a joint owner is often printed without the shared surname:
