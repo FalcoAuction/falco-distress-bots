@@ -26,8 +26,11 @@ class ShelbyTaxTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 scheduled_parcels(PAGE, content, TODAY)
         with patch('src.bots.shelby_tax_sale_bot._supabase') as db:
+            db.return_value.table.return_value.select.return_value.eq.return_value.gt.return_value                 .order.return_value.limit.return_value.execute.return_value.data = []
             self.assertEqual(ShelbyTaxSaleBot()._write_staging([]), (0, 0))
-            db.assert_not_called()
+            db.return_value.table.return_value.update.assert_not_called()
+            db.return_value.table.return_value.upsert.assert_not_called()
+            db.return_value.rpc.assert_not_called()
 
     def test_owner_and_balance_require_matching_sale_and_parcel(self):
         html = '<span>Parcel ID:</span>001001  00001<span>Primary Owner</span>Example LLC<span>Total Balance</span>$120.00<span>Tax Sale ID:</span>TS2302'
