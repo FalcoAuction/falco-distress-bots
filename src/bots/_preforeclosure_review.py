@@ -552,7 +552,7 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
         elif economics.get("value") is None:
             hold = "Owner and parcel are verified, but there is no sourced value yet"
             verify.append("Scheduled county assessment or recorded loan estimate")
-        elif ranked is False:
+        elif ranked is False and not (linked and notice_carded):
             # Same rule as an advertised sale: the lane does not recommend paid
             # contact data for a record the ranking excludes or has not ranked yet.
             hold = ("Owner, parcel and value are verified, but the record is not on the ranked list (it fails a ranking "
