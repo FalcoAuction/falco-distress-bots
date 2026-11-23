@@ -58,6 +58,21 @@ class KeyTests(unittest.TestCase):
         self.assertNotEqual(owner_group_key("REED HOLDINGS LLC", "Shelby"), owner_group_key("REED VIDA L", "Shelby"))
         self.assertEqual(owner_group_key("Acme Properties, LLC", "Shelby"), owner_group_key("ACME PROPERTIES LLC", "Shelby"))
 
+    def test_joint_roll_owner_without_repeated_surname(self):
+        self.assertEqual(owner_group_key("PERCER BOBBIE E JR & DONNA M", "Shelby"), "tn|shelby|P:PERCER B+P:PERCER D")
+        self.assertEqual(owner_group_key("HERIN JOHN B & TINA", "Shelby"), "tn|shelby|P:HERIN J+P:HERIN T")
+        self.assertEqual(owner_group_key(["PERCER BOBBIE E JR & DONNA M"], "Shelby"),
+                         owner_group_key(["PERCER DONNA M", "PERCER BOBBIE E"], "Shelby"))
+        # A second full name keeps its own surname.
+        self.assertEqual(owner_group_key("SMITH JOHN & JONES MARY", "Knox"), "tn|knox|P:JONES M+P:SMITH J")
+
+    def test_two_piece_surnames(self):
+        self.assertEqual(owner_group_key("MC ALLISTER JAMES R", "Hamilton"), "tn|hamilton|P:MCALLISTER J")
+        self.assertEqual(owner_group_key("MC ALLISTER JAMES R", "Hamilton"), owner_group_key("James McAllister", "Hamilton"))
+        self.assertEqual(owner_group_key("ST JOHN MARY", "Knox"), "tn|knox|P:STJOHN M")
+        # Two tokens only: "DE" is the surname's start only when a given name follows.
+        self.assertEqual(owner_group_key("VAN DYKE", "Knox"), "tn|knox|P:VAN D")
+
     def test_unknown_owner_has_no_key(self):
         self.assertIsNone(owner_group_key("", "Shelby"))
         self.assertIsNone(owner_group_key(None, "Shelby"))
@@ -81,6 +96,7 @@ class BuildTests(unittest.TestCase):
         c = card()
         self.assertEqual((c["route"], c["economics"]["runway_days"]), ("first_trace_review", 44))
         self.assertEqual(c["owner_group_key"], "tn|shelby|P:REED V")
+        self.assertEqual((c["owner_names"], c["county"]), (["REED VIDA L"], "shelby"))
         self.assertEqual(c["property_key"], "tn|shelby|p:07504200012")
 
     def test_first_trace_needs_every_answer(self):
