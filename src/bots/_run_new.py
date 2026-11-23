@@ -75,6 +75,7 @@ from . import warn_notices_bot
 from . import davidson_tax_sale_bot
 from . import montgomery_tax_sale_bot
 from . import shelby_tax_sale_bot
+from . import cheatham_tax_sale_bot
 from . import hardeman_tax_notice_bot
 from . import mtn_cities_codes_bot
 from . import mtn_lis_pendens_rod_bot
@@ -90,11 +91,13 @@ from . import williamson_assessor_bot
 from . import shelby_assessor_bot
 from . import memphis_county_value_bot
 from . import shelby_loan_value_bot
+from . import preforeclosure_review_bot
 from . import rutherford_assessor_bot
 from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
 from . import land_lane_bot
+from . import land_review_bot
 from . import church_closure_bot
 from . import stalled_build_bot
 from . import probate_property_enricher_bot
@@ -111,6 +114,7 @@ from . import skip_trace_enricher_bot
 from . import phone_resolver_bot
 from . import davidson_tax_stack_bot
 from . import property_lane_bot
+from . import cre_review_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
 from . import ffl_overlay_bot
@@ -152,6 +156,15 @@ NEW_BOTS = [
     # everything is lost by running it last: on a run that hits the job
     # timeout, last is exactly the slot that never executes.
     ("bot_health_monitor", bot_health_monitor.run),
+    # The daily workflow prepares the Comptroller roll before this runner
+    # starts, so land acquisition reads it directly. It runs here, ahead of
+    # the long scrapers, because on a run that hits the time budget the old
+    # late slot never executed. The review then cross-matches every land
+    # tract against current tax, foreclosure, partition and estate events on
+    # the exact parcel (notices staged by earlier runs) and writes the land
+    # pilot_review cards.
+    ("land_lane", land_lane_bot.run),
+    ("land_review", land_review_bot.run),
     # Lead sources
     ("hud_reo", hud_reo_bot.run),
     ("shelby_receiver_roster", shelby_receiver_roster_bot.run),
@@ -212,6 +225,9 @@ NEW_BOTS = [
     ("davidson_tax_sale", davidson_tax_sale_bot.run),
     ("montgomery_tax_sale", montgomery_tax_sale_bot.run),
     ("shelby_tax_sale", shelby_tax_sale_bot.run),
+    # After court_notices, which stages the Cheatham tracts this bot dates
+    # from the county's posted sale notice. Stages nothing itself.
+    ("cheatham_tax_sale", cheatham_tax_sale_bot.run),
     ("hardeman_tax_notice", hardeman_tax_notice_bot.run),
     # Middle TN secondary cities — only Mt Juliet has a public scrapable
     # code-enforcement feed (SeeClickFix). Other 5 cities documented as
@@ -262,9 +278,6 @@ NEW_BOTS = [
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
     ("comptroller_parcels", comptroller_parcels_bot.run),
-    # Free: Middle TN farm/timber tracts owned by heirs, family groups or
-    # long-held absentees, from the same Comptroller index.
-    ("land_lane", land_lane_bot.run),
     # Free: closed United Methodist churches; property vested in the
     # Conference Trustees (one seller for every building).
     ("church_closure", church_closure_bot.run),
@@ -291,6 +304,9 @@ NEW_BOTS = [
     ("continuance_reaper", continuance_reaper_bot.run),
     # Review stale notices after scrapers record their latest sightings.
     ("trustee_status_reaper", trustee_status_reaper_bot.run),
+    # Pre-foreclosure lane cards: after the trustee sources, calendars and
+    # value bots have written today's sightings, dates and values.
+    ("preforeclosure_review", preforeclosure_review_bot.run),
     ("stale_regrade", stale_regrade_bot.run),
     ("skip_trace_enricher", skip_trace_enricher_bot.run),
     ("phone_resolver", phone_resolver_bot.run),
@@ -298,6 +314,9 @@ NEW_BOTS = [
     # so grades see the owner's land use and verified phones.
     ("davidson_tax_stack", davidson_tax_stack_bot.run),
     ("property_lane", property_lane_bot.run),
+    # Commercial review cards: parcel, owner entity, signer path, distress tie
+    # on the building owner's parcel. Reads the lane tags written just above.
+    ("cre_review", cre_review_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),

@@ -539,7 +539,8 @@ def _failing_structure(raw: Dict[str, Any]) -> bool:
 
 
 def parcel_id(raw: Dict[str, Any]) -> Optional[str]:
-    for key, field in (("comptroller_parcel", "parcelid"), ("metro_parcel", "apn"), ("padctn", "parcel"),
+    for key, field in (("comptroller_parcel", "parcelid"), ("metro_parcel", "apn"), ("metro_parcel", "parcel"),
+                       ("padctn", "parcel"),
                        ("padctn", "parcel_id"), ("hamilton_assessor", "parcel_id"), ("tpad", "parcel_id"),
                        ("rutherford_arcgis", "parcel_id"), ("williamson_inigo", "parcel"), ("shelby_arcgis", "parcel_id"),
                        ("padctn_owner_match", "parcel")):

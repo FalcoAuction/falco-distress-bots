@@ -106,7 +106,7 @@ class RecurringArchiveTests(TestCase):
         self.assertEqual(held["status"],"property_review_unverified")
         self.assertNotIn("sale_history",held)
 
-    def test_projection_write_compares_raw_and_changes_only_receiver_field(self):
+    def test_projection_write_merges_only_receiver_field(self):
         from datetime import date
         from unittest.mock import MagicMock
         from src.bots._shelby_receiver_crm import FIELD, publish
@@ -117,14 +117,15 @@ class RecurringArchiveTests(TestCase):
         active = table.select.return_value.eq.return_value.eq.return_value.gt.return_value.order.return_value.limit.return_value
         active.execute.return_value.data = []
         table.select.return_value.eq.return_value.in_.return_value.execute.return_value.data = [old]
-        cas = table.update.return_value.eq.return_value.eq.return_value.filter.return_value
-        cas.execute.return_value.data = [{"id":"a"}]
+        cas = client.rpc.return_value
+        cas.execute.return_value.data = 1
         review = {**{k:raw[k] for k in ("parcel","alt_parcel","sale_id")},"cases":[{"address":"3055 ST CROIX"}]}
         result = publish(client,{"a":review},date(2026,11,22))
         self.assertEqual(result["updated_staging_ids"],["a"])
-        table.update.assert_called_once_with({"raw_payload":{**raw,FIELD:review}})
-        cas.execute.return_value.data = []
-        with self.assertRaisesRegex(RuntimeError,"concurrent"):
+        client.rpc.assert_called_once_with("apply_staging_enrichment",{"p_rows":[{"id":"a","raw_patch":{FIELD:review}}]})
+        table.update.assert_not_called()
+        cas.execute.return_value.data = 0
+        with self.assertRaisesRegex(RuntimeError,"not written"):
             publish(client,{"a":review},date(2026,11,22))
         with self.assertRaisesRegex(ValueError,"identity"):
             publish(client,{"a":dict(review,parcel="072022 E00048")},date(2026,11,22))
