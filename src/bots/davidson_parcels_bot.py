@@ -149,8 +149,10 @@ class DavidsonParcelsBot(BotBase):
                     hit = pick(by_addr.get(key, []))
                     for row_id in keyed[key]:
                         entry: Dict[str, Any] = {"id": row_id, "meta_patch": {"metro_parcel_checked": now}}
-                        if hit and (hit.get("TotlAppr") or 0) > 0:
+                        # A value needs the Metro parcel number it was read from, and the date.
+                        if hit and (hit.get("TotlAppr") or 0) > 0 and hit.get("STANPAR"):
                             entry.update({"property_value": hit["TotlAppr"], "property_value_source": "metro_nashville_parcels",
+                                          "property_value_as_of": now[:10],
                                           "raw_patch": {"metro_parcel": parcel_facts(hit)}})
                             valued += 1
                         else:
