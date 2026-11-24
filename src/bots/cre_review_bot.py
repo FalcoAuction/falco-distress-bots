@@ -13,6 +13,13 @@ years were turned over for the tax suit), the assessor export (exact parcel,
 current owner, last transfer, appraisal) and the latest Clerk and Master tax
 sale list. No paid data, no Secretary of State scraping, no listing sites.
 
+A Hamilton company owner held only because nobody can sign for it is looked
+up once on the County Clerk's free business license search (_signer_lookup).
+The answer is stored on the row (raw_payload.signer_lookup) and reused for
+180 days; at most 15 companies are looked up per run, six seconds apart. A
+lookup that fails stores nothing and changes no card. A license owner is a
+named person or a mailing contact, never verified authority.
+
     python -m src.bots.cre_review_bot                  # dry run, prints the plan
     python -m src.bots.cre_review_bot --write
     python -m src.bots.cre_review_bot --ids ids.json --out plan.json [--write]
@@ -26,6 +33,7 @@ import argparse
 import csv
 import io
 import json
+import time
 import traceback as tb
 import zipfile
 from datetime import date, datetime, timezone
@@ -34,8 +42,10 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from ._base import BotBase, _supabase
-from ._cre_review import (HAMILTON_ASSESSOR_URL, HAMILTON_SALE_LIST_URL, HAMILTON_TRUSTEE_URL, REVIEWER,
+from ._cre_review import (COMPANY_HOLD, HAMILTON_ASSESSOR_URL, HAMILTON_SALE_LIST_URL, HAMILTON_TRUSTEE_URL, REVIEWER,
                           mailing_index_for, parse_sale_list, review_row, roll_index, roll_status)
+from . import _signer_lookup as signer_lookup
+from ._entity_signer import clean_owner_name, entity_key
 from ._pilot_review import merge_review
 from .hamilton_assessor_bot import HamiltonAssessorBot, _norm_parcel
 
@@ -43,7 +53,8 @@ TABLE = "homeowner_requests_staging"
 TENANT_EXCLUDES = ("owner_mismatch", "personal_property_tax", "employment_notice")
 RAW_KEYS = ("property_lane", "parcel", "owner_name_1", "owner_name_2", "structured", "extracted", "publication_date",
             "body", "comptroller_parcel", "metro_parcel", "hamilton_assessor", "tpad", "padctn", "williamson_inigo",
-            "rutherford_arcgis", "shelby_arcgis", "warn", "warn_review", "source", "pilot_review", "cre_review")
+            "rutherford_arcgis", "shelby_arcgis", "warn", "warn_review", "source", "pilot_review", "cre_review",
+            "signer_lookup")
 SLIM = ("id,bot_source,distress_type,trustee_sale_date,staging_status,"
         "grade:raw_payload->property_lane->>grade,exclude:raw_payload->property_lane->>exclude_reason")
 FULL = ("id,bot_source,distress_type,county,property_address,full_name,owner_name_records,property_value,"
@@ -81,11 +92,59 @@ def in_scope(slim: Dict[str, Any]) -> bool:
     return bool(slim.get("grade") or slim.get("trustee_sale_date") or slim.get("exclude") in TENANT_EXCLUDES)
 
 
-def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date) -> List[Dict[str, Any]]:
+def needs_signer_lookup(row: Dict[str, Any], item: Dict[str, Any]) -> bool:
+    """A Hamilton company owner whose card is held on the signer alone."""
+    return (str(row.get("county") or "").lower() == "hamilton" and item["facts"].get("owner_type") == "entity"
+            and item["route"] == "research_hold" and item["route_reason"].startswith(COMPANY_HOLD))
+
+
+def plan_signer_lookups(rows: List[Dict[str, Any]], plan: List[Dict[str, Any]], today: date,
+                        limit: int = signer_lookup.MAX_PER_RUN) -> Dict[str, Any]:
+    """Which companies to look up this run, and which rows can reuse an
+    answer a sister row already holds. Returns {"fetch": {entity key:
+    {"entity", "query", "ids"}}, "copy": {row id: stored lookup}}. A company
+    is fetched once however many rows it owns."""
+    by_id = {r["id"]: r for r in rows}
+    groups: Dict[str, Dict[str, Any]] = {}
+    for item in plan:
+        row = by_id.get(item["id"])
+        if not row or not needs_signer_lookup(row, item):
+            continue
+        name = clean_owner_name(item["facts"].get("owner_entity"))
+        key = entity_key(name)
+        if not key:
+            continue
+        g = groups.setdefault(key, {"entity": name, "ids": [], "fresh": None})
+        stored = ((row.get("raw_payload") or {}).get("signer_lookup") or {}).get(signer_lookup.CLERK_KEY)
+        if signer_lookup.is_fresh(stored, name, today):
+            g["fresh"] = g["fresh"] or stored
+        else:
+            g["ids"].append(row["id"])
+    out: Dict[str, Any] = {"fetch": {}, "copy": {}}
+    for key in sorted(groups):
+        g = groups[key]
+        if not g["ids"]:
+            continue
+        if g["fresh"]:
+            out["copy"].update({i: g["fresh"] for i in g["ids"]})
+            continue
+        query = signer_lookup.clerk_query(g["entity"])
+        if query and len(out["fetch"]) < limit:
+            out["fetch"][key] = {"entity": g["entity"], "query": query, "ids": g["ids"]}
+    return out
+
+
+def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date,
+              new_lookups: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Cards to write. evidence_for(row) returns the Hamilton evidence dict or
     None. A row whose card is unchanged, or whose existing card wins the
-    merge (manual, or a stronger card from another lane), is left alone."""
+    merge (manual, or a stronger card from another lane), is left alone.
+    new_lookups: {row id: signer_lookup value} read this run; each is laid
+    onto its row before the card is built and saved with it."""
     plan = []
+    for row in rows:
+        if new_lookups and row["id"] in new_lookups:
+            row.setdefault("raw_payload", {})["signer_lookup"] = new_lookups[row["id"]]
     # Attention and care-of names per P.O. box, so a company with no name on its
     # own mailing line still gets the labeled path its sister company carries.
     boxes = mailing_index_for(rows, evidence_for)
@@ -103,6 +162,8 @@ def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date) -> List[Dic
             patch["pilot_review"] = final
         if raw.get("cre_review") != facts:
             patch["cre_review"] = facts
+        if new_lookups and row["id"] in new_lookups:
+            patch["signer_lookup"] = new_lookups[row["id"]]
         plan.append({"id": row["id"], "route": card["route"], "route_reason": card["route_reason"],
                      "kept_existing_card": keep_existing, "card": card, "facts": facts, "patch": patch,
                      "before": {"pilot_review": existing, "cre_review": raw.get("cre_review")}})
@@ -113,6 +174,7 @@ class CreReviewBot(BotBase):
     name = "cre_review"
     description = "Commercial real estate review cards: parcel, owner entity, signer path, distress tie, value, deadline"
     throttle_seconds = 0.5
+    lookup_gap = signer_lookup.REQUEST_GAP
 
     def __init__(self, write: bool = True, ids: Optional[List[str]] = None, today: Optional[date] = None):
         super().__init__()
@@ -208,6 +270,40 @@ class CreReviewBot(BotBase):
                     "sale_list_year": ev["sale_list_year"], "sale_list_url": ev["sale_list_url"]}
         return for_row
 
+    # ── company signer lookups ──
+    def signer_lookups(self, rows: List[Dict[str, Any]], plan: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """{row id: signer_lookup value} for rows that gained a County Clerk
+        answer this run. Fails closed: a refused robots.txt, a failed
+        request or an unreadable page adds nothing for that company."""
+        todo = plan_signer_lookups(rows, plan, self.today)
+        by_id = {r["id"]: r for r in rows}
+        note: Dict[str, Any] = {"reused": len(todo["copy"]), "looked_up": 0, "failed": 0, "with_owner": 0}
+        self.source_notes["signer_lookup"] = note
+        found: Dict[str, Any] = dict(todo["copy"])
+        if todo["fetch"]:
+            robots = self.fetch(signer_lookup.CLERK_ROBOTS)
+            if robots is None or robots.status_code != 200 or not signer_lookup.robots_allows(robots.text):
+                note["skipped"] = "robots.txt unavailable or disallows the search"
+                todo["fetch"] = {}
+        for job in todo["fetch"].values():
+            time.sleep(self.lookup_gap)
+            res = self.fetch(signer_lookup.CLERK_URL, method="POST", data=signer_lookup.clerk_form(job["query"]))
+            result = signer_lookup.clerk_result(job["entity"], job["query"], res.text, self.today) \
+                if res is not None and res.status_code == 200 else None
+            if result is None:
+                note["failed"] += 1
+                continue
+            note["looked_up"] += 1
+            note["with_owner"] += int(any(r.get("owner") for r in result["records"]))
+            for row_id in job["ids"]:
+                found[row_id] = result
+        out = {}
+        for row_id, result in found.items():
+            held = dict((by_id[row_id].get("raw_payload") or {}).get("signer_lookup") or {})
+            held[signer_lookup.CLERK_KEY] = result
+            out[row_id] = held
+        return out
+
     # ── write ──
     def apply(self, client, plan: List[Dict[str, Any]]) -> int:
         todo = [p for p in plan if p["patch"]]
@@ -256,6 +352,13 @@ class CreReviewBot(BotBase):
                        and not str(r["raw_payload"]["parcel"]).upper().startswith("PER-")}
             ev = self.hamilton_evidence(parcels)
             plan = plan_rows(rows, self.evidence_lookup(ev), self.today)
+            try:
+                looked = self.signer_lookups(rows, plan)
+            except Exception as exc:  # a failed lookup changes nothing
+                looked = {}
+                self.source_notes["signer_lookup"] = f"failed: {type(exc).__name__}"
+            if looked:
+                plan = plan_rows(rows, self.evidence_lookup(ev), self.today, looked)
             if self.write:
                 written = self.apply(client, plan)
         except Exception as e:

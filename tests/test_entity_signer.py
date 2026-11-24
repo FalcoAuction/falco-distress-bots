@@ -16,10 +16,11 @@ os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.bots import _entity_signer as es  # noqa: E402
+from src.bots import _signer_lookup as sl  # noqa: E402
 from src.bots._cre_review import SOS_PATH, mailing_index_for, review_row  # noqa: E402
 from src.bots._pilot_review import source  # noqa: E402
 from src.bots._tax_tract_review import shelby_card  # noqa: E402
-from src.bots.cre_review_bot import plan_rows  # noqa: E402
+from src.bots.cre_review_bot import CreReviewBot, plan_rows, plan_signer_lookups  # noqa: E402
 
 TODAY = date(2026, 11, 23)
 
@@ -65,8 +66,40 @@ class SignerInText(unittest.TestCase):
 
     def test_undated_document_is_a_path(self):
         answer = es.find("Example Holdings LLC", texts=[(RECITAL, source("Notice", None, None))])
-        self.assertEqual(answer["status"], "path")
+        self.assertEqual((answer["status"], answer["tier"]), ("named", "named_person"))
         self.assertEqual(answer["signers"], [])
+
+    def test_verified_signer_carries_source_role_date_and_question(self):
+        answer = es.find("EXAMPLE HOLDINGS LLC", texts=[(RECITAL, NOTICE)])
+        self.assertEqual((answer["status"], answer["tier"]), ("verified", "verified_authority"))
+        first = answer["signers"][0]
+        self.assertEqual((first["name"], first["role"], first["tier"], first["source"]["date"]),
+                         ("Jane Q. Doe", "member", "verified_authority", "2026-11-06"))
+        self.assertIn("Confirm with Jane Q. Doe that the member role is still current", first["ask"])
+        self.assertTrue(es.signer_basis(answer).startswith(
+            "Verified authority: Trustee sale notice, nashville_ledger, dated 2026-11-06 names Jane Q. Doe as member"))
+
+    def test_same_words_different_entity_type(self):
+        # An LLC and an Inc with the same words are different companies.
+        for other in ("Example Holdings Inc", "Example Holdings Corp", "Example Holdings LP", "Example Holdings"):
+            self.assertFalse(es.same_entity("Example Holdings LLC", other), other)
+            self.assertEqual(es.find(other, texts=[(RECITAL, NOTICE)])["status"], "none", other)
+        inc = RECITAL.replace("Example Holdings, LLC", "Example Holdings, Inc.")
+        self.assertEqual(es.find("Example Holdings LLC", texts=[(inc, NOTICE)])["status"], "none")
+
+    def test_named_trustee_or_lender_is_dropped(self):
+        text = "executed by Example Holdings, LLC, by David M. Anthony, its Authorized Agent, to First Example Bank"
+        self.assertEqual(es.find("Example Holdings LLC", texts=[(text, NOTICE)])["status"], "verified")
+        barred = es.find("Example Holdings LLC", texts=[(text, NOTICE)], never=["David M Anthony", None, "First Example Bank"])
+        self.assertEqual((barred["status"], barred["signers"], barred["paths"]), ("none", [], []))
+
+    def test_one_person_keeps_the_strongest_tier(self):
+        src = source("Hamilton County assessor export", None, "2026-11-20")
+        index = es.build_mailing_index([("SISTER LLC", "ATTN JOHN ROE, PO BOX 12, MOUNT JULIET TN 37122", src)])
+        answer = es.find("Example Holdings LLC", mail_lines=[("ATTN JOHN ROE, PO BOX 12, MOUNT JULIET TN 37122", src)],
+                         mailing="PO BOX 12, MOUNT JULIET TN 37122", mailing_index=index)
+        self.assertEqual([(p["name"], p["tier"]) for p in answer["paths"]], [("JOHN ROE", "named_person")])
+        self.assertEqual(es.hold_note(answer), "On file: 1 named person worth asking; none is verified authority.")
 
     def test_exact_entity_only(self):
         for other in ("North Example Holdings LLC", "Example Holdings II LLC", "Example Holding LLC", "Example LLC"):
@@ -99,16 +132,17 @@ class SignerInText(unittest.TestCase):
     def test_registered_agent_person_is_a_path(self):
         text = "Example Holdings, LLC, by John Roe, Registered Agent, 10 Main St"
         answer = es.find("Example Holdings LLC", texts=[(text, NOTICE)])
-        self.assertEqual(answer["status"], "path")
+        self.assertEqual((answer["status"], answer["tier"]), ("contact", "mailing_contact"))
         self.assertEqual(answer["paths"][0]["kind"], "registered_agent")
         self.assertFalse(answer["paths"][0]["verified"])
-        self.assertTrue(es.path_lines(answer)[0].startswith("Path to signer (not verified): John Roe, registered agent"))
+        self.assertTrue(es.path_lines(answer)[0].startswith(
+            "Registered agent or mailing contact (not a signer): John Roe, registered agent"))
 
     def test_guarantor_is_a_path(self):
         text = "executed by Example Holdings, LLC. Interested parties include: Tabor L. Roe, Jaclynn Roe (Limited Guarantor)"
         answer = es.find("Example Holdings LLC", texts=[(text, NOTICE)])
         self.assertEqual((answer["status"], answer["paths"][0]["name"], answer["paths"][0]["kind"]),
-                         ("path", "Jaclynn Roe", "guarantor"))
+                         ("named", "Jaclynn Roe", "guarantor"))
 
     def test_duplicates_and_two_signers(self):
         two = RECITAL + " Also signed for Example Holdings, LLC by John Roe, its Manager."
@@ -133,9 +167,12 @@ class MailingPaths(unittest.TestCase):
         src = source("Hamilton County assessor export", None, "2026-11-20")
         answer = es.find("WILLIAMS REALTY INCORPORATED",
                          mail_lines=[("WILLIAMS REALTY INCORPORATED & C/O JOE V WILLIAMS III", src)])
-        self.assertEqual((answer["status"], answer["signers"]), ("path", []))
-        self.assertEqual(answer["paths"][0]["name"], "JOE V WILLIAMS III")
         company = es.find("OM LOOKOUT MTN LLC", mail_lines=[("OM LOOKOUT MTN LLC & C/O COUNTRY INN & SUITES", src)])
+        self.assertEqual((answer["status"], answer["signers"]), ("named", []))
+        self.assertEqual((answer["paths"][0]["name"], answer["paths"][0]["tier"]), ("JOE V WILLIAMS III", "named_person"))
+        self.assertEqual(answer["paths"][0]["source"]["date"], "2026-11-20")
+        self.assertIn("Ask JOE V WILLIAMS III what their role is with WILLIAMS REALTY INCORPORATED", answer["paths"][0]["ask"])
+        self.assertEqual((company["status"], company["paths"][0]["tier"]), ("contact", "mailing_contact"))
         self.assertIn("another business or a partial name", company["paths"][0]["note"])
 
     def test_shared_po_box_only(self):
@@ -145,8 +182,19 @@ class MailingPaths(unittest.TestCase):
             ("SUITE CO LLC", "ATTN ANN LEE, 30 N GOULD ST STE R, SHERIDAN WY 82801", src)])
         answer = es.find("WISE PROPERTIES TN LLC", mailing="P O BOX 4261, CHATTANOOGA TN37405", mailing_index=index)
         self.assertEqual((answer["status"], answer["paths"][0]["kind"], answer["paths"][0]["name"]),
-                         ("path", "shared_mailing", "JOHN S WISE III"))
-        self.assertIn("inference", answer["paths"][0]["note"])
+                         ("contact", "shared_mailing", "JOHN S WISE III"))
+        # A shared box never lifts the person above mailing contact, and never clears a hold.
+        self.assertEqual((answer["tier"], answer["paths"][0]["tier"], answer["signers"]), ("mailing_contact", "mailing_contact", []))
+        self.assertIn("the link is the mailing address only", answer["paths"][0]["note"])
+        self.assertTrue(es.path_lines(answer)[0].startswith(
+            "Registered agent or mailing contact (not a signer): JOHN S WISE III, attention name on GALAPAGOS "
+            "INDUSTRIAL PARK LLC at the same P.O. box (Hamilton County assessor export, dated 2026-11-20)"))
+        self.assertIsNone(es.hold_extras("WISE PROPERTIES TN LLC", mailing="P O BOX 4261, CHATTANOOGA TN37405",
+                                         mailing_index=index)[0])
+        # The company whose own line carries the name is one tier up, and still not verified.
+        own = es.find("GALAPAGOS INDUSTRIAL PARK LLC", mailing="PO BOX 4261, CHATTANOOGA TN 37405", mailing_index=index,
+                      mail_lines=[("ATTN JOHN S WISE III, PO BOX 4261, CHATTANOOGA TN 37405", src)])
+        self.assertEqual((own["status"], [p["tier"] for p in own["paths"]]), ("named", ["named_person"]))
         # A shared street address (a registered agent's office) is never a link.
         self.assertEqual(es.find("CAELUM GLOBAL 1 LLC", mailing="30 N GOULD ST STE R, SHERIDAN WY 82801",
                                  mailing_index=index)["status"], "none")
@@ -157,7 +205,7 @@ class MailingPaths(unittest.TestCase):
         answer = es.find("SMART INC STUDENT MAKING A REWARDED", suit_parties=(
             ["M.L.A. WILLIAMS", "SMART INC STUDENT MAKING A REWARDED", "Smart Inc/ Student Making (A) Rewarded Today Inc.",
              "WILLIAMS MARION"], src))
-        self.assertEqual(answer["status"], "path")
+        self.assertEqual(answer["status"], "named")
         self.assertEqual([p["name"] for p in answer["paths"]], ["WILLIAMS MARION"])
         self.assertIn("does not state the relationship", answer["paths"][0]["note"])
 
@@ -220,12 +268,14 @@ class CommercialCards(unittest.TestCase):
         row["raw_payload"]["comptroller_parcel"]["owner_mailing"] = "ATTN JOHN ROE, PO BOX 12, MOUNT JULIET TN 37122"
         card, facts = review_row(row, None, TODAY)
         self.assertEqual(card["route"], "research_hold")
-        self.assertIn("1 path to the signer on file, not verified.", card["route_reason"])
+        self.assertIn("On file: 1 named person worth asking; none is verified authority.", card["route_reason"])
         first = card["availability"]["verify_next"][0]
-        self.assertTrue(first.startswith("Path to signer (not verified): JOHN ROE, attention line"), first)
+        self.assertTrue(first.startswith("Named person worth asking (authority not verified): JOHN ROE, attention line"), first)
+        self.assertIn("Next: Ask JOHN ROE what their role is with EXAMPLE HOLDINGS LLC", first)
         self.assertEqual(card["decider"]["name"], "EXAMPLE HOLDINGS LLC")
+        self.assertFalse(card["decider"]["verified"])
         self.assertIsNone(facts["signer"])
-        self.assertEqual(facts["entity_signer"]["status"], "path")
+        self.assertEqual((facts["entity_signer"]["status"], facts["entity_signer"]["tier"]), ("named", "named_person"))
 
     def test_manual_card_kept_and_repeat_run_writes_nothing(self):
         rows = [notice_row()]
@@ -252,6 +302,208 @@ class CommercialCards(unittest.TestCase):
         self.assertEqual(facts["entity_signer"]["paths"][0]["kind"], "shared_mailing")
 
 
+def clerk_page(*records):
+    """A County Clerk result page: (business, address, start, close, status, owner, owner address)."""
+    if not records:
+        return ("<div>Results Found: 0</div><table><tr><td>Business</td><td>Product</td><td>Business Start Date</td>"
+                "<td>Business Close Date</td><td>License Date</td><td>Status</td><td>Owner</td>"
+                "<tr><td colspan=7>No Records Found</td></tr></table>")
+    rows = "".join(
+        f"<tr bgcolor=white valign=top><td>{b}<br>{a}\n<br>CHATTANOOGA, TN 37410<br>\n</td><td></td><td>{start}</td>"
+        f"<td>{close}</td><td>0000-00-00</td>\n<td>{status}</td><td>{owner}<br>{oa}<br>\nCHATTANOOGA, TN 37410<br></td></tr>"
+        for b, a, start, close, status, owner, oa in records)
+    return (f"<div>Results Found: {len(records)}</div><table><tr style=\"font-weight:bold\"><td>Business</td><td>Product</td>"
+            "<td>Business Start Date</td><td>Business Close Date</td><td>License Date</td><td>Status</td><td>Owner</td>"
+            f"<tr>{rows}</table>")
+
+
+def hamilton_row(owner="EXAMPLE MARKET INC", mailing="202 W 38TH ST, CHATTANOOGA TN 37410", rid="h1", **over):
+    row = {"id": rid, "bot_source": "hamilton_tax_delinquent", "distress_type": "TAX_LIEN", "county": "hamilton",
+           "property_address": "202 W 38TH ST, CHATTANOOGA, TN", "owner_name_records": owner, "full_name": owner,
+           "raw_payload": {"parcel": "155N-A-001", "owner_name_1": owner,
+                           "property_lane": {"lane": "commercial", "grade": "B", "exclude_reason": None}}}
+    row.update(over)
+    return row
+
+
+def hamilton_evidence(owner="EXAMPLE MARKET INC", mailing="202 W 38TH ST, CHATTANOOGA TN 37410"):
+    return {"roll": {"on_roll": True, "balance": 9000.0, "years": [2023, 2024, 2025], "turned_over_years": [2023],
+                     "roll_owner": owner, "mortgage_company": None},
+            "roll_date": "2026-11-01", "assessor_date": "2026-11-21", "duplicate_parcel": False,
+            "assessor": {"owner": owner, "owner_mailing": mailing, "appraised": 400000, "last_sale_date": "2015-01-05",
+                         "property_address": "202 W 38TH ST"},
+            "sale_list": {}, "sale_list_year": 2026, "sale_list_url": "https://example.test/list.pdf"}
+
+
+class Response:
+    def __init__(self, text, status_code=200):
+        self.text, self.status_code = text, status_code
+
+
+class LicenseLookup(unittest.TestCase):
+    """County Clerk business license records: named person at best, never authority."""
+
+    def lookup(self, entity, *records):
+        return sl.clerk_result(entity, sl.clerk_query(entity), clerk_page(*records), TODAY)
+
+    def test_parse_and_query(self):
+        self.assertEqual(sl.clerk_query("WILLIAMS REALTY INCORPORATED & C/O JOE V WILLIAMS III"), "WILLIAMS REALTY")
+        self.assertEqual(sl.clerk_query("WISE PROPERTIES-TN LLC"), "WISE PROPERTIES TN")
+        self.assertEqual(sl.clerk_query("SKIN & BROW ROOM LLC"), "SKIN & BROW ROOM")
+        got = sl.parse_clerk(clerk_page(("EXAMPLE MARKET", "202 W 38TH ST", "2012-09-10", "2020-07-10", "Closed",
+                                         "MARK  ROE", "202 W 38TH ST")))
+        self.assertEqual(got, [{"business": "EXAMPLE MARKET", "business_address": "202 W 38TH ST, CHATTANOOGA, TN 37410",
+                                "product": None, "start": "2012-09-10", "close": "2020-07-10", "status": "Closed",
+                                "owner": "MARK ROE", "owner_address": "202 W 38TH ST, CHATTANOOGA, TN 37410"}])
+        self.assertEqual(sl.parse_clerk(clerk_page()), [])
+
+    def test_failed_lookup_is_none(self):
+        for page in (None, "", "<html>Just a moment...</html>", "<h1>503 Service Unavailable</h1>"):
+            self.assertIsNone(sl.parse_clerk(page))
+            self.assertIsNone(sl.clerk_result("EXAMPLE MARKET INC", "EXAMPLE MARKET", page, TODAY))
+
+    def test_robots(self):
+        self.assertTrue(sl.robots_allows("# comment only\n"))
+        self.assertTrue(sl.robots_allows("User-agent: *\nDisallow: /admin/\n"))
+        self.assertFalse(sl.robots_allows("User-agent: *\nDisallow: /\n"))
+        self.assertFalse(sl.robots_allows("User-agent: *\nDisallow: /hamilton/public/\n"))
+        self.assertFalse(sl.robots_allows("User-agent: FALCO-research\nDisallow: /\n"))
+        self.assertTrue(sl.robots_allows("User-agent: GPTBot\nDisallow: /\n"))
+        self.assertFalse(sl.robots_allows(None))
+
+    def test_exact_name_owner_is_a_named_person(self):
+        stored = self.lookup("EXAMPLE FOAM LLC", ("EXAMPLE FOAM LLC", "3902 TACOMA AVE", "2014-06-30", "2014-12-31", "Closed",
+                                                  "CHARLES ROE", "3902 TACOMA AVE"),
+                             ("EXAMPLE FOAM INSULATORS LLC", "1 MAIN ST", "2019-01-01", "0000-00-00", "Active", "OTHER MAN", "1 MAIN ST"))
+        self.assertEqual([r["business"] for r in stored["records"]], ["EXAMPLE FOAM LLC"])
+        answer = es.find("EXAMPLE FOAM LLC", licenses=stored)
+        self.assertEqual((answer["status"], answer["signers"]), ("named", []))
+        p = answer["paths"][0]
+        self.assertEqual((p["name"], p["tier"], p["role"], p["source"]["date"]),
+                         ("CHARLES ROE", "named_person", "Owner on the business license (Closed, closed 2014-12-31)", "2014-06-30"))
+        self.assertIn("Hamilton County Clerk business license search, license for EXAMPLE FOAM LLC", p["source"]["label"])
+        self.assertIn("whether they are a member or manager of EXAMPLE FOAM LLC", p["ask"])
+
+    def test_name_without_type_needs_the_address_and_stays_a_contact(self):
+        rec = ("EXAMPLE MARKET", "202 W 38TH ST", "2012-09-10", "2020-07-10", "Closed", "MARK ROE", "202 W 38TH ST")
+        stored = self.lookup("EXAMPLE MARKET INC", rec)
+        here = es.find("EXAMPLE MARKET INC", licenses=stored, addresses=["202 W 38TH ST, CHATTANOOGA TN 37410"])
+        self.assertEqual((here["status"], here["paths"][0]["tier"], here["paths"][0]["kind"]),
+                         ("contact", "mailing_contact", "license_address"))
+        self.assertEqual(es.find("EXAMPLE MARKET INC", licenses=stored, addresses=["PO BOX 9, CHATTANOOGA TN 37410"])["status"], "none")
+        self.assertEqual(es.find("EXAMPLE MARKET INC", licenses=stored, addresses=["900 OTHER RD, CHATTANOOGA TN 37410"])["status"], "none")
+
+    def test_different_entity_type_on_the_license_is_nothing(self):
+        stored = self.lookup("EXAMPLE MARKET INC", ("EXAMPLE MARKET LLC", "202 W 38TH ST", "2012-09-10", "0000-00-00", "Active",
+                                                    "MARK ROE", "202 W 38TH ST"))
+        self.assertEqual(es.find("EXAMPLE MARKET INC", licenses=stored,
+                                 addresses=["202 W 38TH ST, CHATTANOOGA TN 37410"])["status"], "none")
+
+    def test_blank_or_company_owner_is_nothing(self):
+        stored = self.lookup("EXAMPLE MARKET INC",
+                             ("EXAMPLE MARKET INC", "202 W 38TH ST", "2012-09-10", "0000-00-00", "Active", "", "202 W 38TH ST"),
+                             ("EXAMPLE MARKET INC", "202 W 38TH ST", "2013-09-10", "0000-00-00", "Active", "ROE HOLDINGS LLC", "X"))
+        self.assertEqual(es.find("EXAMPLE MARKET INC", licenses=stored)["status"], "none")
+
+    def test_lookup_stored_for_another_company_is_ignored(self):
+        stored = self.lookup("EXAMPLE FOAM LLC", ("EXAMPLE FOAM LLC", "3902 TACOMA AVE", "2014-06-30", "0000-00-00", "Active",
+                                                  "CHARLES ROE", "3902 TACOMA AVE"))
+        stored["records"][0]["business"] = "OTHER NAME LLC"
+        self.assertEqual(es.find("OTHER NAME LLC", licenses=stored)["status"], "none")
+
+    def test_freshness(self):
+        stored = self.lookup("EXAMPLE MARKET INC")
+        self.assertTrue(sl.is_fresh(stored, "EXAMPLE MARKET INC ETAL", TODAY))
+        self.assertFalse(sl.is_fresh(stored, "EXAMPLE MARKET LLC", TODAY))
+        self.assertFalse(sl.is_fresh({**stored, "checked_on": "2026-01-01"}, "EXAMPLE MARKET INC", TODAY))
+        self.assertFalse(sl.is_fresh(None, "EXAMPLE MARKET INC", TODAY))
+
+
+class LookupInTheDailyRun(unittest.TestCase):
+    """cre_review_bot: one request per company, stored on the row, reused, and nothing on failure."""
+
+    def bot(self, pages, robots="# no rules\n"):
+        bot = CreReviewBot(write=False, today=TODAY)
+        bot.lookup_gap = 0
+        calls = []
+
+        def fetch(url, method="GET", **kw):
+            calls.append((method, url, (kw.get("data") or {}).get("bname")))
+            if url == sl.CLERK_ROBOTS:
+                return robots if robots is None or isinstance(robots, Response) else Response(robots)
+            page = pages.get(kw["data"]["bname"])
+            return page if page is None or isinstance(page, Response) else Response(page)
+        bot.fetch = fetch
+        return bot, calls
+
+    def rows(self):
+        ev = hamilton_evidence()
+        rows = [hamilton_row(rid="h1"), hamilton_row(rid="h2")]
+        return rows, (lambda r: ev)
+
+    def test_one_request_per_company_then_none_on_the_repeat_run(self):
+        rows, ev = self.rows()
+        plan = plan_rows(rows, ev, TODAY)
+        self.assertTrue(all(p["route"] == "research_hold" and p["route_reason"].startswith("The owner of record is a company")
+                            for p in plan), plan[0]["route_reason"])
+        page = clerk_page(("EXAMPLE MARKET", "202 W 38TH ST", "2012-09-10", "2020-07-10", "Closed", "MARK ROE", "202 W 38TH ST"))
+        bot, calls = self.bot({"EXAMPLE MARKET": page})
+        looked = bot.signer_lookups(rows, plan)
+        self.assertEqual([c for c in calls if c[0] == "POST"], [("POST", sl.CLERK_URL, "EXAMPLE MARKET")])
+        self.assertEqual(sorted(looked), ["h1", "h2"])
+        plan = plan_rows(rows, ev, TODAY, looked)
+        for p in plan:
+            self.assertEqual(p["route"], "research_hold")                      # a license owner clears nothing
+            self.assertIn("On file: 1 mailing contact; none is verified authority.", p["route_reason"])
+            self.assertEqual(p["patch"]["signer_lookup"][sl.CLERK_KEY]["records"][0]["owner"], "MARK ROE")
+            self.assertTrue(any(line.startswith("Registered agent or mailing contact (not a signer): MARK ROE")
+                                for line in p["card"]["availability"]["verify_next"]))
+        for row, p in zip(rows, plan):
+            row["raw_payload"].update(p["patch"])
+        again = plan_rows(rows, ev, TODAY)
+        self.assertEqual([p["patch"] for p in again], [{}, {}])
+        bot, calls = self.bot({})
+        self.assertEqual(bot.signer_lookups(rows, again), {})
+        self.assertEqual(calls, [])
+
+    def test_sister_row_reuses_the_stored_answer(self):
+        rows, ev = self.rows()
+        stored = sl.clerk_result("EXAMPLE MARKET INC", "EXAMPLE MARKET", clerk_page(), TODAY)
+        rows[0]["raw_payload"]["signer_lookup"] = {sl.CLERK_KEY: stored}
+        todo = plan_signer_lookups(rows, plan_rows(rows, ev, TODAY), TODAY)
+        self.assertEqual((todo["fetch"], todo["copy"]), ({}, {"h2": stored}))
+
+    def test_failed_lookup_changes_nothing(self):
+        for pages, robots in (({"EXAMPLE MARKET": None}, "# none\n"),
+                              ({"EXAMPLE MARKET": Response("error", 500)}, "# none\n"),
+                              ({"EXAMPLE MARKET": "<html>Just a moment...</html>"}, "# none\n"),
+                              ({"EXAMPLE MARKET": clerk_page()}, None),
+                              ({"EXAMPLE MARKET": clerk_page()}, "User-agent: *\nDisallow: /\n")):
+            rows, ev = self.rows()
+            plan = plan_rows(rows, ev, TODAY)
+            bot, calls = self.bot(pages, robots)
+            looked = bot.signer_lookups(rows, plan)
+            self.assertEqual(looked, {})
+            self.assertEqual([p["patch"].get("signer_lookup") for p in plan_rows(rows, ev, TODAY, looked)], [None, None])
+            if robots is None or "Disallow: /\n" in str(robots):
+                self.assertEqual([c for c in calls if c[0] == "POST"], [])      # nothing is requested past robots.txt
+
+    def test_cap_and_scope(self):
+        ev_for = {}
+        rows = []
+        for n in range(4):
+            owner = f"EXAMPLE {'ABCD'[n]} MARKET INC"
+            rows.append(hamilton_row(owner=owner, rid=f"h{n}"))
+            ev_for[f"h{n}"] = hamilton_evidence(owner)
+        person = hamilton_row(owner="ROE MARK", rid="p1")
+        ev_for["p1"] = hamilton_evidence("ROE MARK")
+        rows.append(person)
+        plan = plan_rows(rows, lambda r: ev_for[r["id"]], TODAY)
+        todo = plan_signer_lookups(rows, plan, TODAY, limit=3)
+        self.assertEqual(len(todo["fetch"]), 3)
+        self.assertNotIn("p1", [i for job in todo["fetch"].values() for i in job["ids"]])
+
+
 class ShelbyTaxCard(unittest.TestCase):
     def test_suit_party_is_a_path_and_the_hold_stays(self):
         row = {"id": "t1", "property_address": "3242 COMMERCIAL, Shelby County, TN", "property_value": 176500,
@@ -267,7 +519,8 @@ class ShelbyTaxCard(unittest.TestCase):
         card = shelby_card(row, status, TODAY, "https://example.test/list.csv")
         self.assertEqual(card["route"], "research_hold")
         self.assertTrue(card["route_reason"].startswith("The owner of record is an entity; no person with authority"))
-        self.assertIn("Path to signer (not verified): WILLIAMS MARION", card["availability"]["verify_next"][0])
+        self.assertIn("Named person worth asking (authority not verified): WILLIAMS MARION",
+                      card["availability"]["verify_next"][0])
 
 
 if __name__ == "__main__":

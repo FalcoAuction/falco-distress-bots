@@ -74,7 +74,7 @@ _SUFFIX_TEXT = {"LLC": r"L\.?\s?L\.?\s?C\.?|Limited\s+Liability\s+Co(?:mpany|\.)
                 "LP": r"L\.?\s?P\.?|Limited\s+Partnership", "LTD": r"Ltd\.?|Limited"}
 _COMPANY_WORD = re.compile(
     r"\b(LLC|L L C|INC|INCORPORATED|CORP|CORPORATION|COMPANY|CO|LP|LLP|LTD|PLLC|PC|TRUST|BANK|N A|NA|FSB|ASSOCIATION|"
-    r"ASSN|ASSOCIATES|SERVICES?|SERVICE CO|AGENTS?|TITLE|HOLDINGS?|PROPERTIES|PROPERTY|INVESTMENTS?|PARTNERS|"
+    r"ASSN|ASSOCIATES|ORGANIZATION|SERVICES?|SERVICE CO|AGENTS?|TITLE|HOLDINGS?|PROPERTIES|PROPERTY|INVESTMENTS?|PARTNERS|"
     r"PARTNERSHIP|GROUP|FOUNDATION|MINISTRIES|CHURCH|MORTGAGE|LENDING|FINANCIAL|CAPITAL|FUND|MANAGEMENT|REALTY|"
     r"ENTERPRISES?|SYSTEMS?|SOLUTIONS|INN|SUITES|HOTEL|APARTMENTS?|HOMES|DEPARTMENT|COUNTY|CITY|STATE|GOVERNMENT|"
     r"AUTHORITY|UNKNOWN|OCCUPANTS?|TENANTS?|HEIRS|ESTATE|USA|AMERICA)\b")
@@ -194,6 +194,11 @@ def _quote(text: str, start: int, end: int) -> str:
     return ("..." if a else "") + text[a:b].strip() + ("..." if b < len(text) else "")
 
 
+def _label(entity: Any) -> str:
+    """The company's name for card wording, without care-of or et al."""
+    return clean_owner_name(entity) or _flat(entity)
+
+
 def finding(*, name: str, role: str, kind: str, src: Optional[Dict[str, Any]], quote: str = "", note: str = "",
             verified: bool = False, ask: str = "") -> Dict[str, Any]:
     """One person or contact. role is the role as the record prints it, ask
@@ -242,7 +247,7 @@ def signers_in_text(text: Any, entity: Any, src: Optional[Dict[str, Any]]) -> Li
             out.append(finding(name=name, role=role, kind="registered_agent", src=src, quote=_quote(flat, a, b),
                                note="A registered agent accepts service for the company; it is not shown to be a member, "
                                     "manager or officer.",
-                               ask=f"Ask {_flat(name)} who the members or managers of {_flat(entity)} are. An agent "
+                               ask=f"Ask {_flat(name)} who the members or managers of {_label(entity)} are. An agent "
                                    "accepts mail and lawsuits and does not sign sale contracts."))
             continue
         out.append(finding(name=name, role=role, kind="signed_for_entity", src=src, quote=_quote(flat, a, b),
@@ -251,7 +256,7 @@ def signers_in_text(text: Any, entity: Any, src: Optional[Dict[str, Any]]) -> Li
                            ask=(f"Confirm with {_flat(name)} that the {role} role is still current, and ask for the "
                                 "operating agreement or resolution that lets them sign a sale contract.") if dated else
                                (f"Find the dated instrument or filing that names {_flat(name)} as {role} of "
-                                f"{_flat(entity)}.")))
+                                f"{_label(entity)}.")))
     if out or pattern.search(flat):
         for g in _GUARANTOR.finditer(flat):
             if is_person_name(g["name"]):
@@ -260,7 +265,7 @@ def signers_in_text(text: Any, entity: Any, src: Optional[Dict[str, Any]]) -> Li
                                    note="A guarantor of the company's loan; the document does not say this person can "
                                         "sign for the company.",
                                    ask=f"Ask {_flat(g['name'])} whether they are a member, manager or officer of "
-                                       f"{_flat(entity)} and who signs its contracts."))
+                                       f"{_label(entity)} and who signs its contracts."))
     return out
 
 
@@ -313,13 +318,13 @@ def mail_paths(entity: Any, lines: Iterable[Tuple[Any, Optional[Dict[str, Any]]]
                     name=who, role=marker, kind="mailing_name", src=src, quote=_flat(line),
                     note=f"Printed on the {marker} of this company's own county tax record. That shows who receives "
                          "the company's mail, not who can sign for it.",
-                    ask=f"Ask {who} what their role is with {_flat(entity)} and who signs contracts for it, then "
+                    ask=f"Ask {who} what their role is with {_label(entity)} and who signs contracts for it, then "
                         "confirm the answer against the company's Secretary of State filing."))
             else:
                 out.append(finding(
                     name=who, role=marker, kind="mailing_business", src=src, quote=_flat(line),
                     note=f"The {marker} names another business or a partial name, not a person with a stated role.",
-                    ask=f"Call {who} and ask who the members or managers of {_flat(entity)} are."))
+                    ask=f"Call {who} and ask who the members or managers of {_label(entity)} are."))
     return out
 
 
@@ -353,8 +358,8 @@ def shared_mailing_paths(entity: Any, mailing: Any, index: Optional[Dict[str, Li
             name=hit["name"], role=f"attention name on {hit['entity']} at the same P.O. box", kind="shared_mailing",
             src=hit["source"] or src, quote=_flat(mailing),
             note=(f"{hit['entity']} uses the same P.O. box and its county mailing line names this person. No record "
-                  f"names this person for {_flat(entity)}; the link is the mailing address only."),
-            ask=(f"Write to the box or ask {hit['name']} who the members or managers of {_flat(entity)} are. Do not "
+                  f"names this person for {_label(entity)}; the link is the mailing address only."),
+            ask=(f"Write to the box or ask {hit['name']} who the members or managers of {_label(entity)} are. Do not "
                  "treat this person as tied to the company until a record of its own names them.")))
     return out
 
@@ -366,7 +371,7 @@ def suit_party_paths(entity: Any, parties: Iterable[Any], src: Optional[Dict[str
                     note="Named for service beside the company; the publication does not state the relationship "
                          "(officer, prior owner and lienholder are all possible).",
                     ask=f"Read the tax suit complaint for how {_flat(p)} is described, or ask them what their "
-                        f"relationship to {_flat(entity)} is.")
+                        f"relationship to {_label(entity)} is.")
             for p in parties or [] if p and not same_entity(p, entity) and is_person_name(p)]
 
 
@@ -431,17 +436,17 @@ def license_paths(entity: Any, lookup: Any, addresses: Iterable[Any] = ()) -> Li
                 quote=f"{business}; Owner: {owner}",
                 note="The county business license in the company's exact name prints this person as owner. The "
                      "license does not say member, manager or officer.",
-                ask=f"Ask {owner} whether they are a member or manager of {_flat(entity)} and can sign a sale "
+                ask=f"Ask {owner} whether they are a member or manager of {_label(entity)} and can sign a sale "
                     "contract, then confirm against the company's Secretary of State filing."))
         elif (base_key(business) == base_key(entity) and (entity_type(business) is None) != (entity_type(entity) is None)
               and street_key(rec.get("business_address")) in here):
             out.append(finding(
                 name=owner, role=f"Owner on a business license for {business} at the same address ({state}{closed})",
                 kind="license_address", src=src, quote=f"{business}, {_flat(rec.get('business_address'))}; Owner: {owner}",
-                note=f"The license is in the name {business}, which differs from {_flat(entity)} by the entity type, "
+                note=f"The license is in the name {business}, which differs from {_label(entity)} by the entity type, "
                      "at the company's street address. It is not shown to be the same company; the link is the "
                      "name and the address.",
-                ask=f"Ask {owner} whether {business} was operated by {_flat(entity)} and who its members or "
+                ask=f"Ask {owner} whether {business} was operated by {_label(entity)} and who its members or "
                     "managers are."))
     return out
 

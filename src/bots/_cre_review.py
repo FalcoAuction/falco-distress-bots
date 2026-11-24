@@ -41,6 +41,7 @@ REVIEWER = "cre_review_bot"
 SOS_URL = "https://sos.tn.gov/businesses/services"
 SOS_PATH = f"Signer path: SOS registered agent lookup for the owning entity ({SOS_URL})"
 LISTING_CHECK = "Listing status not verified; check LoopNet/Crexi manually"
+COMPANY_HOLD = "The owner of record is a company"      # how the signer hold reason for a company owner starts
 HAMILTON_TRUSTEE_URL = "https://www.hamiltontn.gov/_downloadsTrusteeDelinquent/CTRUDELQCSV.zip"
 HAMILTON_ASSESSOR_URL = "https://www.hamiltontn.gov/_downloadsAssessor/AssessorExportCSV.zip"
 HAMILTON_SALE_LIST_URL = ("https://www.hamiltontn.gov/Clerkmasterforms/taxsale/{year}TaxSale/"

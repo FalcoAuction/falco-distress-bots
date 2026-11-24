@@ -11,7 +11,8 @@ Hamilton County Clerk business license search
     Address"). Free, no login, no CAPTCHA, no terms gate. robots.txt
     carries no Disallow rule (read 2026-11-23); the bot reads it again on
     every run and skips the lookup if that changes. One request per
-    company, REQUEST_GAP seconds apart, at most MAX_PER_RUN a run.
+    company, REQUEST_GAP seconds apart, at most MAX_PER_RUN a run, sent
+    with the shared agent in _base.py (FALCO-research/1.0 (+falco.llc)).
     A record prints the business name and address, start and close dates,
     status, and for many accounts an owner name and address.
 
@@ -28,7 +29,6 @@ from typing import Any, Dict, List, Optional
 
 from ._entity_signer import base_key, clean_owner_name, entity_key
 
-USER_AGENT = "FALCO-research/1.0 (+falco.llc)"
 CLERK_KEY = "hamilton_county_clerk"
 CLERK_URL = "http://tncountyclerk.com/hamilton/public/index.php"
 CLERK_ROBOTS = "http://tncountyclerk.com/robots.txt"
@@ -69,11 +69,6 @@ def clerk_query(entity: Any) -> Optional[str]:
     site matches a substring of the business name."""
     name = _SUFFIX.sub("", clean_owner_name(entity)).strip(" ,.")
     name = re.sub(r"\s*-\s*", " ", name)
-    if "&" in name:
-        parts = [p.strip() for p in name.split("&")]
-        longest = max(parts, key=len)
-        if len(longest) >= 6:
-            name = longest
     name = re.sub(r"\s+", " ", name).strip()
     return name if len(name) >= 3 else None
 
