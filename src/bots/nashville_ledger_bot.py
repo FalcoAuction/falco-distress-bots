@@ -28,6 +28,12 @@ counties TPAD doesn't cover). Plus the structured fields are cleaner
 than what we extract from base64-encoded PDFs in foreclosure_tennessee_bot.
 
 Distress type: PRE_FORECLOSURE
+
+STOPPED 2026-11-24. tnledger.com/robots.txt disallows every path for all
+crawlers, so this bot no longer makes any request and is off the schedule
+(see _source_access.STOPPED and _run_new.py). Rows already staged keep their
+evidence and publication dates. The parsers stay for a licensed or permitted
+copy of the notices, and tn_public_notice reuses the patterns.
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from typing import Dict, List, Optional
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload
+from ._source_access import stopped
 
 
 LEDGER_BASE = "https://www.tnledger.com"
@@ -143,7 +150,14 @@ class NashvilleLedgerBot(BotBase):
     # How many recent Friday publications to walk
     weeks_to_scan = 4
 
+    def fetch(self, url, method="GET", timeout=30.0, **kwargs):
+        if stopped(self.name):
+            return None     # no request leaves while the source is stopped
+        return super().fetch(url, method=method, timeout=timeout, **kwargs)
+
     def scrape(self) -> List[LeadPayload]:
+        if stopped(self.name):
+            return []
         leads: List[LeadPayload] = []
         seen_ids: set[str] = set()
 
@@ -389,6 +403,11 @@ class NashvilleLedgerBot(BotBase):
 
 
 def run() -> dict:
+    halt = stopped(NashvilleLedgerBot.name)
+    if halt:
+        # No run, no health row: a stopped source is not a failing one.
+        return {"name": NashvilleLedgerBot.name, "status": "source_stopped", "stopped_on": halt["stopped_on"],
+                "fetched": 0, "staged": 0, "duplicates": 0, "error": None}
     bot = NashvilleLedgerBot()
     return bot.run()
 

@@ -115,6 +115,7 @@ from . import phone_resolver_bot
 from . import davidson_tax_stack_bot
 from . import property_lane_bot
 from . import cre_review_bot
+from . import pretrace_check_bot
 from . import stacked_distress_aggregator_bot
 from . import faa_aircraft_bot
 from . import ffl_overlay_bot
@@ -175,7 +176,8 @@ NEW_BOTS = [
     ("knoxville_poh", knoxville_poh_bot.run),
     ("tn_tax_delinquent", tn_tax_delinquent_bot.run),
     ("hamilton_tax_delinquent", hamilton_tax_delinquent_bot.run),
-    ("nashville_ledger", nashville_ledger_bot.run),
+    # nashville_ledger stopped 2026-11-24: tnledger.com/robots.txt disallows
+    # all crawling (see _source_access.STOPPED). Staged rows are kept.
     ("memphis_daily_news", memphis_daily_news_bot.run),
     ("memphis_trustee_calendar", memphis_trustee_calendar.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
@@ -317,6 +319,10 @@ NEW_BOTS = [
     # Commercial review cards: parcel, owner entity, signer path, distress tie
     # on the building owner's parcel. Reads the lane tags written just above.
     ("cre_review", cre_review_bot.run),
+    # Final check before paid trace, after every lane review has written
+    # today's cards. Reads only; stores raw_payload.pretrace_check beside the
+    # card only when PRETRACE_CHECK_WRITE=1.
+    ("pretrace_check", pretrace_check_bot.run),
     ("stacked_distress_aggregator", stacked_distress_aggregator_bot.run),
     # Owner holds a TN aircraft worth ~$100K+ (free FAA registry zip).
     ("faa_aircraft", faa_aircraft_bot.run),

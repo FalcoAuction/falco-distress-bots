@@ -1,9 +1,17 @@
-"""Court notices from The Nashville Ledger and Memphis Daily News.
+"""Court notices from the Memphis Daily News, and Cheatham tax sale tracts
+from the County Trustee's posted notice.
 
-Both papers (The Daily News Publishing Co.) print every court notice in full
-on their Notices.aspx edition pages. That includes the probate notices to
-creditors that tnpublicnotice.com only shows as truncated excerpts, with the
-full text behind a CAPTCHA this bot does not touch.
+The Memphis Daily News prints every court notice in full on its daily
+/notices/YYYY/Mon/D/ index page, which its robots.txt allows. That includes
+the probate notices to creditors that tnpublicnotice.com only shows as
+truncated excerpts, with the full text behind a CAPTCHA this bot does not
+touch.
+
+The Nashville Ledger (tnledger.com, same publisher) was read here until
+2026-11-24. Its robots.txt disallows every path, so it is no longer fetched
+(see _source_access.STOPPED). Rows staged from it stay as they are, with
+their publication dates. New Davidson and Middle Tennessee court notices are
+a coverage gap until a permitted source exists.
 
 From each probate notice we stage a PROBATE lead with the decedent as
 full_name and the court's county, which is exactly what
@@ -15,13 +23,13 @@ printed) and the estate's attorney (with office address where printed).
 Partition suits and court-ordered sales are staged as COURT_SALE: a direct
 "this asset will be sold" signal for the any-asset auction lanes.
 
-Coverage: the Ledger's Friday edition carries Middle Tennessee court notices
-(Davidson plus surrounding counties); the Memphis Daily News carries Shelby
-and West Tennessee. The Hamilton County Herald uses a different layout and
-is not covered here.
+Cheatham County delinquent tax sale tracts used to be read from the Ledger's
+copy of the court's notice. They now come from the same notice as the County
+Trustee posts it (cheathamcountytrustee.gov, the PDF cheatham_tax_sale already
+reads). A case whose tracts are already staged is left to cheatham_tax_sale.
 
-Lead key is county + docket, so the same estate republished across weeks or
-in both papers stages once.
+Lead key is county + docket, so the same estate republished across weeks
+stages once.
 """
 
 from __future__ import annotations
@@ -36,12 +44,20 @@ from ._probate_staging import ProbateNoticeBot, remember_notice
 from . import _court_notices as cn
 from ._court_order import PARTITION_ACTION_RE
 
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
 PUBLICATIONS: List[Dict[str, Any]] = [
-    # The Ledger publishes notices weekly, on Fridays.
-    {"key": "nashville_ledger", "base": "https://www.tnledger.com", "weekdays": {4}, "lookback_days": 21},
-    # The Memphis Daily News publishes notices on weekdays.
-    {"key": "memphis_daily_news", "base": "https://www.memphisdailynews.com", "weekdays": {0, 1, 2, 3, 4}, "lookback_days": 10},
+    # The Memphis Daily News publishes notices on weekdays. Only the
+    # /notices/ index is read: robots.txt (2026-11-24) allows it and
+    # disallows /Notices.aspx and /Search/Details/.
+    {"key": "memphis_daily_news", "base": "https://www.memphisdailynews.com", "weekdays": {0, 1, 2, 3, 4},
+     "lookback_days": 10, "edition_path": "/notices/{year}/{month}/{day}/"},
 ]
+# tnledger.com is not listed: see _source_access.STOPPED["court_notices:nashville_ledger"].
+
+
+def edition_url(pub: Dict[str, Any], d: date) -> str:
+    return pub["base"] + pub["edition_path"].format(year=d.year, month=MONTHS[d.month - 1], day=d.day)
 
 
 def edition_dates(today: date, weekdays: Iterable[int], lookback_days: int) -> List[date]:
@@ -166,14 +182,65 @@ def cheatham_tax_tracts(row, pub_date, today):
     return leads
 
 
+def cheatham_trustee_tracts(notice, today, staged_dockets):
+    """Tracts from the County Trustee's posted sale notice (as parsed by
+    cheatham_tax_sale_bot.read_notice), for a case not staged yet. Same
+    record shape as the tracts once read from the newspaper copy."""
+    if not notice or str(notice["docket"]) in {str(d) for d in staged_dockets}:
+        return []
+    if notice["sale_date"] < today.isoformat():
+        return []
+    leads = []
+    for tract in notice["tracts"]:
+        location, owners = tract.get("location"), tract.get("owners") or ""
+        leads.append(LeadPayload(
+            bot_source="court_notices", county="cheatham", distress_type="TAX_LIEN",
+            pipeline_lead_key=BotBase.make_lead_key("cheatham_tax", f"{notice['docket']}|trustee_notice|{tract['letter']}"),
+            property_address=location if location and re.match(r"\d+\s", location) else None,
+            owner_name_records=None if not owners or owners.lower().startswith("unknown") else owners,
+            trustee_sale_date=notice["sale_date"],
+            source_url=notice["source_url"],
+            raw_payload={"kind": "cheatham_tax_sale", "docket": notice["docket"], "notice_id": "trustee_notice",
+                         "tract": tract["letter"], "parcel_printed": tract["parcel_printed"],
+                         "location_printed": location, "owners_printed": owners,
+                         "published_judgment": tract["amount"], "publication": "cheatham_county_trustee",
+                         "notice_sha256": notice["sha256"],
+                         "publication_date": notice.get("document_date") or today.isoformat()},
+        ))
+    return leads
+
+
 class CourtNoticesBot(ProbateNoticeBot):
     name = "court_notices"
-    description = "Probate and court-ordered-sale notices from the Nashville Ledger and Memphis Daily News"
+    description = ("Probate and court-ordered-sale notices from the Memphis Daily News; "
+                   "Cheatham tax sale tracts from the County Trustee's posted notice")
     throttle_seconds = 1.5
     expected_min_yield = 1
-    # Weekly Ledger editions repeat for two weeks and estates rarely change,
-    # so identical output across a few runs is normal; flag only a long freeze.
+    # Estates rarely change, so identical output across a few runs is normal;
+    # flag only a long freeze.
     frozen_after_runs = 10
+
+    def _cheatham(self, today: date) -> List[LeadPayload]:
+        """New-case tracts from the Trustee's posted notice. An unreadable
+        notice or an unreachable staging table stages nothing."""
+        from ._base import _supabase
+        from .cheatham_tax_sale_bot import NOTICE, read_notice
+        client = _supabase()
+        if client is None:
+            return []
+        res = self.fetch(NOTICE)
+        if res is None or res.status_code != 200 or not res.content.startswith(b"%PDF"):
+            self.logger.warning("Cheatham Trustee notice not read; no tracts staged from it this run")
+            return []
+        try:
+            notice = read_notice(res.content)
+            staged = (client.table("homeowner_requests_staging").select("docket:raw_payload->>docket")
+                      .eq("bot_source", "court_notices").eq("county", "cheatham").eq("distress_type", "TAX_LIEN")
+                      .eq("raw_payload->>kind", "cheatham_tax_sale").limit(1000).execute().data or [])
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("Cheatham Trustee notice not usable (%s)", type(exc).__name__)
+            return []
+        return cheatham_trustee_tracts(notice, today, {r.get("docket") for r in staged})
 
     def scrape(self) -> List[LeadPayload]:
         today = datetime.now(timezone.utc).date()
@@ -181,8 +248,8 @@ class CourtNoticesBot(ProbateNoticeBot):
         empty_editions: List[str] = []
         for pub in PUBLICATIONS:
             for d in edition_dates(today, pub["weekdays"], pub["lookback_days"]):
-                res = self.fetch(f"{pub['base']}/Notices.aspx",
-                                 params={"noticesDate": f"{d.month}/{d.day}/{d.year}"})
+                url = edition_url(pub, d)
+                res = self.fetch(url)
                 if res is None or res.status_code != 200:
                     self.logger.warning(f"{pub['key']} {d}: fetch failed")
                     continue
@@ -191,22 +258,19 @@ class CourtNoticesBot(ProbateNoticeBot):
                     empty_editions.append(f"{pub['key']} {d}")
                     continue
                 for row in rows:
-                    if pub["key"] == "nashville_ledger":
-                        tracts = cheatham_tax_tracts(row, d, today)
-                        if tracts:
-                            for tract in tracts:
-                                leads.setdefault(tract.pipeline_lead_key, tract)
-                            continue
-                    lead = build_lead(self.name, pub["key"], pub["base"], d, row)
+                    # The edition page is the page that was read, so it is the source.
+                    lead = build_lead(self.name, pub["key"], pub["base"], d, row, source_url=url)
                     if lead:
                         remember_notice(leads, lead)
+        for tract in self._cheatham(today):
+            leads.setdefault(tract.pipeline_lead_key, tract)
         if empty_editions:
             # A publication day with no court grid at all is either a quiet day
             # or a layout change; the frozen/zero-yield health checks catch a
             # persistent one.
             self.logger.info(f"editions without a court grid: {', '.join(empty_editions)}")
         probate = sum(1 for l in leads.values() if l.distress_type == "PROBATE")
-        self.logger.info(f"{probate} probate + {len(leads) - probate} court-sale notices")
+        self.logger.info(f"{probate} probate + {len(leads) - probate} court-sale and tax notices")
         return list(leads.values())
 
 
