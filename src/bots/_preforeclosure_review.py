@@ -29,6 +29,7 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
+from ._value_guard import unverified_label
 from ._pilot_review import _ENTITY, _SUFFIX, build_review, debt, source
 from ._shelby_register import detail_url
 from ._shelby_trustee_value import parcel_key, street_key
@@ -425,7 +426,12 @@ def _value(row: Dict[str, Any], evidence: Optional[Dict[str, Any]], checked: Opt
         basis, estimate = VALUE_BASIS.get(row.get("property_value_source") or "",
                                           (f"Value from {row.get('property_value_source') or 'an unnamed source'}. "
                                            "Basis not documented, treat as an estimate", True))
-        return {"value": float(row["property_value"]), "value_basis": basis, "value_is_estimate": estimate,
+        # No parcel record on the row backs this number: say so on the card.
+        label = unverified_label({**row, "raw_payload": {**(row.get("raw") or {}),
+                                                         "comptroller_parcel": row.get("comptroller")},
+                                  "phone_metadata": {"shelby_trustee_value_review": row.get("trustee_review")}})
+        return {"value": float(row["property_value"]), "value_basis": f"{label}. {basis}" if label else basis,
+                "value_is_estimate": bool(estimate or label),
                 "value_source": source(f"Staging value, source {row.get('property_value_source') or 'unknown'}",
                                        None, checked)}
     return {"value": None, "value_basis": None, "value_is_estimate": False, "value_source": None}

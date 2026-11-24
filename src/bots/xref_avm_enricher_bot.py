@@ -5,16 +5,17 @@ property having an AVM in another lead (e.g., a memphis_codes row at
 "123 Main St" with no AVM, while a memphis_daily_news row at the same
 "123 Main St" has shelby_arcgis data with AVM filled).
 
-This enricher walks the corpus, normalizes addresses, and for each
-group of rows sharing the same address propagates AVM (and optionally
-owner data) from the row that has it to the rows that don't. Strictly
-free — no external API calls.
+Rule since 2026-11-24: a value belongs to a parcel, not to a street. An
+unvalued row is filled only (1) from a county parcel record already on the
+row itself, or (2) from another row that holds the same exact parcel number
+in the same county, with the same unit, a stated basis and an observation
+date (see _value_guard). A street address alone never moves a value: two
+parcels can share one street (3911 Windyke, Shelby, 2026-11). Strictly
+free, no external API calls.
 
 Distress type: N/A (utility enricher).
 
-Confidence: 0.9 — when source row has high-confidence AVM (from a
-county assessor), the destination row gets it via address-match.
-Match key: normalized property_address.
+Match key: county + exact parcel number.
 """
 from __future__ import annotations
 
@@ -27,8 +28,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
 from .hamilton_assessor_bot import tax_roll_parcel
-from ._field_confidence import deep_merge_dict, property_value_trust
+from ._field_confidence import deep_merge_dict
 from ._provenance import record_field
+from ._value_guard import (XREF_EXACT, XREF_KEY, XREF_SOURCE, copy_decision, norm_county, own_parcel_value,
+                           row_parcels)
 
 
 def _normalize_address(addr: str) -> str:
@@ -72,14 +75,73 @@ def _normalize_address(addr: str) -> str:
 
 
 def _norm_county(county: Optional[str]) -> str:
+    return norm_county(county)
+
+
+def plan_fill(table: str, row: Dict[str, Any], rows: List[Tuple[str, Dict[str, Any]]],
+              by_parcel: Dict[Tuple[str, str], List[int]]) -> Optional[Dict[str, Any]]:
+    """What to write to one unvalued row, or None when there is nothing to
+    consider. {"refused": reason} when a same-parcel candidate exists but the
+    evidence is incomplete.
+
+    Order: the row's own parcel record first (the value then keeps its real
+    source, e.g. comptroller); otherwise a copy from another row that proves
+    the same parcel, same county, same unit, with a basis and a date.
+    """
+    meta = row.get("phone_metadata") if isinstance(row.get("phone_metadata"), dict) else {}
+    own = own_parcel_value(row)
+    if own:
+        return {"update": {"property_value": int(round(own["value"])), "property_value_source": own["source"],
+                           "property_value_as_of": own["observed_on"]},
+                "proof": {"match": "own_parcel_record", "parcel": own["parcel"], "county": own["county"],
+                          "basis": own["basis"], "observed_on": own["observed_on"]}}
+    county = norm_county(row.get("county"))
     if not county:
-        return ""
-    return re.sub(r"\s+county$", "", str(county).strip().lower())
+        return None
+    seen = set()
+    donors: List[Tuple[str, Dict[str, Any]]] = []
+    for form in sorted(row_parcels(row)):
+        for n in by_parcel.get((county, form), ()):
+            d_table, donor = rows[n]
+            if n in seen or donor.get("id") == row.get("id") or not donor.get("property_value"):
+                continue
+            seen.add(n)
+            donors.append((d_table, donor))
+    if not donors:
+        return None
+    reason = None
+    best = None
+    for d_table, donor in donors:
+        decision = copy_decision(donor, row)
+        if not decision["ok"]:
+            reason = reason or decision["reason"]
+            continue
+        key = (decision["observed_on"], str(donor.get("id")))
+        if best is None or key > best[0]:
+            best = (key, d_table, donor, decision)
+    if best is None:
+        return {"refused": reason}
+    _, d_table, donor, decision = best
+    proof = {"source": XREF_SOURCE, "match": XREF_EXACT, "parcel": decision["parcel"],
+             "county": decision["county"], "basis": decision["basis"], "basis_source": decision["basis_source"],
+             "observed_on": decision["observed_on"], "confidence": 0.8,
+             "donor_table": d_table, "donor_id": donor.get("id"),
+             "note": "Same county parcel as the donor record; the value is that parcel's."}
+    update: Dict[str, Any] = {
+        "property_value": int(round(decision["value"])),
+        # The source stays the county record the value was read from.
+        "property_value_source": decision["basis_source"],
+        "property_value_as_of": decision["observed_on"],
+        "phone_metadata": deep_merge_dict(meta, {XREF_KEY: proof}),
+    }
+    if not row.get("owner_name_records") and donor.get("owner_name_records"):
+        update["owner_name_records"] = donor["owner_name_records"]
+    return {"update": update, "proof": proof}
 
 
 class XrefAvmEnricherBot(BotBase):
     name = "xref_avm_enricher"
-    description = "Propagate AVM across leads sharing the same property_address"
+    description = "Fill a missing value from the same exact county parcel (never by street address)"
     throttle_seconds = 0.0
     expected_min_yield = 1
     max_leads_per_run = 5000
@@ -110,89 +172,52 @@ class XrefAvmEnricherBot(BotBase):
         error_message: Optional[str] = None
 
         try:
-            # Build address → [rows] map across BOTH tables.
-            # Strategy: rows missing AVM get filled from rows with AVM at
-            # the same normalized address.
-            by_addr: Dict[str, List[Tuple[str, Dict[str, Any]]]] = defaultdict(list)
+            # Index every row under each parcel number it holds. A street
+            # address is never a key: two parcels can share one street.
+            rows: List[Tuple[str, Dict[str, Any]]] = []
+            by_parcel: Dict[Tuple[str, str], List[int]] = defaultdict(list)
             for table in ("homeowner_requests_staging", "homeowner_requests"):
-                rows = self._fetch_all(client, table)
-                self.logger.info(f"{table}: {len(rows)} rows fetched")
-                for r in rows:
+                fetched = self._fetch_all(client, table)
+                self.logger.info(f"{table}: {len(fetched)} rows fetched")
+                for r in fetched:
                     if tax_roll_parcel(r.get("raw_payload")):
                         continue  # Hamilton roll valuations use the assessor parcel ID.
-                    addr = r.get("property_address")
-                    norm = _normalize_address(addr or "")
-                    if not norm:
-                        continue
-                    by_addr[norm].append((table, r))
+                    rows.append((table, r))
+                    county = norm_county(r.get("county"))
+                    for form in (row_parcels(r) if county else ()):
+                        by_parcel[(county, form)].append(len(rows) - 1)
 
-            # For each address group, find a donor (row with AVM) and
-            # propagate to recipients (rows without).
-            for norm_addr, group in by_addr.items():
-                if len(group) < 2:
-                    continue  # No cross-ref opportunity
-                donors = [(t, r) for t, r in group if r.get("property_value")]
-                recipients = [(t, r) for t, r in group if not r.get("property_value")]
-                if not donors or not recipients:
+            for rcpt_table, rcpt_row in rows:
+                if rcpt_row.get("property_value"):
                     continue
-                donors.sort(key=lambda item: property_value_trust(item[1]).confidence, reverse=True)
-                donor_table, donor_row = donors[0]
-                donor_avm = donor_row.get("property_value")
-                donor_owner = donor_row.get("owner_name_records")
-                donor_county = donor_row.get("county")
-
-                for rcpt_table, rcpt_row in recipients:
-                    rcpt_county = rcpt_row.get("county")
-                    if donor_county and rcpt_county and _norm_county(donor_county) != _norm_county(rcpt_county):
+                patch = plan_fill(rcpt_table, rcpt_row, rows, by_parcel)
+                if patch is None:
+                    continue
+                if patch.get("refused"):
+                    skipped += 1
+                    continue
+                update = patch["update"]
+                if "owner_name_records" in update:
+                    owner_propagated += 1
+                try:
+                    q = client.table(rcpt_table).update(update).eq("id", rcpt_row["id"])
+                    # Fill a gap only: refuse the write if a value landed meanwhile.
+                    written = q.is_("property_value", "null").execute()
+                    if not (getattr(written, "data", None) or []):
                         skipped += 1
                         continue
-                    confidence = 0.65 if donor_county and rcpt_county else 0.55
-                    update: Dict[str, Any] = {
-                        "property_value": donor_avm,
-                        "property_value_source": "xref_avm_enricher",
-                    }
-                    # Also propagate owner_name + county if missing
-                    if not rcpt_row.get("owner_name_records") and donor_owner:
-                        update["owner_name_records"] = donor_owner
-                        owner_propagated += 1
-                    if not rcpt_row.get("county") and donor_county:
-                        update["county"] = donor_county
-                    existing_meta = rcpt_row.get("phone_metadata") or {}
-                    if not isinstance(existing_meta, dict):
-                        existing_meta = {}
-                    update["phone_metadata"] = deep_merge_dict(existing_meta, {
-                        "property_value_xref": {
-                            "source": "xref_avm_enricher",
-                            "confidence": confidence,
-                            "donor_table": donor_table,
-                            "donor_id": donor_row.get("id"),
-                            "matched_address": norm_addr[:80],
-                            "note": "Address/county cross-reference; verify parcel before seller-facing math.",
-                        }
-                    })
-
-                    try:
-                        client.table(rcpt_table).update(update).eq(
-                            "id", rcpt_row["id"]
-                        ).execute()
-                        propagated += 1
-                        # Provenance for the live table
-                        if rcpt_table == "homeowner_requests":
-                            record_field(
-                                client, rcpt_row["id"], "property_value",
-                                donor_avm, "xref_avm_enricher",
-                                confidence=confidence,
-                                metadata={
-                                    "donor_table": donor_table,
-                                    "donor_id": donor_row.get("id"),
-                                    "matched_address": norm_addr[:80],
-                                },
-                            )
-                    except Exception as e:
-                        self.logger.warning(
-                            f"  update failed id={rcpt_row['id']}: {e}"
+                    propagated += 1
+                    if rcpt_table == "homeowner_requests":
+                        record_field(
+                            client, rcpt_row["id"], "property_value",
+                            update["property_value"], update["property_value_source"],
+                            confidence=0.8, metadata=patch["proof"],
                         )
-                        skipped += 1
+                except Exception as e:
+                    self.logger.warning(
+                        f"  update failed id={rcpt_row['id']}: {e}"
+                    )
+                    skipped += 1
 
         except Exception as e:
             error_message = f"{type(e).__name__}: {e}\n{tb.format_exc()}"
@@ -235,7 +260,7 @@ class XrefAvmEnricherBot(BotBase):
                 r = client.table(table).select(
                     "id, property_address, property_value, "
                     "owner_name_records, county, property_value_source, "
-                    "raw_payload, phone_metadata"
+                    "property_value_as_of, raw_payload, phone_metadata"
                 ).order("id").range(
                     page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1
                 ).execute()
