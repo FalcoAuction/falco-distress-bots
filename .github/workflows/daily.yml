@@ -35,6 +35,8 @@ jobs:
       # Rubin Lublin sale list recheck for Memphis notices. Patrick accepted
       # the firm's listing terms on 2026-11-23. One GET per run.
       RUBIN_LUBLIN_LIST_ENABLED: "1"
+      # Final check before paid trace stores its result beside each card.
+      PRETRACE_CHECK_WRITE: "1"
 
       # ===== CourtListener (free account token) =====
       # Bankruptcy search, Schedule D reader and debtor-attorney lookup. Without
