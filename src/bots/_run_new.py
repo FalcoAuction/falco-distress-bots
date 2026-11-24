@@ -395,6 +395,7 @@ QUICK_REVIEW_BOTS = {
     "land_review",
     "preforeclosure_review",
     "cre_review",
+    "pretrace_check",
 }
 QUICK_REVIEW_CAP = 120
 

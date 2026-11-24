@@ -200,7 +200,7 @@ class RunPipelineTests(unittest.TestCase):
 
     def test_shipped_quick_review_list(self):
         self.assertEqual(_run_new.QUICK_REVIEW_BOTS,
-                         {"cheatham_tax_sale", "land_review", "preforeclosure_review", "cre_review"})
+                         {"cheatham_tax_sale", "land_review", "preforeclosure_review", "cre_review", "pretrace_check"})
         self.assertTrue(_run_new.QUICK_REVIEW_BOTS.isdisjoint(_run_new.CRITICAL_BOTS))
         self.assertTrue(_run_new.QUICK_REVIEW_BOTS <= {n for n, _ in _run_new.NEW_BOTS})
 

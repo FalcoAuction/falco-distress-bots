@@ -57,7 +57,7 @@ RAW_KEYS = ("property_lane", "parcel", "owner_name_1", "owner_name_2", "structur
             "signer_lookup")
 SLIM = ("id,bot_source,distress_type,trustee_sale_date,staging_status,"
         "grade:raw_payload->property_lane->>grade,exclude:raw_payload->property_lane->>exclude_reason")
-FULL = ("id,bot_source,distress_type,county,property_address,full_name,owner_name_records,property_value,"
+FULL = ("id,bot_source,pipeline_lead_key,staged_at,distress_type,county,property_address,full_name,owner_name_records,property_value,"
         "property_value_source,trustee_sale_date,source_url,staging_status,"
         "notice_tracking:phone_metadata->notice_tracking,"
         + ",".join(f"rp_{k}:raw_payload->{k}" for k in RAW_KEYS))
@@ -134,6 +134,22 @@ def plan_signer_lookups(rows: List[Dict[str, Any]], plan: List[Dict[str, Any]], 
     return out
 
 
+def earlier_copies(rows: List[Dict[str, Any]]) -> Dict[str, str]:
+    """{row id: id of the earliest staged copy} for every later copy of the
+    same filing (same bot_source and pipeline_lead_key, not rejected)."""
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for row in rows:
+        if row.get("pipeline_lead_key") and row.get("staging_status") != "rejected":
+            groups.setdefault((row.get("bot_source"), row["pipeline_lead_key"]), []).append(row)
+    out: Dict[str, str] = {}
+    for copies in groups.values():
+        if len(copies) > 1:
+            copies.sort(key=lambda r: (r.get("staged_at") or "", r["id"]))
+            for later in copies[1:]:
+                out[later["id"]] = copies[0]["id"]
+    return out
+
+
 def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date,
               new_lookups: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Cards to write. evidence_for(row) returns the Hamilton evidence dict or
@@ -148,11 +164,17 @@ def plan_rows(rows: List[Dict[str, Any]], evidence_for, today: date,
     # Attention and care-of names per P.O. box, so a company with no name on its
     # own mailing line still gets the labeled path its sister company carries.
     boxes = mailing_index_for(rows, evidence_for)
+    earlier = earlier_copies(rows)
     for row in rows:
         got = review_row(row, evidence_for(row), today, boxes)
         if not got:
             continue
         card, facts = got
+        if row["id"] in earlier and card.get("route") != "removed":
+            # The ranking keeps one record per filing; the card says the same.
+            card = {**card, "route": "removed",
+                    "route_reason": (f"Duplicate of staging record {earlier[row['id']]}: the same filing is staged twice "
+                                     "and the earlier record carries the lead.")}
         raw = row.get("raw_payload") or {}
         existing = raw.get("pilot_review")
         final = merge_review(existing, card)

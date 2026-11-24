@@ -21,7 +21,7 @@ class MemphisCountyValueBot(BotBase):
         self.session.mount(HOST + "/", LegacyTLSAdapter(max_retries=0))
 
     def _candidates(self, client):
-        today = date.today()
+        today = datetime.now(timezone.utc).date()  # sightings are stamped in UTC
         rows = (client.table("homeowner_requests_staging")
                 .select("id,bot_source,pipeline_lead_key,property_address,county,staging_status,property_value,trustee_sale_date,raw_payload,phone_metadata")
                 .eq("bot_source", "memphis_daily_news").eq("county", "shelby")
@@ -96,7 +96,7 @@ class MemphisCountyValueBot(BotBase):
                     break
                 counts["attempted"] += 1
                 try:
-                    evidence = lookup(self, row)
+                    evidence = lookup(self, row, datetime.now(timezone.utc).date())
                     if self._persist(client, row, evidence):
                         counts["valued" if evidence["status"] == "verified_assessment" else "held"] += 1
                     else:
