@@ -47,10 +47,12 @@ import traceback as tb
 import zipfile
 from collections import ChainMap, defaultdict
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
 from ._provenance import record_field
+from ._value_guard import require_value_evidence
 from . import _hamilton_herald_assessor as herald
 
 
@@ -126,6 +128,15 @@ def tax_roll_parcel(raw):
     if str(raw.get("county") or "").lower() == "hamilton" and "cumulative_owed" in raw:
         return raw.get("parcel")
     return None
+
+
+def file_day(stamp, today=None):
+    """Observation date of the county export: its Last-Modified day when the
+    server sent one, else the day it was downloaded."""
+    try:
+        return parsedate_to_datetime(str(stamp)).date().isoformat()
+    except (TypeError, ValueError):
+        return (today or datetime.now(timezone.utc).date()).isoformat()
 
 
 def may_update_roll_value(source):
@@ -204,7 +215,14 @@ class HamiltonAssessorBot(BotBase):
                 error_message = f"Herald appraisal review incomplete: {type(exc).__name__}"
             candidates = self._candidates(client)
             self.logger.info(f"{len(candidates)} Hamilton candidates to enrich")
-            for row in candidates[:self.max_leads_per_run]:
+            observed_on = file_day(getattr(self, "county_file_stamp", None), started.date())
+            for row in candidates:
+                # The cap counts writes, not rows read. Capping the rows read
+                # (5,000 of 7,700 on 2026-11-23) left every lead past the cut
+                # unvalued on every run, because already-current rows at the
+                # front of the list used up the allowance.
+                if enriched >= self.max_leads_per_run:
+                    break
                 # Personal-property tax leads carry the address of the building a
                 # business rents in; attaching that parcel would hand a tenant
                 # the landlord's land use, value and mailing.
@@ -224,7 +242,8 @@ class HamiltonAssessorBot(BotBase):
                     street = str(row.get("property_address") or "").split(",")[0].strip().upper()
                     hit = None if street in ambiguous_addresses else index.get(addr_index.get(street))
                 else:
-                    hit = roll_index.get("".join(roll_key.split())) if roll_key else self._lookup(row, index, addr_index)
+                    hit = (roll_index.get("".join(roll_key.split())) if roll_key
+                           else self._lookup(row, index, addr_index, ambiguous_addresses))
                 if hit is None:
                     no_match += 1
                     continue
@@ -239,17 +258,30 @@ class HamiltonAssessorBot(BotBase):
                           float(row["property_value"]) != float(hit["appraised"])))):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "hamilton_assessor"
+                    # Exact parcel, same county, same unit, dated: or no value.
+                    require_value_evidence(update, row, parcel=hit.get("parcel"), county="hamilton",
+                                           observed_on=observed_on, record_address=hit.get("property_address"))
+                elif (hit.get("appraised") and row.get("property_value_source") == "hamilton_assessor"
+                      and not row.get("property_value_as_of")
+                      and float(row.get("property_value") or 0) == float(hit["appraised"])):
+                    # Same value on today's export: record when it was seen.
+                    stamp = {"property_value": row["property_value"], "property_value_source": "hamilton_assessor"}
+                    if require_value_evidence(stamp, row, parcel=hit.get("parcel"), county="hamilton",
+                                              observed_on=observed_on,
+                                              record_address=hit.get("property_address")) is None:
+                        update["property_value_as_of"] = stamp["property_value_as_of"]
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
                 existing_raw = row.get("raw_payload") or {}
                 if not isinstance(existing_raw, dict):
                     existing_raw = {}
-                if existing_raw.get("hamilton_assessor") == hit and "property_value" not in update:
+                if existing_raw.get("hamilton_assessor") == hit and not update:
                     skipped += 1
                     continue
-                existing_raw = dict(existing_raw)
-                existing_raw["hamilton_assessor"] = hit
-                update["raw_payload"] = existing_raw
+                if existing_raw.get("hamilton_assessor") != hit:
+                    existing_raw = dict(existing_raw)
+                    existing_raw["hamilton_assessor"] = hit
+                    update["raw_payload"] = existing_raw
                 if not update:
                     skipped += 1
                     continue
@@ -461,7 +493,8 @@ class HamiltonAssessorBot(BotBase):
                     q = (
                         client.table(table)
                         .select("id, property_address, county, owner_name_records, "
-                                "property_value, property_value_source, raw_payload, phone_metadata"
+                                "property_value, property_value_source, property_value_as_of, "
+                                "raw_payload, phone_metadata"
                                 + (",bot_source,distress_type" if table == "homeowner_requests_staging" else ""))
                         .or_(OR_FILTER)
                         .order("id")
@@ -485,7 +518,7 @@ class HamiltonAssessorBot(BotBase):
 
     def _lookup(self, row: Dict[str, Any],
                   parcel_index: Dict[str, Dict[str, Any]],
-                  addr_index: Dict[str, str]) -> Optional[Dict[str, Any]]:
+                  addr_index: Dict[str, str], ambiguous=None) -> Optional[Dict[str, Any]]:
         # Try parcel ID first (most reliable)
         raw = row.get("raw_payload") or {}
         if isinstance(raw, dict):
@@ -512,10 +545,12 @@ class HamiltonAssessorBot(BotBase):
         if not addr:
             return None
         # Exact match
+        head = addr.split(",")[0].strip()
+        if ambiguous and (addr in ambiguous or head in ambiguous):
+            return None  # more than one parcel at this street: the address cannot pick one
         if addr in addr_index:
             return parcel_index[addr_index[addr]]
         # Address-prefix match (drop ", Chattanooga, TN" suffix)
-        head = addr.split(",")[0].strip()
         if head in addr_index:
             return parcel_index[addr_index[head]]
         return None

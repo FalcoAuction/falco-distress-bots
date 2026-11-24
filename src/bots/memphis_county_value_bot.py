@@ -5,6 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from urllib.parse import quote
 
 from ._base import BotBase, _supabase, guard_phone_metadata
+from ._value_guard import require_value_evidence, today_iso
 from ._owner_lookup import LegacyTLSAdapter
 from ._shelby_trustee_value import HOST, REVIEW, VALUE_SOURCE, lookup
 
@@ -62,6 +63,10 @@ class MemphisCountyValueBot(BotBase):
         if evidence["status"] == "verified_assessment" and not valued:
             patch.update(property_value=evidence["estimated_appraisal"],
                          property_value_source=VALUE_SOURCE)
+            # The bill is for one parcel in Shelby, read on checked_on: or no value.
+            require_value_evidence(patch, row, parcel=evidence.get("parcel_id"), county="shelby",
+                                   observed_on=evidence.get("checked_on") or today_iso(),
+                                   record_address=evidence.get("location"))
         query = (client.table("homeowner_requests_staging").update(patch)
                  .eq("id", row["id"]).eq("bot_source", "memphis_daily_news")
                  .eq("pipeline_lead_key", row["pipeline_lead_key"])

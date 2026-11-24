@@ -30,6 +30,7 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import _entity_signer as entity_signer
+from ._value_guard import unverified_label
 from ._pilot_review import build_review, debt, source
 from ._source_access import not_read_text, read_state
 from ._property_lane import (COMMERCIAL_MAX_VALUE, COMMERCIAL_MIN_VALUE, _name_set, _num, last_sale,
@@ -321,6 +322,8 @@ def generic_hold_card(row: Dict[str, Any], today: date,
     vsrc = value_source(row, raw)
     value = _num(row.get("property_value")) if vsrc else None
     basis = f"County appraisal ({vsrc})" if value else None
+    if value and unverified_label(row):
+        basis = unverified_label(row) + ". " + basis
     src = source(f"{row.get('bot_source')} record", row.get("source_url"), today)
     answer = company_signer(row, owner, mailing_index=mailing_index) if kind == "entity" else None
     check = {"BANKRUPTCY": "Read the petition and schedules: is the debtor the entity that owns this parcel, and is the case open",
@@ -459,6 +462,8 @@ def foreclosure_card(row: Dict[str, Any], today: date,
     vsrc = value_source(row, raw)
     value = _num(row.get("property_value")) if vsrc else None
     basis = f"County appraisal ({vsrc})" if value else None
+    if value and unverified_label(row):
+        basis = unverified_label(row) + ". " + basis
     tp = _d(raw.get("tpad"))
     if value is None and _num(tp.get("building_value_num")):
         value, vsrc = _num(tp.get("building_value_num")), "tpad"

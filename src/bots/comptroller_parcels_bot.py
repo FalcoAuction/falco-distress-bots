@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
 from ._base import BotBase, _supabase
+from ._value_guard import require_value_evidence, today_iso
 from ._bk_match import district_counties, match_debtors, situs_address
 from ._comptroller import ParcelIndex, build_index, _record
 
@@ -157,6 +158,8 @@ def dickson_tax_patch(row, hit):
         patch["property_address"] = hit["situs_address"]
     if not row.get("property_value") and (hit.get("appraisal") or 0) > 0:
         patch.update(property_value=hit["appraisal"], property_value_source="comptroller")
+        require_value_evidence(patch, row, parcel=hit.get("parcelid"), county=hit.get("county"),
+                               observed_on=str(hit.get("version") or "")[-10:] or today_iso())
     return patch
 
 
@@ -335,7 +338,8 @@ class ComptrollerParcelsBot(BotBase):
                         patch = dickson_tax_patch(rows[0], u["hit"])
                         written += bool(apply(client, "homeowner_requests_staging", rows[0], patch))
                     continue
-                cur = (client.table("homeowner_requests_staging").select("raw_payload,property_value,property_address")
+                cur = (client.table("homeowner_requests_staging")
+                       .select("raw_payload,property_value,property_address,county")
                        .eq("id", u["id"]).limit(1).execute().data) or []
                 if not cur:
                     continue
@@ -350,7 +354,11 @@ class ComptrollerParcelsBot(BotBase):
                 if u["value"] and not cur[0].get("property_value"):
                     upd["property_value"] = int(round(u["value"]))
                     upd["property_value_source"] = "comptroller"
-                    upd["property_value_as_of"] = datetime.now(timezone.utc).isoformat()
+                    # Exact roll parcel, same county, dated by the roll file: or no value.
+                    require_value_evidence(upd, {**cur[0], "county": upd.get("county") or cur[0].get("county")},
+                                           parcel=u["hit"].get("parcelid"), county=u["hit"].get("county"),
+                                           observed_on=str(u["hit"].get("version") or "")[-10:] or today_iso(),
+                                           record_address=u["hit"].get("address"))
                 client.table("homeowner_requests_staging").update(upd).eq("id", u["id"]).execute()
                 written += 1
             except Exception as e:
