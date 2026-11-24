@@ -14,6 +14,16 @@ Detail page: /Search/Details/ViewNotice.aspx?id={ID}&date=M/D/YYYY
   — IDENTICAL to Nashville Ledger detail-URL pattern, including the
   same lbl1..lbl11 structured-field layout.
 
+Access (robots.txt read 2026-11-24): /notices/ is allowed, /Search/ is
+disallowed. Since 2026-11-24 only the index is read. It prints the notice
+ID, borrower, street, advertised sale date and first notice date. The
+detail page (substitute trustee, city and ZIP, county, instrument number,
+notice text) is no longer fetched; see _source_access.STOPPED. Notices
+already staged keep their detail evidence and are still marked as seen each
+day they stay on the index. A notice first seen after the stop date is
+staged from the index alone, with no county, and is labeled index_only.
+The detail parser is kept for a licensed or permitted copy of the page.
+
 ID prefixes:
   FD = Foreclosure (Memphis "Daily News" notation)
   FN = Foreclosure Notice (variant)
@@ -36,6 +46,7 @@ from requests.adapters import HTTPAdapter
 
 from ._base import BotBase, LeadPayload
 from ._memphis_notice_evidence import publisher_evidence
+from ._source_access import stopped
 
 
 MDN_BASE = "https://www.memphisdailynews.com"
@@ -79,6 +90,8 @@ class MemphisDailyNewsBot(BotBase):
     expected_min_yield = 5
 
     days_to_scan = 14  # walk last two weeks (MDN publishes daily, not weekly)
+    # False while the detail path is disallowed by the site's robots.txt.
+    read_details = stopped("memphis_daily_news", "detail") is None
     acquisition_seconds = 420  # leave 180s of the runner cap for staging/health
 
     def __init__(self):
@@ -107,6 +120,8 @@ class MemphisDailyNewsBot(BotBase):
         self._source_blocked = False
         self.collection_stats = dict(indexes=0, detail_attempts=0, past=0,
                                      invalid=0, failed=0, partial=False)
+        if not self.read_details:
+            self.collection_stats.update(index_only=0, detail_stopped_on=stopped("memphis_daily_news", "detail")["stopped_on"])
         # Reserve a full request before starting it, not after it has overrun.
         def exhausted():
             return self._source_blocked or time.monotonic() - started >= self.acquisition_seconds - 22
@@ -133,6 +148,12 @@ class MemphisDailyNewsBot(BotBase):
             fid = entry["id"]
             if entry["sale_date"] and entry["sale_date"] < date.today().isoformat():
                 self.collection_stats["past"] += 1
+                continue
+            if not self.read_details:
+                lead = self._index_lead(entry, pub_date)
+                if lead is not None:
+                    self.collection_stats["index_only"] += 1
+                    leads.append(lead)
                 continue
             self.collection_stats["detail_attempts"] += 1
             detail = self._fetch_detail(fid, pub_date)
@@ -202,8 +223,45 @@ class MemphisDailyNewsBot(BotBase):
                 seen.add(fid)
                 entries.append({"id": fid, "borrower": cells[1].get_text(" ", strip=True),
                                 "address": cells[2].get_text(" ", strip=True),
-                                "sale_date": cls._iso_date(cells[3].get_text(strip=True))})
+                                "sale_date": cls._iso_date(cells[3].get_text(strip=True)),
+                                "sale_printed": cells[3].get_text(strip=True) or None,
+                                "first_notice_printed": cells[4].get_text(strip=True) or None})
         return entries
+
+    def _index_lead(self, entry: Dict, pub_date: date) -> Optional[LeadPayload]:
+        """A notice as the allowed index page prints it. For a notice already
+        staged this only records today's sighting (same lead key). For a new
+        one it stages what the index gives and says what was not collected."""
+        fid, borrower, street = entry["id"], entry.get("borrower"), entry.get("address")
+        if not borrower or not street:
+            return None
+        halt = stopped("memphis_daily_news", "detail") or {}
+        index_url = INDEX_URL_TEMPLATE.format(year=pub_date.year, month=MONTH_ABBR[pub_date.month - 1], day=pub_date.day)
+        raw = {
+            "structured": {"borrower": borrower, "address": street, "tdn_no": fid,
+                           "advertised_auction_date": entry.get("sale_printed"),
+                           "date_of_first_public_notice": entry.get("first_notice_printed")},
+            "publication_date": pub_date.isoformat(),
+            "notice_id": fid,
+            "observed_on": date.today().isoformat(),
+            "evidence_type": "published_notice_index",  # not trustee confirmation or sale outcome
+            "collection": {"scope": "index_only", "page": index_url, "detail_stopped_on": halt.get("stopped_on"),
+                           "not_collected": ["substitute trustee", "city and ZIP", "county", "instrument number",
+                                             "notice text"]},
+        }
+        return LeadPayload(
+            bot_source=self.name,
+            pipeline_lead_key=self.make_lead_key(self.name, fid),
+            property_address=street.strip(),
+            county=None,   # the index does not print one; never assumed
+            full_name=borrower,
+            owner_name_records=borrower,
+            trustee_sale_date=entry.get("sale_date"),
+            distress_type="PRE_FORECLOSURE",
+            admin_notes=f"Memphis Daily News {fid} · pub {pub_date.isoformat()} · index only",
+            source_url=index_url,
+            raw_payload=raw,
+        )
 
     def _fetch_detail(self, fid: str, pub_date: date) -> Optional[Dict]:
         date_param = f"{pub_date.month}/{pub_date.day}/{pub_date.year}"

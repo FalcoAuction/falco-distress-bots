@@ -192,7 +192,13 @@ CHUNK = 200
 # ─────────────────────────── HTTP session helper ────────────────────────────
 
 
-def make_session(user_agent: str = "FALCO-Lead-Research/1.0 (+ops@falco.llc)") -> requests.Session:
+# The one agent every FALCO request identifies itself with. No browser
+# string, no email address, no personal name. A site that refuses it has made
+# an access decision: treat that source as unavailable (see _source_access.py).
+FALCO_USER_AGENT = "FALCO-research/1.0 (+falco.llc)"
+
+
+def make_session(user_agent: str = FALCO_USER_AGENT) -> requests.Session:
     """Build a requests Session with retry/backoff baked in.
 
     Retries on 5xx + 429, exponential backoff. 30s default timeout via
@@ -247,9 +253,9 @@ class BotBase:
     expected_min_yield: int = 1             # zero-yield warning threshold
     description: str = ""                   # human-readable
 
-    # Some sources sit behind a WAF that rejects non-browser agents from
-    # datacenter IPs (which is what CI runs on). A bot that needs to look
-    # like a browser sets this; everything else keeps the honest default.
+    # Leave unset to send FALCO_USER_AGENT. Do not set a browser string here
+    # to get past a refusal: a site that refuses the honest agent is an
+    # unavailable source.
     user_agent: Optional[str] = None
 
     # A source whose lead-key set is identical for this many consecutive

@@ -38,7 +38,8 @@ EXPECTED_BOTS = {
     "nashville_codes":           {"max_silent_days": 14, "min_total": 50},
     "chattanooga_codes":         {"max_silent_days": 14, "min_total": 50},
     "memphis_daily_news":        {"max_silent_days": 14, "min_total": 30},
-    "nashville_ledger":          {"max_silent_days": 14, "min_total": 30},
+    # nashville_ledger: collection stopped 2026-11-24 (_source_access.STOPPED);
+    # silence is expected, so it is not watched here.
     "hud_reo":                   {"max_silent_days": 14, "inventory_only": True},
     "shelby_receiver_roster":    {"max_silent_days": 14, "inventory_only": True},
     "tn_probate":                {"max_silent_days": 30, "min_total": 0},
