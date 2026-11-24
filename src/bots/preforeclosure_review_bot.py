@@ -44,7 +44,7 @@ from ._pilot_review import merge_review
 from ._preforeclosure_review import (COUNTY_KEY, EVIDENCE_KEY, LINK_KEY, REVIEWER, SALE_SOURCES, TRACK_KEY, _stamp,
                                      appointment_card, link_notice, notice_identity, sale_card, sale_state,
                                      same_card, track_of)
-from ._preforeclosure_review import shelby_parcel
+from ._preforeclosure_review import CORRECTION_KEY, name_corrections, shelby_parcel
 from ._register_index_review import review_register_index
 from ._shelby_trustee_value import HOST, lookup
 from ._trustee_list_match import LIST_KEY, all_staged_books, check_notices, effective_date, page_book
@@ -283,6 +283,9 @@ class PreforeclosureReviewBot(BotBase):
                 counts["link_conflicts"] += 1
             if link["status"] != "none" and raw.get(LINK_KEY) != link:
                 raw[LINK_KEY] = patch[LINK_KEY] = link
+            fixes = name_corrections(raw)   # index typo proved by the deed of trust and county bill; source spelling stays
+            if fixes and raw.get(CORRECTION_KEY) != fixes:
+                raw[CORRECTION_KEY] = patch[CORRECTION_KEY] = fixes
             card = appointment_card({**row, "raw": raw}, link, today,
                                     notice_carded=link.get("staging_id") in sales
                                     and (only is None or link.get("staging_id") in only),
