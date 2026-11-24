@@ -73,6 +73,7 @@ def _clean(name: str) -> str:
     n = re.sub(r"([a-z])- ([a-z])", r"\1\2", n)                        # "Calde- ron" from a line break
     n = re.split(r"\s+(?:aka|a/k/a|f/k/a|fka)\s+", n, flags=re.IGNORECASE)[0]
     n = re.split(r"\s+on\s+behalf\s+of\s+", n, flags=re.IGNORECASE)[-1]  # the principal, not the signer
+    n = re.split(r"\s+in\s+favou?r\s+of\s+", n, flags=re.IGNORECASE)[0]   # the grantor, not the beneficiary
     n = re.sub(r"\s+(?:and|&)\s*$", "", n.strip(" ,.;"), flags=re.IGNORECASE)
     n = re.sub(r"^(?:the\s+)?(?:estate\s+of\s+)", "", n, flags=re.IGNORECASE)
     return n.strip(" ,.;")

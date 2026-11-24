@@ -295,6 +295,8 @@ def parties(text: str) -> Dict[str, Any]:
 def party_name(value: Any) -> Optional[str]:
     """A stored name if it reads as a party, else None."""
     text = str(value or "").strip()
+    # "X in favor of Y": X is the grantor; Y is the trustee or beneficiary.
+    text = re.split(r"\s+in\s+favou?r\s+of\s+", text, flags=re.IGNORECASE)[0].strip(" ,.;")
     return text if text and tn.plausible_name(text) else None
 
 

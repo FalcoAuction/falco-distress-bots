@@ -151,6 +151,8 @@ class Parties(unittest.TestCase):
             self.assertIsNone(nf.party_name(bad))
         for good in ("Menenial Property Partner's LLC", "Red River Property Group Llc", "Donna K. Reed"):
             self.assertEqual(nf.party_name(good), good)
+        # The grantor is kept and the beneficiary dropped.
+        self.assertEqual(nf.party_name("Dustin Lee May In Favor Of Russell E. Roberson"), "Dustin Lee May")
 
     def test_no_party_is_stored_with_the_reason(self):
         built = lead(NO_GRANTOR, "PRE_FORECLOSURE", "Foreclosures", county="putnam")
