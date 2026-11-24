@@ -482,28 +482,34 @@ class HamiltonAssessorBot(BotBase):
             "property_address.ilike.%apison%,"
             "property_address.ilike.%sale creek%"
         )
-        PAGE_SIZE = 1000
-        MAX_PAGES = 10  # 10K Hamilton leads cap (corpus is ~2K, ample)
+        # Keyset pages (id > last id), not .range(): a deep offset over this
+        # unindexed OR filter timed out, the loop broke on the error, and the
+        # run saw 2,425 of about 7,700 leads (2026-11-24), so leads late in id
+        # order never got a value.
+        PAGE_SIZE = 500
+        MAX_PAGES = 40
         # No property_value filter: valued leads still need land use for
         # the lanes. Leads already carrying a hamilton_assessor record that
         # matches the current export are skipped in run().
         for table in ("homeowner_requests", "homeowner_requests_staging"):
+            last_id = None
             for page in range(MAX_PAGES):
                 try:
-                    q = (
+                    base = (
                         client.table(table)
                         .select("id, property_address, county, owner_name_records, "
                                 "property_value, property_value_source, property_value_as_of, "
                                 "raw_payload, phone_metadata"
                                 + (",bot_source,distress_type" if table == "homeowner_requests_staging" else ""))
                         .or_(OR_FILTER)
-                        .order("id")
-                        .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
-                        .execute()
                     )
+                    if last_id is not None:
+                        base = base.gt("id", last_id)
+                    q = base.order("id").limit(PAGE_SIZE).execute()
                     rows = getattr(q, "data", None) or []
                     if not rows:
                         break
+                    last_id = rows[-1]["id"]
                     for r in rows:
                         r["__table__"] = table
                         out.append(r)
