@@ -328,6 +328,22 @@ class RepeatRun(unittest.TestCase):
         self.assertNotIn("pilot_review", third[0]["patch"])
         self.assertTrue(third[0]["kept_existing_card"])
 
+    def test_later_copy_of_the_same_filing_is_removed_as_a_duplicate(self):
+        first, second, other = hamilton_row(), hamilton_row(), hamilton_row()
+        first.update(id="a-first", pipeline_lead_key="k1", staged_at="2026-05-03T00:00:00+00:00", staging_status="promoted")
+        second.update(id="b-second", pipeline_lead_key="k1", staged_at="2026-11-22T00:00:00+00:00", staging_status="pending")
+        other.update(id="c-other", pipeline_lead_key="k2", staged_at="2026-11-22T00:00:00+00:00")
+        look = lambda row: evidence()
+        plan = {p["id"]: p for p in plan_rows([second, other, first], look, TODAY)}
+        self.assertEqual(plan["a-first"]["route"], plan["c-other"]["route"])
+        self.assertNotEqual(plan["a-first"]["route"], "removed")
+        self.assertEqual(plan["b-second"]["route"], "removed")
+        self.assertIn("a-first", plan["b-second"]["route_reason"])
+        # A rejected copy is not a rival: the remaining record keeps the lead.
+        first["staging_status"] = "rejected"
+        again = {p["id"]: p for p in plan_rows([second, first], look, TODAY)}
+        self.assertNotEqual(again["b-second"]["route"], "removed")
+
     def test_stronger_card_from_another_lane_is_kept(self):
         row = hamilton_row()
         row["raw_payload"]["pilot_review"] = {"route": "removed", "reviewed_by": "tax_bot", "lane": "tax"}

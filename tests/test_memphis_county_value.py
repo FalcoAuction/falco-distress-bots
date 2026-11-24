@@ -73,7 +73,7 @@ class CountyValueTests(unittest.TestCase):
     def test_same_day_and_stale_sightings_not_requeried(self):
         b=MemphisCountyValueBot();self.addCleanup(b.session.close);client=MagicMock();q=client.table.return_value
         for method in ["select","eq","neq","is_","or_","order","limit"]:getattr(q,method).return_value=q
-        a=row();same=row();same["id"]="same";same["phone_metadata"][REVIEW]={"checked_on":date.today().isoformat()};stale=row();stale["id"]="stale";stale["phone_metadata"]["notice_tracking"]["last_seen_at"]="2020-01-01T00:00:00Z"
+        a=row();same=row();same["id"]="same";same["phone_metadata"][REVIEW]={"checked_on":datetime.now(timezone.utc).date().isoformat()};stale=row();stale["id"]="stale";stale["phone_metadata"]["notice_tracking"]["last_seen_at"]="2020-01-01T00:00:00Z"
         q.execute.return_value=SimpleNamespace(data=[a,same,stale]);self.assertEqual([r["id"] for r in b._candidates(client)],["one"])
     def test_valued_notice_gets_one_county_check_while_the_sale_is_ahead(self):
         b=MemphisCountyValueBot();self.addCleanup(b.session.close);client=MagicMock();q=client.table.return_value
