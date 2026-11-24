@@ -75,11 +75,18 @@ LENDER_PATTERNS = [
         r"COMPANY|CO\.|N\.A\.|FSB|BANK|TRUST|LP|LLP|REIT))",
         re.IGNORECASE,
     ),
+    # The name must start with a capital. Case-blind, this pattern read
+    # "Lender, the owner and holder of said Indebtedness, has demanded that
+    # the real property be advertised ... and Deed of Trust" as a lender.
     re.compile(
-        r"(?:owner and holder|holder) of (?:said|the) Indebtedness[^.]*?,\s+"
-        r"([A-Z][A-Z0-9 &.,\-/']+?(?:LLC|INC|CORPORATION|CORP|"
+        r"(?i:(?:owner and holder|holder) of (?:said|the) Indebtedness)[^.]*?,\s+"
+        r"([A-Z][A-Za-z0-9 &.,\-/']+?(?i:LLC|INC|CORPORATION|CORP|"
         r"COMPANY|CO\.|N\.A\.|FSB|BANK|TRUST|LP|LLP|REIT))",
-        re.IGNORECASE,
+    ),
+    # "... indebtedness owed to KM Developments LLC (referred to as "Lender")"
+    re.compile(
+        r"(?i:owed|payable) to\s+([A-Z][A-Za-z0-9 &.,\-/']{2,80}?)\s*\(\s*(?i:referred to as\s+|hereinafter\s+)?"
+        r"(?i:the\s+)?[^A-Za-z()]{0,3}(?i:Lender|Beneficiary)\b",
     ),
     re.compile(
         r"in favor of\s+"
@@ -88,6 +95,22 @@ LENDER_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+# A captured lender must read as a name. A capture that starts in lower case,
+# runs past nine words or carries sentence words is a stretch of the notice,
+# and the next pattern gets its turn. (Case-sensitive on purpose.)
+_LENDER_NOT_A_NAME = re.compile(
+    r"\b(?:has|have|had|that|which|will|be|been|is|was|said|hereby|whereas|WHEREAS|demanded|declared|appointed|"
+    r"advertised|sold|accordance|pursuant|virtue|vested|default|assessments?|charges|expenses|fees|costs|"
+    r"as Substitute|as Trustee|Escrow)\b")
+
+
+def lender_name(value: Optional[str]) -> Optional[str]:
+    name = " ".join((value or "").split()).strip(" .,;:")
+    if len(name) < 3 or len(name.split()) > 9 or not name[0].isupper() or _LENDER_NOT_A_NAME.search(name):
+        return None
+    return name
+
+
 PARCEL_RE = re.compile(
     r"(?:MAP AND PARCEL|TAX MAP|PARCEL)\s*(?:NO\.?|NUMBER|ID)?[:\s]+([A-Z0-9][A-Z0-9\-\.]*\d[A-Z0-9\-\.]*)",
     re.IGNORECASE,
@@ -316,8 +339,9 @@ class NashvilleLedgerBot(BotBase):
         # n=37 sample vs ~10% with the prior two patterns alone).
         for pattern in LENDER_PATTERNS:
             m = pattern.search(body)
-            if m:
-                return m.group(1).strip()
+            name = lender_name(m.group(1)) if m else None
+            if name:
+                return name
         return None
 
     @staticmethod

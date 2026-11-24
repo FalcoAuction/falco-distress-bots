@@ -220,6 +220,74 @@ def key_names(owner: Any, others: Any) -> List[str]:
     return out if changed else [text]
 
 
+# ── Index spelling against the recorded documents ───────────────────────────
+
+CORRECTION_KEY = "name_corrections"
+
+
+def _edits(a: str, b: str) -> int:
+    """Levenshtein distance between two short strings."""
+    row = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        prev, row[0] = row[0], i
+        for j, cb in enumerate(b, 1):
+            prev, row[j] = row[j], min(row[j] + 1, row[j - 1] + 1, prev + (ca != cb))
+    return row[-1]
+
+
+def _spelling(name: Any) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", str(name or "").upper())).strip()
+
+
+def name_corrections(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Index misspellings of a borrower, proved by two other documents.
+
+    The Register's appointment index is typed by hand ("ENVLY LLC" for "ENVOY
+    LLC"). The printed spelling stays where it is. A correction is recorded
+    beside it only when the deed of trust the appointment cross-references and
+    the current county bill for that deed of trust's parcel both print the
+    same other spelling, and it differs from the index by one or two letters.
+    Anything further apart is a different name, not a typo, and is left to the
+    card's name conflict.
+    """
+    recovery = raw.get("recovery") if isinstance(raw.get("recovery"), dict) else {}
+    county = raw.get(COUNTY_KEY) if isinstance(raw.get(COUNTY_KEY), dict) else {}
+    ref = raw.get("deed_of_trust") if isinstance(raw.get("deed_of_trust"), dict) else {}
+    loan = raw.get("loan") if isinstance(raw.get("loan"), dict) else {}
+    deed_names = split_names(recovery.get("loan_grantors"))
+    bill_names = {_spelling(n) for n in split_names(county.get("roll_owner"))}
+    instrument = str(raw.get("instrument") or "")
+    if not (deed_names and bill_names and ref.get("instrument") and county.get("status") == "verified_assessment"):
+        return []
+    out: List[Dict[str, Any]] = []
+    for printed in split_names(raw.get("borrowers")):
+        p = _spelling(printed)
+        if any(_spelling(d) == p for d in deed_names):
+            continue
+        near = [d for d in deed_names if len(p) >= 5 and len(p.split()) == len(_spelling(d).split())
+                and 0 < _edits(p, _spelling(d)) <= 2]
+        if len(near) != 1 or _spelling(near[0]) not in bill_names:
+            continue
+        deed = str(ref["instrument"])
+        parcel = county.get("parcel_id") or raw.get("parcel_id")
+        out.append({
+            "field": "borrowers", "printed": printed, "corrected": near[0],
+            "printed_in": f"Shelby County Register of Deeds index, appointment of substitute trustee, instrument {instrument}",
+            "evidence": [
+                {"document": f"Deed of trust instrument {deed}, Shelby County Register of Deeds index", "shows": near[0],
+                 "date": _day(loan.get("loan_date")), "read_on": _day(raw.get("dot_checked_at")),
+                 "url": detail_url(deed, ref.get("year") or f"20{deed[:2]}")},
+                {"document": f"{county.get('tax_year') or 'Current'} Shelby County Trustee realty bill, parcel {parcel}",
+                 "shows": county.get("roll_owner"), "date": _day(county.get("checked_on")),
+                 "url": county.get("county_source")},
+            ],
+            "tie": (f"Appointment instrument {instrument} cross-references deed of trust instrument {deed}; the deed of "
+                    f"trust page and the county bill are both for parcel {parcel}"),
+            "basis": f"{_edits(p, _spelling(near[0]))} letter(s) differ; the deed of trust and the county bill agree with each other",
+        })
+    return out
+
+
 # ── Appointment to notice ───────────────────────────────────────────────────
 
 
@@ -507,7 +575,8 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
                  + (f" The appointment was recorded {lead_time(link)}." if lead_time(link) else ""))
     else:
         what += " No sale notice for this loan has been found yet."
-    status = "active" if linked or age is None or age <= APPOINTMENT_QUIET_DAYS else "unknown"
+    passed = linked and bool(link.get("sale_date")) and link["sale_date"] < today.isoformat()
+    status = "resolved" if passed else ("active" if linked or age is None or age <= APPOINTMENT_QUIET_DAYS else "unknown")
 
     if parcel or address:
         if ref.get("instrument"):
@@ -569,6 +638,9 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
                    "basis": (f"{county.get('tax_year') or 'Current'} Shelby County realty bill for parcel "
                              f"{county.get('parcel_id') or parcel} is in this name"
                              + (f", and the Register indexes {borrower_text} as borrower on the appointment" if borrower_text else "")
+                             + "".join(f" (the index spelling {c['printed']} is a typing error for {c['corrected']}: "
+                                       f"{c['evidence'][0]['document']} and the county bill both print {c['corrected']})"
+                                       for c in name_corrections(raw))
                              + ". No deed or title search has been done."),
                    "source": source(f"Shelby County Trustee realty bill, parcel {county.get('parcel_id') or parcel}",
                                     county.get("county_source"), county.get("checked_on"))}
@@ -639,6 +711,7 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
         "evidence": ((f"The {county.get('tax_year') or 'current'} county realty bill still carries {owner}, so no transfer "
                       "shows on the tax roll. " if owner else "")
                      + ("A sale is advertised but has not happened. " if linked and (link.get("sale_date") or "") >= today.isoformat()
+                        else "The advertised sale date has passed. " if passed
                         else "No sale has been advertised for this loan in the Memphis Daily News records held here. ")
                      + "Listing status has not been checked.").strip(),
         "checked_on": county.get("checked_on") if owner else today.isoformat(), "conflicts": conflicts,
@@ -658,6 +731,15 @@ def appointment_card(row: Dict[str, Any], link: Dict[str, Any], today: date,
             route_reason=(f"Duplicate of the sale notice record for the same loan (notice {link['notice_id']}, record "
                           f"{link['staging_id']}). {link['basis']}. Work that card; it carries the sale date."
                           + (f" The appointment was recorded {lead_time(link)}." if lead_time(link) else "")),
+            event=event, asset=asset, decider=decider, economics=economics, availability=availability)
+    if passed:
+        # The linked notice has no card this run (its sale is older than the
+        # review window). A first-trace card with a passed deadline is refused
+        # by build_review, so say what happened instead, as the register path does.
+        return build_review(
+            lane=LANE, route="removed", reviewed_by=REVIEWER, county="Shelby", owner_names=names, today=today,
+            route_reason=(f"The linked sale notice ({link['notice_id']}) was set for {link['sale_date']}, which has "
+                          "passed, and no later date is published. The pre-sale window is closed."),
             event=event, asset=asset, decider=decider, economics=economics, availability=availability)
     if hold:
         return build_review(lane=LANE, route="research_hold", route_reason=hold, reviewed_by=REVIEWER, county="Shelby",

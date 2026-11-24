@@ -174,7 +174,30 @@ def split_parties(entry: IndexEntry) -> Dict[str, Any]:
     lenders = [n for n in entry.first_parties
                if is_institution(n) or re.sub(r"\W+", " ", n.upper()).strip() in taken]
     borrowers = [n for n in entry.first_parties if n not in lenders]
-    return {"borrowers": borrowers, "lenders": lenders, "trustees": trustees, "basis": PARTY_BASIS}
+    # Some offices print the lender in the grantee column as well ("CREDIT
+    # HUMAN FEDERAL CREDIT UNION" on both sides of one appointment). A bank or
+    # credit union, or a grantee that repeats a grantor-side lender, is the
+    # lender. It is never staged as the substitute trustee.
+    lender_names = {_party_stem(n) for n in lenders}
+    repeated = [t for t in trustees if _DEPOSIT_INSTITUTION.search(_party_stem(t)) or _party_stem(t) in lender_names]
+    notes: List[str] = []
+    if repeated:
+        trustees = [t for t in trustees if t not in repeated]
+        lenders = lenders + [t for t in repeated if _party_stem(t) not in lender_names]
+        notes.append("The listing prints " + ", ".join(repeated) + " in the grantee column. It is the lender, so it is "
+                     "not staged as substitute trustee" + ("; the listing names no other grantee" if not trustees else ""))
+    return {"borrowers": borrowers, "lenders": lenders, "trustees": trustees, "notes": notes,
+            "basis": PARTY_BASIS + ("; lender printed in the grantee column moved to the lender side" if repeated else "")}
+
+
+_DEPOSIT_INSTITUTION = re.compile(r"\b(BANK|BANCORP|BANCSHARES|CREDIT UNION|FCU|FSB|SAVINGS|NATIONAL ASSOCIATION)\b")
+
+
+def _party_stem(name: Any) -> str:
+    """A party name for comparison: upper case, no punctuation, no trailing
+    AKA / FKA / DBA left over from a name that ran onto a second line."""
+    text = re.sub(r"\s+", " ", re.sub(r"[^A-Z0-9 ]", " ", str(name or "").upper())).strip()
+    return re.sub(r"(?:\s+(?:AKA|FKA|DBA|NKA|A K A|F K A|D B A))+$", "", text)
 
 
 # ── Staging payload ─────────────────────────────────────────────────────────
@@ -209,10 +232,16 @@ def build_lead(entry: IndexEntry, county: str, evidence: Dict[str, str], layout:
         borrowers, lenders, trustees = parties["borrowers"], parties["lenders"], parties["trustees"]
         note = (f"Substitute trustee appointed, recorded {entry.recorded} ({name} {entry.reference})"
                 + (f" by {lenders[0]}" if lenders else "") + (f"; trustee {', '.join(trustees)}" if trustees else "")
+                + ("; no substitute trustee printed (the grantee column repeats the lender)"
+                   if parties["notes"] and not trustees else "")
                 + (f". Property as indexed: {entry.property_ref}." if entry.property_ref
                    else ". Index only: no address or deed of trust on the listing."))
         raw.update({"appointment_date": entry.instrument_date, "lenders": lenders, "borrowers": borrowers,
                     "substitute_trustees": trustees, "party_basis": parties["basis"]})
+        if parties["notes"]:
+            # The columns exactly as printed stay on the record beside the reading of them.
+            raw.update({"party_notes": parties["notes"], "grantors_as_printed": list(entry.first_parties),
+                        "grantees_as_printed": list(entry.second_parties)})
         if entry.property_ref:
             raw["property_as_indexed"] = entry.property_ref
         return {**base, "distress_type": APPOINTMENT, "property_address": address,

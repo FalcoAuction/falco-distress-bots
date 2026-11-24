@@ -62,6 +62,7 @@ from . import _roane_tax
 from ._county_tax_notices import non_tax_reason, parcel_rows, fill_parcels
 from ._county_tax_headings import newspaper_tax_heading
 from . import _reviewed_tax_excerpts
+from . import _notice_filing as notice_filing
 
 
 TNPN_BASE = "https://www.tnpublicnotice.com"
@@ -174,7 +175,28 @@ class TnPublicNoticeBot(ProbateNoticeBot):
             records = list(table.values())
             fill_parcels(records)
             leads.extend(records)
-        return leads + list(roane_parcels.values())
+        return self._one_per_filing(leads) + list(roane_parcels.values())
+
+    def _one_per_filing(self, leads: List[LeadPayload]) -> List[LeadPayload]:
+        """A notice reprinted under a new notice number is the same filing.
+        It takes the staged record's key (the writer then records a sighting
+        on it) instead of becoming a second row. A failed lookup changes
+        nothing: the leads go on as built."""
+        keys = sorted({(lead.raw_payload or {}).get("filing", {}).get("key") for lead in leads} - {None})
+        existing: List[Dict] = []
+        try:
+            from ._base import _supabase
+            client = _supabase() if keys else None
+            for start in range(0, len(keys) if client is not None else 0, 100):
+                existing.extend(
+                    client.table("homeowner_requests_staging")
+                    .select("pipeline_lead_key,key:raw_payload->filing->>key,duplicate_of:raw_payload->filing->>duplicate_of")
+                    .eq("bot_source", self.name).in_("raw_payload->filing->>key", keys[start:start + 100])
+                    .execute().data or [])
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("filing lookup failed (%s); republications not merged this run", type(exc).__name__)
+            existing = []
+        return notice_filing.merge_republications(leads, existing)
 
     # ── Session bootstrap ───────────────────────────────────────────────────
 
@@ -362,7 +384,13 @@ class TnPublicNoticeBot(ProbateNoticeBot):
         # The notice text decides the type, not the newspaper's category:
         # Sumner and Montgomery trustee sales arrive filed as "Delinquent
         # Taxes", and county-wide "taxes are due" notices name no property.
-        kind = trustee_notice.classify(excerpt)
+        category_id = next((k for k, v in CATEGORY_TO_DISTRESS.items() if v[1] == category_label), None)
+        filing_args = dict(category=category_label, category_id=category_id, publication_county=county,
+                           notice_id=row["notice_id"], publication_date=pub_date, newspaper=paper)
+        filing = notice_filing.build(excerpt, **filing_args)
+        if filing.get("not_a_filing") and distress != "TAX_LIEN":
+            return None   # page furniture, storage and towing sales, a government selling its own land
+        kind = {notice_filing.FORECLOSURE: "foreclosure", "general_tax": "general_tax"}.get(filing["type"])
         if distress == "TAX_LIEN" and kind != "foreclosure":
             heading = newspaper_tax_heading(county, excerpt)
             if heading == "exclude":
@@ -595,15 +623,43 @@ class TnPublicNoticeBot(ProbateNoticeBot):
                 distress = "PRE_FORECLOSURE"
             else:
                 return None   # bids, storage and towing sales, other auctioneers' ads
+        elif distress == "PRE_FORECLOSURE" and kind != "foreclosure":
+            # Filed under "Foreclosures", but the wording is not a sale under a
+            # deed of trust: a Chancery tax sale, a court sale, or text that
+            # does not settle the type. The text decides; an unsettled notice
+            # is held for research and never typed by its category.
+            filed_as = distress
+            if filing["type"] == notice_filing.TAX:
+                distress = "TAX_LIEN"
+            elif filing["type"] in ("COURT_SALE", "DIVORCE", "CONSERVATORSHIP", "PARTITION"):
+                distress = filing["type"]
+                court_names = court_order.parties(excerpt)
+                court_address = court_order.tenants_address(excerpt)
+            else:
+                distress = notice_filing.RESEARCH
+        elif distress == "TAX_LIEN" and kind != "foreclosure" and (filing.get("hold") or {}).get("kind") == "conflict":
+            filed_as, distress = distress, notice_filing.RESEARCH
         if kind == "foreclosure" and distress not in ("PROBATE", "PRE_FORECLOSURE", "PARTITION"):
             filed_as, distress = distress, "PRE_FORECLOSURE"
+        if distress != notice_filing.RESEARCH and filing["type"] != distress:
+            # A reviewed county rule, or the reviewed tax lists, settled the type.
+            basis = ("reviewed rule for this newspaper's notices" if distress == "PRE_FORECLOSURE" else
+                     f"filed under {category_label!r} and passed the reviewed county tax rules; the text shown "
+                     "carries no tax suit wording of its own" if distress == "TAX_LIEN" else "court notice wording")
+            filing = notice_filing.build(excerpt, **filing_args, decided=distress, decided_basis=basis)
+        if distress == "PRE_FORECLOSURE" and filing["county_from_text"]:
+            county = filing["county"]   # the Register named in the notice, not the newspaper's county
         address_text = trustee_notice.property_address_text(excerpt) if distress == "PRE_FORECLOSURE" else excerpt
         property_address = court_address or self._extract_address(address_text, city)
+        if distress == notice_filing.RESEARCH:
+            property_address = None   # an untyped notice's first street is as likely a courthouse or an office
         parcel = self._extract_parcel(excerpt)
         if tax_lead is not None:
             parcel, property_address = tax_lead
-        names = court_names or (trustee_notice.borrowers(excerpt) if distress == "PRE_FORECLOSURE" else [])
-        full_name = names[0] if names else self._extract_subject(excerpt, distress)
+        names = court_names or (filing["parties"] if distress == "PRE_FORECLOSURE" else [])
+        # A name must be a party. The old single pattern kept deed wording
+        # ("... Conveying Certain Real Property Therein Described To ...").
+        full_name = names[0] if names else notice_filing.party_name(self._extract_subject(excerpt, distress))
         sale_date = trustee_notice.sale_date(excerpt) if distress == "PRE_FORECLOSURE" else None
 
         admin_parts = [
@@ -629,7 +685,8 @@ class TnPublicNoticeBot(ProbateNoticeBot):
             raw_payload={
                 "publication": "tn_public_notice",
                 "category": category_label,
-                "category_id": next(k for k, v in CATEGORY_TO_DISTRESS.items() if v[1] == category_label),
+                "category_id": category_id,
+                "filing": filing,
                 "newspaper": paper,
                 "publication_date": pub_date,
                 "city": city,

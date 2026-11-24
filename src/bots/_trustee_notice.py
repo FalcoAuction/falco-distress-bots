@@ -35,7 +35,7 @@ GENERAL_TAX_RE = re.compile(
 _NAME_END = (r"(?=,?\s+(?:an?\s+)?(?:unmarried|married|single|widow|divorced|husband|wife|"
              r"tenants?\s+by|joint\s+tenants|individually|a\s+tennessee|an?\s+\w+\s+limited|an?\s+individual)\b"
              r"|\s*\(\s*(?:the\s+)?[\"“]?(?:grantor|borrower)|,?\s+by\s+deed\s+of\s+trust|,\s*executed|,?\s+con-?\s?veying"
-             r"|,\s*(?:his|her|their)\s+heirs|,\s+to\s+[A-Z])")
+             r"|,\s*(?:his|her|their)\s+heirs|,?\s+to\s+\w|,?\s+who\s+acquired\s+title|[.,]?\s+payable\b)")
 WHEREAS_RE = re.compile(
     r"\bwhereas,?\s+(?:on\s+[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4},?\s+)?(?:default\b.*?)?([A-Za-z][A-Za-z0-9.,'&\- ]{2,120}?)" + _NAME_END,
     re.IGNORECASE | re.DOTALL)
@@ -43,12 +43,16 @@ EXECUTED_BY_RE = re.compile(
     r"\bexecuted\s+(?:on\s+)?(?:[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4},?\s+)?by\s+([A-Za-z][A-Za-z0-9.,'&\- ]{2,120}?)"
     + _NAME_END,
     re.IGNORECASE | re.DOTALL)
-BOOK_PAGE_RE = re.compile(r"\bBook\s+(\d{1,6})\s*,?\s*Pages?(?:\s*\(s\))?\s+(\d{1,5})", re.IGNORECASE)
+BOOK_PAGE_RE = re.compile(r"\b(?:Book|Volume|Vol\.)\s+([A-Z]{0,2}-?\d{1,6})\s*,?\s*(?:at\s+)?Pages?(?:\s*\(s\))?\s+(\d{1,5})",
+                          re.IGNORECASE)
 INSTRUMENT_RE = re.compile(r"\bInstrument\s+(?:Number|No\.?|#)\s*:?\s*([0-9][0-9\-]{3,})", re.IGNORECASE)
 FROM_GRANTOR_RE = re.compile(
     r"\bdeed of trust from ([A-Za-z][A-Za-z .&'\-]{2,110}?)\s*\(.?grantors?\b", re.I)
 CONVEYED_RE = re.compile(
     r"\bCounty,\s*Tennessee,\s*([A-Za-z][A-Za-z .&'\-]{2,110}?)\s+conveyed the\b", re.I)
+# "... County, TN, BRADY T. BUSH and LISA BUSH (the "Grantors") conveyed to ..."
+GRANTOR_PAREN_RE = re.compile(
+    r"(?:,|\bthat)\s+([A-Za-z][A-Za-z .&'\-]{2,90}?)\s*\(\s*(?:the\s+)?[^A-Za-z(),]{0,3}(?:grantors?|borrowers?)\b", re.I)
 ENTITY_RE = re.compile(r"\b(LLC|L\.L\.C|INC|CORP|CORPORATION|COMPANY|LP|LLP|TRUST|TRUSTEE|PARTNERSHIP|HOLDINGS|PROPERTIES)\b",
                        re.IGNORECASE)
 
@@ -76,7 +80,10 @@ def _clean(name: str) -> str:
 
 _NOT_A_NAME = re.compile(
     r"\b(?:occurred|covenants|conditions|performance|default|deed|trust|dated|payment|obligations|"
-    r"secured|recorded|record|register|notice|sale|whereas|instrument)\b", re.IGNORECASE)
+    r"secured|recorded|record|register|notice|sale|whereas|instrument|"
+    # Deed wording is never part of a party's name: "Michael A Brusaw Conveying
+    # Certain Real Property Therein Described To Scott R. Valby".
+    r"con-?\s?vey(?:ing|ed|s)?|therein|herein\w*|described|certain|(?:real|personal)\s+property|pursuant|acquired|payable|to)\b", re.IGNORECASE)
 
 
 def _plausible(name: str) -> bool:
@@ -98,7 +105,7 @@ def borrowers(text: str) -> List[str]:
     are kept whole."""
     t = re.sub(r"\s+", " ", text or "")
     raw = ""
-    for rx in (WHEREAS_RE, EXECUTED_BY_RE, FROM_GRANTOR_RE, CONVEYED_RE):
+    for rx in (WHEREAS_RE, EXECUTED_BY_RE, FROM_GRANTOR_RE, CONVEYED_RE, GRANTOR_PAREN_RE):
         m = rx.search(t)
         if m and _plausible(_clean(m.group(1))):
             raw = _clean(m.group(1))
