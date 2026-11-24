@@ -22,6 +22,7 @@ class MemphisNoticeTests(unittest.TestCase):
         b = MemphisDailyNewsBot()
         self.addCleanup(b.session.close)
         b._recent_dates = lambda days: [DAY]
+        b.read_details = True    # the detail parser, kept for a permitted copy of the page
         return b
 
     def test_index_binds_publication_and_deduplicates(self):
@@ -115,5 +116,55 @@ class MemphisNoticeTests(unittest.TestCase):
                 today.today.return_value=day
                 b.scrape()
         self.assertEqual(set(first),{"FD123","FD456"})
+
+
+class IndexOnlyTests(unittest.TestCase):
+    """Since 2026-11-24 the detail page is disallowed and is never requested."""
+
+    def bot(self):
+        b = MemphisDailyNewsBot()
+        self.addCleanup(b.session.close)
+        b._recent_dates = lambda days: [DAY]
+        return b
+
+    def test_detail_page_is_off_by_default_and_never_requested(self):
+        b = self.bot()
+        self.assertFalse(b.read_details)
+        with patch.object(b, "fetch", return_value=SimpleNamespace(status_code=200, text=index())) as fetch:
+            leads = b.scrape()
+        self.assertEqual(fetch.call_count, 1)
+        url = fetch.call_args.args[0]
+        self.assertEqual(url, MDN_BASE + "/notices/2026/Nov/20/")
+        self.assertNotIn("ViewNotice", url)
+        self.assertEqual(len(leads), 1)
+
+    def test_index_lead_keeps_the_notice_key_and_says_what_is_missing(self):
+        b = self.bot()
+        with patch.object(b, "fetch", return_value=SimpleNamespace(status_code=200, text=index())):
+            lead, = b.scrape()
+        self.assertEqual(lead.pipeline_lead_key, b.make_lead_key("memphis_daily_news", "FD123"))
+        self.assertIsNone(lead.county)
+        self.assertEqual(lead.trustee_sale_date, "2026-12-18")
+        self.assertEqual(lead.source_url, MDN_BASE + "/notices/2026/Nov/20/")
+        raw = lead.raw_payload
+        self.assertEqual(raw["structured"]["tdn_no"], "FD123")
+        self.assertEqual(raw["structured"]["date_of_first_public_notice"], "11/20/2026")
+        self.assertEqual(raw["collection"]["scope"], "index_only")
+        self.assertEqual(raw["collection"]["detail_stopped_on"], "2026-11-24")
+        self.assertIn("substitute trustee", raw["collection"]["not_collected"])
+        self.assertEqual(b.collection_stats["index_only"], 1)
+        self.assertEqual(b.collection_stats["detail_attempts"], 0)
+
+    def test_past_notice_is_not_staged_from_the_index(self):
+        b = self.bot()
+        with patch.object(b, "fetch", return_value=SimpleNamespace(status_code=200, text=index(sale="1/1/2020"))):
+            self.assertEqual(b.scrape(), [])
+
+    def test_refused_index_stages_nothing(self):
+        b = self.bot()
+        with patch.object(b, "fetch", return_value=SimpleNamespace(status_code=403, text="")):
+            self.assertEqual(b.scrape(), [])
+        self.assertTrue(b.collection_stats["partial"])
+
 
 if __name__ == "__main__": unittest.main()

@@ -175,7 +175,8 @@ NEW_BOTS = [
     ("knoxville_poh", knoxville_poh_bot.run),
     ("tn_tax_delinquent", tn_tax_delinquent_bot.run),
     ("hamilton_tax_delinquent", hamilton_tax_delinquent_bot.run),
-    ("nashville_ledger", nashville_ledger_bot.run),
+    # nashville_ledger stopped 2026-11-24: tnledger.com/robots.txt disallows
+    # all crawling (see _source_access.STOPPED). Staged rows are kept.
     ("memphis_daily_news", memphis_daily_news_bot.run),
     ("memphis_trustee_calendar", memphis_trustee_calendar.run),
     ("hamilton_county_herald", hamilton_county_herald_bot.run),
