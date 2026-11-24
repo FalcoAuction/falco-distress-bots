@@ -192,7 +192,14 @@ def company_signer(row: Dict[str, Any], owner: Optional[str], notice: Optional[D
     lines = mail_lines(row, evidence)
     mailing = next((line for line, _ in lines if entity_signer.mailing_key(line)), None)
     texts = [(raw.get("body"), notice)] if raw.get("body") and notice else []
-    return entity_signer.find(owner, texts=texts, mail_lines=lines, mailing=mailing, mailing_index=mailing_index)
+    st = _d(raw.get("structured"))
+    return entity_signer.find(
+        owner, texts=texts, mail_lines=lines, mailing=mailing, mailing_index=mailing_index,
+        # A stored county business license lookup (cre_review_bot fills it; never a network read here).
+        licenses=_d(raw.get("signer_lookup")).get("hamilton_county_clerk"),
+        addresses=[line for line, _ in lines] + [row.get("property_address")],
+        # The lender's side of the notice can never sign for the owner.
+        never=[st.get(k) for k in ("substitute_trustee", "original_trustee", "attorney", "lender")])
 
 
 def mailing_index_for(rows: List[Dict[str, Any]], evidence_for=None) -> Dict[str, Any]:
@@ -382,7 +389,7 @@ def _signer_gate(kind: str, owner: Optional[str], signer: Optional[str],
         paths = entity_signer.path_lines(answer) if kind == "entity" else []
         reason = f"The owner of record is a {what}, so the signer is unresolved."
         if paths:
-            reason += f" {len(paths)} path{'s' if len(paths) > 1 else ''} to the signer on file, not verified."
+            reason += " " + entity_signer.hold_note(answer)
         return "research_hold", reason, paths + verify
     if kind == "co_owners":
         return ("research_hold", "The county lists additional unnamed co-owners (et al, et ux); every owner must sign "
