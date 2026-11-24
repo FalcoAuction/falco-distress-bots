@@ -14,6 +14,7 @@ COUNTY = " in Register's Office of Shelby County, Tennessee; "
 class AppointmentTests(unittest.TestCase):
     def setUp(self):
         self.bot = MemphisDailyNewsBot()
+        self.bot.read_details = True    # the detail parser, kept for a permitted copy of the page
         self.addCleanup(self.bot.session.close)
 
     def lead(self, fid="FD117714", body=None, **overrides):

@@ -155,6 +155,12 @@ class NashvilleLedgerReextractBot(BotBase):
         return []
 
     def run(self) -> Dict[str, Any]:
+        from ._source_access import stopped
+        halt = stopped(self.name)
+        if halt:
+            # tnledger.com disallows all crawling; nothing is re-fetched.
+            return {"name": self.name, "status": "source_stopped", "stopped_on": halt["stopped_on"],
+                    "fetched": 0, "staged": 0, "duplicates": 0, "error": None}
         started = datetime.now(timezone.utc)
         self._report_health(
             status="running", started_at=started, finished_at=None,
@@ -178,7 +184,8 @@ class NashvilleLedgerReextractBot(BotBase):
         )
 
         sess = requests.Session()
-        sess.headers.update({"User-Agent": "Mozilla/5.0"})
+        from ._base import FALCO_USER_AGENT
+        sess.headers.update({"User-Agent": FALCO_USER_AGENT})
 
         attempted = 0
         new_principal = 0

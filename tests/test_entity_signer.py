@@ -22,6 +22,20 @@ from src.bots._tax_tract_review import shelby_card  # noqa: E402
 from src.bots.cre_review_bot import plan_rows  # noqa: E402
 
 TODAY = date(2026, 11, 23)
+
+
+def setUpModule():
+    # These fixtures model a newspaper notice whose source is still being
+    # read. The stopped-source behaviour is covered in test_source_access.
+    global _reading
+    from unittest import mock
+    from src.bots import _source_access
+    _reading = mock.patch.dict(_source_access.STOPPED, clear=True)
+    _reading.start()
+
+
+def tearDownModule():
+    _reading.stop()
 NOTICE = source("Trustee sale notice, nashville_ledger", "https://example.test/notice/9", "2026-11-06")
 RECITAL = ("Deed of Trust dated March 1, 2024, of record in Book 100, Page 5, executed by Example Holdings, LLC, a "
            "Tennessee Limited Liability Company; by it's member, Jane Q. Doe AND Jane Q. Doe Individually, conveying "

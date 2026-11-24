@@ -137,27 +137,31 @@ def _iso_date(value: Any) -> Optional[str]:
     return s[:10] if re.match(r"^\d{4}-\d{2}-\d{2}$", s[:10]) else None
 
 
+class TpadUnavailable(Exception):
+    """TPAD refused the request or could not be reached. Never a 'no match'."""
+
+
 def _build_session() -> "requests.Session":
     s = requests.Session()
-    # TPAD sits behind an Azure Application Gateway that 403s non-browser
-    # user agents. The old descriptive UA was blocked on every request,
-    # which is why this enricher never returned anything. These headers
-    # are what the site's own search form sends.
+    # Sends the shared FALCO agent. TPAD sits behind an Azure Application
+    # Gateway that answered 403 to that agent on 2026-11-24 (robots.txt and
+    # /TPAD/ both). That is the site's access decision: no browser agent is
+    # substituted, and the source is unavailable until the gateway accepts
+    # the honest agent. The same county data comes from the Comptroller's
+    # weekly parcel files (see _comptroller.py), which stay in use.
+    from ._base import FALCO_USER_AGENT
     s.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-        ),
+        "User-Agent": FALCO_USER_AGENT,
         "Accept": "application/json, text/javascript, */*; q=0.01",
         "X-Requested-With": "XMLHttpRequest",
-        "Referer": f"{TPAD_BASE}/Search",
-        "Origin": "https://assessment.cot.tn.gov",
         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
     })
     s.verify = False
+    s.tpad_refused = False
     # Prime cookies via initial GET
     try:
-        s.get(f"{TPAD_BASE}/", timeout=15)
+        primed = s.get(f"{TPAD_BASE}/", timeout=15)
+        s.tpad_refused = primed.status_code in (401, 403)
     except Exception:
         pass
     return s
@@ -169,7 +173,14 @@ def _build_session() -> "requests.Session":
 def search_by_owner(
     session: "requests.Session", jur_code: str, owner: str, address: str = ""
 ) -> List[Dict[str, Any]]:
-    """POST to TPAD AJAX endpoint, return list of result dicts."""
+    """POST to TPAD AJAX endpoint, return list of result dicts.
+
+    Raises TpadUnavailable when the site refuses or cannot be reached, so a
+    caller never records a refusal as "no parcel found". After one refusal
+    no further request is sent on this session.
+    """
+    if getattr(session, "tpad_refused", False):
+        raise TpadUnavailable("TPAD refused the FALCO agent")
     payload = {
         "Jur": jur_code,
         "Owner": owner,
@@ -185,8 +196,14 @@ def search_by_owner(
     }
     try:
         r = session.post(TPAD_SEARCH, data=payload, timeout=30)
-        if r.status_code != 200:
-            return []
+    except Exception as exc:
+        raise TpadUnavailable(f"TPAD request failed ({type(exc).__name__})")
+    if r.status_code in (401, 403):
+        session.tpad_refused = True
+        raise TpadUnavailable(f"TPAD refused the FALCO agent ({r.status_code})")
+    if r.status_code != 200:
+        raise TpadUnavailable(f"TPAD answered {r.status_code}")
+    try:
         return r.json() or []
     except Exception:
         return []
@@ -423,6 +440,10 @@ def run() -> Dict[str, Any]:
         return {"name": "tpad_enricher", "status": "no_supabase"}
 
     session = _build_session()
+    if session.tpad_refused:
+        print("TPAD refused the FALCO agent; source unavailable, nothing read or written")
+        return {"name": "tpad_enricher", "status": "source_unavailable", "error": "TPAD refused the FALCO agent",
+                "enriched": 0, "staged": 0, "duplicates": 0}
     enriched = 0
     no_match = 0
     external = 0
@@ -471,7 +492,14 @@ def run() -> Dict[str, Any]:
 
         for i, lead in enumerate(rows[:100]):  # cap per run
             print(f"  [{i+1}] {(lead.get('property_address') or '')[:55]:58s}", end=" ")
-            ok, result = enrich_lead(session, lead)
+            try:
+                ok, result = enrich_lead(session, lead)
+            except TpadUnavailable as exc:
+                # A refusal or outage is not a miss: park nothing, stop the run.
+                print(f"-> STOP ({exc})")
+                return {"name": "tpad_enricher", "status": "source_unavailable", "error": str(exc),
+                        "enriched": enriched, "no_match": no_match, "external_county": external,
+                        "skipped": skipped, "staged": 0, "duplicates": 0}
             if not ok:
                 err = result.get("error", "unknown")
                 if err == "external_county":
