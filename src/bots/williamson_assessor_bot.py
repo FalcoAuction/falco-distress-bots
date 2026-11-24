@@ -35,6 +35,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, _supabase
+from ._value_guard import require_value_evidence, today_iso
 
 
 INIGO_BASE = "https://inigo.williamson-tn.org/property_search"
@@ -125,6 +126,8 @@ class WilliamsonAssessorBot(BotBase):
                 if hit.get("appraised"):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "williamson_assessor"
+                    require_value_evidence(update, row, parcel=hit.get("parcel_id"), county="williamson",
+                                           observed_on=today_iso(), record_address=hit.get("property_address"))
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
                 existing_raw = row.get("raw_payload") or {}

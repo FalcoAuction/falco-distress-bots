@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload, _supabase
+from ._value_guard import require_value_evidence, today_iso
 from ._owner_lookup import LegacyTLSAdapter
 from ._tax_tract_review import CARD_KEY, STATUS_KEY, next_status, patch_for, shelby_card, shelby_wants_card
 
@@ -221,6 +222,9 @@ class ShelbyTaxSaleBot(BotBase):
             if evidence.get("estimated_appraisal") and row.get("property_value") is None:
                 patch.update(property_value=evidence["estimated_appraisal"],
                              property_value_source="shelby_trustee_assessment_estimate")
+                # The Trustee page read is this row's own parcel, dated.
+                require_value_evidence(patch, row, parcel=row["raw_payload"].get("parcel"), county="shelby",
+                                       observed_on=evidence.get("checked_on"))
             apply(client, "homeowner_requests_staging", row, patch)
 
     def _refresh_details(self, client, rows, current, today, *, ids=None, budget=None, max_age_days=REFRESH_AFTER_DAYS):

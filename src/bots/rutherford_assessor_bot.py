@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._value_guard import require_value_evidence, today_iso
 from ._provenance import record_field
 
 
@@ -132,6 +133,8 @@ class RutherfordAssessorBot(BotBase):
                 if hit.get("appraised"):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "rutherford_assessor"
+                    require_value_evidence(update, row, parcel=hit.get("parcel_id"), county="rutherford",
+                                           observed_on=today_iso(), record_address=hit.get("property_address"))
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
 

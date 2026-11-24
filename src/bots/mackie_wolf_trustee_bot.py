@@ -94,12 +94,19 @@ class MackieWolfTrusteeBot(BotBase):
 
     # How far back to walk looking for the most recent PDF
     max_days_lookback = 21
-    # This firm sits behind a WAF that drops our honest bot UA when the
-    # request comes from a CI datacenter IP, so the scraper silently found
-    # nothing in production while working fine locally.
-    user_agent = (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
+    # Sends the shared FALCO agent (see _base.FALCO_USER_AGENT). mwzmlaw.com's
+    # robots.txt allows every path (read 2026-11-24). The firm's WAF has
+    # refused a non-browser agent from CI addresses before; if it does again
+    # the list is unavailable and the run is recorded as failed. Sale cards then read
+    # "not read since DATE" (see _preforeclosure_review.sale_state); nothing is
+    # treated as withdrawn. No browser agent is substituted.
+    refused = False
+
+    def fetch(self, url, method="GET", timeout=30.0, **kwargs):
+        res = super().fetch(url, method=method, timeout=timeout, **kwargs)
+        if res is not None and res.status_code in (401, 403, 429):
+            self.refused = True
+        return res
 
     def scrape(self) -> List[LeadPayload]:
         self._report = None
@@ -110,6 +117,9 @@ class MackieWolfTrusteeBot(BotBase):
             return []
 
         pdf_url, report_date = self._find_latest_pdf()
+        if pdf_url is None and self.refused:
+            # Recorded as a failed run, not a quiet week. Nothing is written.
+            raise RuntimeError("source_refused: mwzmlaw.com refused the FALCO agent; sale list not read")
         if pdf_url is None:
             self.logger.warning(
                 f"no Mackie Wolf TN PDF found in last {self.max_days_lookback} days"
@@ -118,6 +128,8 @@ class MackieWolfTrusteeBot(BotBase):
 
         self.logger.info(f"using report dated {report_date.isoformat()}: {pdf_url}")
         pdf_bytes = self._download_pdf(pdf_url)
+        if pdf_bytes is None and self.refused:
+            raise RuntimeError("source_refused: mwzmlaw.com refused the FALCO agent; sale list not read")
         if pdf_bytes is None:
             return []
 
@@ -165,6 +177,8 @@ class MackieWolfTrusteeBot(BotBase):
                 self.logger.info(f"sale report discovered: {best[0]}")
                 return best
 
+        if self.refused:
+            return None, None     # refused: do not probe forty more URLs
         self.logger.warning(
             "investors page gave no sale report link; falling back to probing"
         )

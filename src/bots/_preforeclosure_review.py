@@ -29,9 +29,11 @@ import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
+from ._value_guard import unverified_label
 from ._pilot_review import _ENTITY, _SUFFIX, build_review, debt, source
 from ._shelby_register import detail_url
 from ._shelby_trustee_value import parcel_key, street_key
+from ._source_access import not_read_text, read_state
 from ._trustee_list_match import LIST_STALE_DAYS
 
 LANE = "pre_foreclosure"
@@ -388,8 +390,12 @@ def sale_state(row: Dict[str, Any], source_last_read: Optional[datetime], now: d
     # The notice's own trustee list (see _trustee_list_match). It counts only
     # while the read is recent.
     check = row.get("list_check") if isinstance(row.get("list_check"), dict) else {}
+    lapsed = None
     if not check.get("checked_on") or (today - date.fromisoformat(check["checked_on"])).days >= LIST_STALE_DAYS:
-        check = {}
+        # A list that is refused, down or stopped stops counting. What it
+        # last showed is kept only to say when it was last read: an old
+        # "dropped" is not a withdrawal and an old "confirmed" is not current.
+        lapsed, check = (check if check.get("checked_on") else None), {}
     if check.get("status") == "postponed" and check.get("prior_date") and check.get("date") == sale:
         if check["prior_date"] not in dates:
             dates.append(check["prior_date"])
@@ -408,12 +414,21 @@ def sale_state(row: Dict[str, Any], source_last_read: Optional[datetime], now: d
         return {**state, "status": "manual", "manual_status": label}
     if not sale:
         return {**state, "status": "undated"}
+    direct = row.get("bot_source") in FIRMS
+    feed = read_state(row.get("bot_source"), source_last_read, now, SOURCE_STALE_DAYS) if direct else None
+    if feed and feed["status"] != "current" and (source_last_read is None or source_last_read.date().isoformat() < sale):
+        # The firm's list was last read before this sale date (refused, down
+        # or stopped). Nothing read since can show a postponement, a
+        # cancellation or a sale, so the record says only when it was last
+        # read. This comes before the passed-date check on purpose.
+        return {**state, "status": "unverified", "prior_date": prior, "not_read_since": feed["not_read_since"],
+                "source_stopped_on": feed["stopped_on"], "date_passed": sale < today.isoformat()}
     if sale < today.isoformat():
         return {**state, "status": "passed"}
-    direct = row.get("bot_source") in FIRMS
     if direct:
-        if source_last_read is None or (now - source_last_read).days >= SOURCE_STALE_DAYS:
-            return {**state, "status": "unverified", "prior_date": prior}
+        if feed["status"] != "current":
+            return {**state, "status": "unverified", "prior_date": prior, "not_read_since": feed["not_read_since"],
+                    "source_stopped_on": feed["stopped_on"], "date_passed": False}
         if seen is None or (source_last_read - seen) > timedelta(hours=WITHDRAWN_AFTER_HOURS):
             return {**state, "status": "withdrawn", "source_read_on": source_last_read.date().isoformat()}
     elif calendar.get("status") == "omitted" and calendar.get("checked_on"):
@@ -429,6 +444,11 @@ def sale_state(row: Dict[str, Any], source_last_read: Optional[datetime], now: d
         on_firm_list = check.get("status") in ("confirmed", "postponed") and check.get("date") == sale
         if not (on_calendar or seen_on_list or on_firm_list):
             note = check.get("reason")
+            if lapsed and lapsed.get("firm"):
+                note = (f"{lapsed['firm']}'s sale list has not been read since {lapsed['checked_on']}"
+                        + (f"; it showed {lapsed['date']} then" if lapsed.get("status") in ("confirmed", "postponed")
+                           and lapsed.get("date") else "")
+                        + ". That is a gap in reading the list, not a withdrawal")
             if check.get("status") == "postponed":
                 note = (f"{check.get('firm')}'s sale list shows {check.get('date')}; the record still carries {sale} "
                         "and has not been updated")
@@ -493,7 +513,12 @@ def _value(row: Dict[str, Any], evidence: Optional[Dict[str, Any]], checked: Opt
         basis, estimate = VALUE_BASIS.get(row.get("property_value_source") or "",
                                           (f"Value from {row.get('property_value_source') or 'an unnamed source'}. "
                                            "Basis not documented, treat as an estimate", True))
-        return {"value": float(row["property_value"]), "value_basis": basis, "value_is_estimate": estimate,
+        # No parcel record on the row backs this number: say so on the card.
+        label = unverified_label({**row, "raw_payload": {**(row.get("raw") or {}),
+                                                         "comptroller_parcel": row.get("comptroller")},
+                                  "phone_metadata": {"shelby_trustee_value_review": row.get("trustee_review")}})
+        return {"value": float(row["property_value"]), "value_basis": f"{label}. {basis}" if label else basis,
+                "value_is_estimate": bool(estimate or label),
                 "value_source": source(f"Staging value, source {row.get('property_value_source') or 'unknown'}",
                                        None, checked)}
     return {"value": None, "value_basis": None, "value_is_estimate": False, "value_source": None}
@@ -817,7 +842,12 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
         what += ". No sale date is recorded."
         event_status = "unknown"
     else:
-        what += f", last advertised for {sale}. The trustee's list has not been read since {listed_on}, so today's status is not confirmed."
+        feed = {"not_read_since": state.get("not_read_since") or listed_on, "stopped_on": state.get("source_stopped_on")}
+        what += (f", last advertised for {sale}. " + not_read_text("The trustee's list", feed)
+                 + " Today's status is not confirmed. This is a gap in reading the list, not a withdrawal or a sale.")
+        if state.get("date_passed"):
+            what += (f" The advertised date {sale} has since passed; a postponement, a cancellation or a sale "
+                     "would not show here.")
         event_status = "unknown"
     if on_firm_list:
         what += (f" The Memphis Daily News notice {row.get('notice_id') or ''} advertised "
@@ -905,7 +935,12 @@ def sale_card(row: Dict[str, Any], state: Dict[str, Any], today: date,
     elif seed.get("hold"):
         hold = seed["hold"]
         availability["verify_next"] = list(seed.get("verify_next") or []) + availability["verify_next"]
-    elif status in ("unverified", "undated", "manual"):
+    elif status == "unverified":
+        hold = ("Today's sale status is not confirmed: "
+                + not_read_text("the trustee's list", {"not_read_since": state.get("not_read_since") or listed_on,
+                                                        "stopped_on": state.get("source_stopped_on")}).rstrip("."))
+        availability["verify_next"].insert(0, "Reread the trustee's sale list")
+    elif status in ("undated", "manual"):
         hold = "Today's sale status is not confirmed by the trustee's list"
         availability["verify_next"].insert(0, "Reread the trustee's sale list")
     elif conflicts:

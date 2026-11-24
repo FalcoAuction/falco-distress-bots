@@ -27,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from bs4 import BeautifulSoup
 
 from ._base import BotBase, LeadPayload, _supabase, make_session
+from ._value_guard import require_value_evidence, today_iso
 from ._provenance import record_field
 
 
@@ -148,6 +149,8 @@ class DavidsonAssessorBot(BotBase):
                 if hit.get("appraised"):
                     update["property_value"] = int(round(float(hit["appraised"])))
                     update["property_value_source"] = "davidson_assessor"
+                    require_value_evidence(update, row, parcel=hit.get("parcel"), county="davidson",
+                                           observed_on=today_iso(), record_address=hit.get("property_address"))
                 if hit.get("owner") and not row.get("owner_name_records"):
                     update["owner_name_records"] = hit["owner"]
                 # Always merge the assessor record into raw_payload for audit

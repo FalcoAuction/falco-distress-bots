@@ -200,7 +200,11 @@ def property_value_trust(row: Mapping[str, Any]) -> FieldTrust:
     source = str(row.get("property_value_source") or "").strip()
     pm = as_metadata(row)
     xref = pm.get("property_value_xref") or {}
-    if isinstance(xref, Mapping) and xref:
+    # A copy made under the exact-parcel rule, or one the backfill settled,
+    # is a county parcel value and is classified by its source below.
+    settled = isinstance(xref, Mapping) and (xref.get("match") == "exact_parcel" or xref.get("status") in (
+        "replaced_by_own_parcel_record", "superseded_by_parcel_record", "removed_cross_parcel"))
+    if isinstance(xref, Mapping) and xref and not settled:
         conf = safe_float(xref.get("confidence")) or 0.60
         return FieldTrust(
             value,

@@ -30,7 +30,9 @@ from datetime import date, datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import _entity_signer as entity_signer
+from ._value_guard import unverified_label
 from ._pilot_review import build_review, debt, source
+from ._source_access import not_read_text, read_state
 from ._property_lane import (COMMERCIAL_MAX_VALUE, COMMERCIAL_MIN_VALUE, _name_set, _num, last_sale,
                              owner_mismatch, owner_type, parcel_id, parcel_owner, value_source)
 from ._warn_gate import is_tn_warn
@@ -320,6 +322,8 @@ def generic_hold_card(row: Dict[str, Any], today: date,
     vsrc = value_source(row, raw)
     value = _num(row.get("property_value")) if vsrc else None
     basis = f"County appraisal ({vsrc})" if value else None
+    if value and unverified_label(row):
+        basis = unverified_label(row) + ". " + basis
     src = source(f"{row.get('bot_source')} record", row.get("source_url"), today)
     answer = company_signer(row, owner, mailing_index=mailing_index) if kind == "entity" else None
     check = {"BANKRUPTCY": "Read the petition and schedules: is the debtor the entity that owns this parcel, and is the case open",
@@ -446,7 +450,11 @@ def foreclosure_card(row: Dict[str, Any], today: date,
     seen = _iso(_d(pm.get("notice_tracking")).get("last_seen_at"))
     adjourned = "adjourn" in " ".join(str(st.get(k) or "") for k in ("original_trustee", "notice_type")).lower()
     status = "postponed" if adjourned else "active"
-    if not sale:
+    # A notice whose source is no longer read (see _source_access) cannot show
+    # a postponement or cancellation. It reads "not read since", never current.
+    feed = read_state(row.get("bot_source"), seen, today, 10 ** 6)
+    unread = feed["status"] == "stopped"
+    if not sale or unread:
         status = "unknown"
     elif sale < today.isoformat():
         status = "resolved"
@@ -454,6 +462,8 @@ def foreclosure_card(row: Dict[str, Any], today: date,
     vsrc = value_source(row, raw)
     value = _num(row.get("property_value")) if vsrc else None
     basis = f"County appraisal ({vsrc})" if value else None
+    if value and unverified_label(row):
+        basis = unverified_label(row) + ". " + basis
     tp = _d(raw.get("tpad"))
     if value is None and _num(tp.get("building_value_num")):
         value, vsrc = _num(tp.get("building_value_num")), "tpad"
@@ -497,7 +507,8 @@ def foreclosure_card(row: Dict[str, Any], today: date,
         owner_names=owner_names_as_sourced(borrower or owner_rec),
         event={"what": (f"Trustee foreclosure sale advertised for {sale}" if sale else "Trustee foreclosure notice")
                + (f" by {trustee}" if trustee else "") + (" (adjourned sale date)" if adjourned else "")
-               + (f"; last seen in print {seen}" if seen else ""),
+               + (f"; last seen in print {seen}" if seen and not unread else "")
+               + ("; " + not_read_text("the newspaper notice", feed)[:-1] if unread else ""),
                "status": status, "checked_on": seen or today, "source": notice},
         asset={"description": desc, "parcel": pid, "address": row.get("property_address"),
                "tie": "The notice names this street address; " + " and ".join(tie_bits) if tie_bits else "",
@@ -519,6 +530,12 @@ def foreclosure_card(row: Dict[str, Any], today: date,
                       "verify_next": verify})
     facts = _facts(row, pid, owner, kind, f"trustee sale notice naming the parcel owner; sale {sale}", value, basis, sale,
                    signer, answer)
+    if unread:
+        return _hold(card, "research_hold",
+                     not_read_text("The newspaper that printed this notice", feed)
+                     + (f" The sale date {sale} is as last advertised and is not confirmed as current." if sale else "")
+                     + (" That date has passed; the outcome is not on file." if sale and sale < today.isoformat() else ""),
+                     ["Confirm the sale date with the substitute trustee or the county before any spend"]), facts
     if status == "resolved":
         # A passed date is not proof of a sale: it may have been postponed or cancelled.
         return _hold(card, "research_hold", f"The advertised sale date {sale} has passed; the outcome is not on file.",
