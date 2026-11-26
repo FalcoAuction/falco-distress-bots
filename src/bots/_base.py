@@ -383,6 +383,9 @@ class BotBase:
         else:
             status = "ok"
 
+        # Cases a code bot counted and left out of staging (see _code_severity).
+        door_counts = dict(getattr(self, "door_counts", None) or {})
+
         self._report_health(
             status=status,
             started_at=started_at,
@@ -392,7 +395,7 @@ class BotBase:
             staged_count=staged_count,
             duplicate_count=duplicate_count,
             error_message=error_message,
-            notes={"fingerprint": fp, "key_count": len(leads)} if fp else None,
+            notes={**({"fingerprint": fp, "key_count": len(leads)} if fp else {}), **door_counts} or None,
         )
 
         return {
@@ -403,6 +406,7 @@ class BotBase:
             "staged": staged_count,
             "duplicates": duplicate_count,
             "error": error_message,
+            **door_counts,
         }
 
     # ── Internal: staging writes ────────────────────────────────────────────

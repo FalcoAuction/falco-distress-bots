@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from ._base import BotBase, LeadPayload, _supabase
+from ._code_severity import door_filter
 
 
 NASHVILLE_CODES_ENDPOINT = (
@@ -198,6 +199,12 @@ class NashvilleCodesBot(BotBase):
         known = {r["pipeline_lead_key"] for r in candidates}
         # Include manual rejections in deduplication; don't recreate a rejected case.
         fresh = [lead for lead in leads if lead.pipeline_lead_key not in known]
+        # Nuisance cases (the database's own rule) are counted and not stored.
+        # Only new cases are tested: a stored case is refreshed below as before,
+        # and a case whose text turns severe is staged on that run.
+        new_count = len(fresh)
+        fresh, dropped = door_filter(fresh)
+        self.door_counts = {"nuisance_not_staged": dropped}
         staged, _ = super()._write_staging(fresh) if fresh else (0, 0)
         today = datetime.now(timezone.utc).date().isoformat()
         selected = refresh_candidates(candidates, today)
@@ -254,7 +261,7 @@ class NashvilleCodesBot(BotBase):
                         self.refresh_counts["failed"] += 1
                         self.logger.warning("Metro refresh write failed id=%s (%s)", row["id"], type(exc).__name__)
         self.logger.info("Metro refresh %s", self.refresh_counts)
-        return staged, len(leads) - len(fresh)
+        return staged, len(leads) - new_count
 
     def _build_lead(self, attrs: dict) -> Optional[LeadPayload]:
         case_num = str(attrs.get("Request_Nbr") or "").strip()

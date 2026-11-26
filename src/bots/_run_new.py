@@ -579,7 +579,9 @@ def run_pipeline(
                 result = runner() or {}
             status = result.get("status") or "?"
             print(f"[{name}] -> {status}: {result.get('staged', 0)} staged, "
-                  f"{result.get('duplicates', 0)} dupes, {result.get('fetched', 0)} fetched")
+                  f"{result.get('duplicates', 0)} dupes, {result.get('fetched', 0)} fetched"
+                  + (f", {result['nuisance_not_staged']} nuisance not staged"
+                     if "nuisance_not_staged" in result else ""))
         except BotTimeout as e:
             # The bot's own run() either caught this (and recorded
             # timed_out/failed itself) or it escaped. Either way close
@@ -602,6 +604,8 @@ def run_pipeline(
             "staged": result.get("staged", 0),
             "fetched": result.get("fetched", 0),
             "duplicates": result.get("duplicates", 0),
+            **({"nuisance_not_staged": result["nuisance_not_staged"]}
+               if "nuisance_not_staged" in result else {}),
             "error": (result.get("error") or None) and str(result.get("error"))[:500],
         })
         _flush()
