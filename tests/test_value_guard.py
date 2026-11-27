@@ -71,6 +71,14 @@ class Query:
         self.window = (a, b)
         return self
 
+    def gt(self, key, value):
+        self.filters.append(lambda r: r.get(key) is not None and r.get(key) > value)
+        return self
+
+    def limit(self, n):
+        self.window = (0, n - 1)
+        return self
+
     def update(self, patch):
         self.patch = patch
         return self

@@ -290,24 +290,34 @@ class XrefAvmEnricherBot(BotBase):
     def _fetch_all(self, client, table: str) -> List[Dict[str, Any]]:
         out = []
         page = 0
-        PAGE_SIZE = 1000
+        # Pages continue from the last id, not from an offset: at offset 42,000
+        # the scan timed out on the small database (2026-11-27) and the run
+        # worked from a partial table. One retry, then stop.
+        PAGE_SIZE = 500
+        last_id = None
+        failures = 0
         while True:
             try:
                 # Every status is read on purpose: a rejected row that holds
                 # a verified parcel value can still supply it to a live lead.
-                r = client.table(table).select(SCAN_COLUMNS).order("id").range(
-                    page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1
-                ).execute()
+                q = client.table(table).select(SCAN_COLUMNS)
+                if last_id is not None:
+                    q = q.gt("id", last_id)
+                r = q.order("id").limit(PAGE_SIZE).execute()
                 rows = getattr(r, "data", None) or []
                 if not rows:
                     break
+                last_id = rows[-1]["id"]
                 out.extend(_light_row(x) for x in rows)
                 if len(rows) < PAGE_SIZE:
                     break
                 page += 1
+                failures = 0
             except Exception as e:
+                failures += 1
                 self.logger.warning(f"fetch failed on {table} page {page}: {e}")
-                break
+                if failures > 1:
+                    break
         return out
 
 
