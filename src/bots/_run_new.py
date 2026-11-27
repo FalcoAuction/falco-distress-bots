@@ -96,6 +96,7 @@ from . import rutherford_assessor_bot
 from . import montgomery_assessor_bot
 from . import hamilton_assessor_bot
 from . import comptroller_parcels_bot
+from . import code_case_values_bot
 from . import land_lane_bot
 from . import land_review_bot
 from . import church_closure_bot
@@ -280,6 +281,11 @@ NEW_BOTS = [
     # 86 Comptroller counties from local weekly files; reports no_data
     # (and does nothing) where data/comptroller/ is absent, e.g. in CI.
     ("comptroller_parcels", comptroller_parcels_bot.run),
+    # Free: county value and owner of record for serious code cases in
+    # Memphis, Chattanooga, Knoxville and Johnson City, one parcel or nothing.
+    # At most 40 county checks a run (CODE_CASE_VALUES_CAP), paced, and a
+    # failed county read changes nothing. CODE_CASE_VALUES_WRITE=0 parks it.
+    ("code_case_values", code_case_values_bot.run),
     # Free: closed United Methodist churches; property vested in the
     # Conference Trustees (one seller for every building).
     ("church_closure", church_closure_bot.run),

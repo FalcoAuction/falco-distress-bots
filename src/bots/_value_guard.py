@@ -37,6 +37,7 @@ BASIS = {
     "williamson_assessor": "Williamson County Assessor total appraised value",
     "shelby_trustee_assessment_estimate":
         "Shelby County realty bill assessment divided by the class ratio. An estimate, not an appraisal",
+    "knox_trustee_bill": "Knox County Trustee current-year real property bill total property value",
 }
 
 # Estimates built from the row's own document, not from a parcel record.
@@ -176,6 +177,12 @@ def value_evidence(row: Mapping[str, Any]) -> List[Dict[str, Any]]:
         kind = ("shelby_trustee_assessment_estimate" if county == "shelby" and seed.get("value_is_estimate")
                 else "metro_nashville_parcels" if county == "davidson" else "county_parcel_review")
         add(kind, seed.get("parcel"), seed.get("value"), seed.get("observed_on"), county, basis=seed.get("value_basis"))
+    # Serious code cases: the county record matched to exactly one parcel
+    # (code_case_values_bot). A held or unmatched check states no value.
+    case = _d(raw.get("code_case_parcel"))
+    if case.get("status") == "matched":
+        add(case.get("source"), case.get("parcel"), case.get("value"), case.get("value_as_of"),
+            case.get("county"), case.get("record_address"), basis=case.get("value_basis"))
     return out
 
 

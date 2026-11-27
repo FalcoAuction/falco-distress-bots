@@ -111,9 +111,9 @@ class RuleTests(unittest.TestCase):
                            raw_payload={"nashville_codes": {"Violations_Noted": "UNSAFE STRUCTURE"}})
         self.assertEqual(code_severity(lead), "severe")
 
-    def test_rows_of_unfiltered_bots_carry_no_text_the_rule_reads(self):
-        # Why these bots are NOT filtered: the rule calls every row nuisance,
-        # however serious the case text they store elsewhere.
+    def test_other_city_rows_are_read_from_their_own_fields(self):
+        # Site migration 20261127000100: the rule reads each other city's own
+        # violation field. These bots are still not filtered at the door.
         shapes = {
             "memphis_codes": {"memphis_311": {"REQUEST_TYPE": "CE-Unsafe Structure"}, "memphis_codes_review": {"request_type": "CE-Unsafe Structure"}},
             "chattanooga_codes": {"chattanooga_codes": {"descriptions": ["UNSAFE STRUCTURES"], "rows": [{"description": "CONDEMNED"}]}},
@@ -123,7 +123,11 @@ class RuleTests(unittest.TestCase):
         }
         for name, raw in shapes.items():
             with self.subTest(bot=name):
-                self.assertEqual(code_severity({"distress_type": "CODE_VIOLATION", "raw_payload": raw}), "nuisance")
+                self.assertEqual(code_severity({"distress_type": "CODE_VIOLATION", "raw_payload": raw}), "severe")
+        # Text kept only in a field the rule does not read is still not seen.
+        self.assertEqual(code_severity({"distress_type": "CODE_VIOLATION", "raw_payload": {
+            "memphis_311": {"REQUEST_TYPE": "CE-Roof"}, "memphis_codes_review": {"request_type": "CE-Unsafe Structure"}}}),
+            "nuisance")
 
 
 class SwitchTests(unittest.TestCase):
