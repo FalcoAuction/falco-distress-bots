@@ -67,6 +67,7 @@ SOURCES = {
     "johnson_city_bdsr": "washington",
 }
 MAX_PER_RUN = int(os.environ.get("CODE_CASE_VALUES_CAP", "40"))
+KNOX_STORED_BILL_OK = os.environ.get("CODE_CASE_VALUES_KNOX_STORED", "0").strip().lower() in ("1", "true", "on", "yes")
 RECHECK_DAYS = 30
 PAGE = 100
 MAX_PAGES = 3
@@ -316,7 +317,9 @@ class CodeCaseValuesBot(BotBase):
     def _knox(self, row, today):
         raw = row["raw_payload"]
         roll = raw.get("knox_assessor")
-        if not isinstance(roll, dict):
+        # The stored Knox bill was read from a host whose robots.txt closes all
+        # crawling, so it is not used unless that source is cleared by the owner.
+        if not KNOX_STORED_BILL_OK or not isinstance(roll, dict):
             return held("no_permitted_county_source")
         value = roll.get("appraised_value")
         if (not raw.get("parcel_id") or roll.get("parcel_id") != raw.get("parcel_id")

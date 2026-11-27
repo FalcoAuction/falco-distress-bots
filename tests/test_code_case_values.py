@@ -6,6 +6,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -408,9 +409,17 @@ class KnoxTests(unittest.TestCase):
             payload["knox_assessor"] = roll
         return stored("k1", "knoxville_poh", "2937 Whittle Springs Road, Knoxville, TN", payload)
 
-    def test_stored_bill_for_the_docket_parcel_supplies_value_and_owner(self):
+    def test_stored_bill_is_not_used_unless_the_source_is_cleared(self):
         db = Db(self.case(self.ROLL))
         bot_with().process(db, db.shaped(), write=True, today=TODAY)
+        row = db.rows["k1"]
+        self.assertIsNone(row.get("property_value"))
+        self.assertIsNone(row.get("owner_name_records"))
+
+    def test_stored_bill_for_the_docket_parcel_supplies_value_and_owner(self):
+        db = Db(self.case(self.ROLL))
+        with mock.patch("src.bots.code_case_values_bot.KNOX_STORED_BILL_OK", True):
+            bot_with().process(db, db.shaped(), write=True, today=TODAY)
         row = db.rows["k1"]
         self.assertEqual((row["property_value"], row["property_value_source"], row["property_value_as_of"]),
                          (299500, "knox_trustee_bill", "2026-11-22"))
@@ -423,6 +432,7 @@ class KnoxTests(unittest.TestCase):
         self.assertIsNone(db.rows["k1"]["property_value"])
         self.assertEqual(db.rows["k1"]["raw_payload"][ccv.KEY]["reason"], "no_permitted_county_source")
 
+    @mock.patch("src.bots.code_case_values_bot.KNOX_STORED_BILL_OK", True)
     def test_stored_record_for_another_parcel_or_street_writes_nothing(self):
         for change in ({"parcel_id": "070PB006"}, {"property_address": "2939 Whittle Springs Road, Knoxville, TN"},
                        {"case_number": "CE-26-000001"}):
