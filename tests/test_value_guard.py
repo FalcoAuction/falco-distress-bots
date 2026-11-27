@@ -1,7 +1,12 @@
 """A value belongs to a parcel, not to a street (see src/bots/_value_guard.py)."""
 import copy
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _fake_supabase import project  # noqa: E402
 
 from src.bots import xref_avm_enricher_bot as xref
 from src.bots._field_confidence import property_value_trust
@@ -49,8 +54,14 @@ KHANLARIAN_OTHER = tax_row("other", "081101  00011", "08110100000110",
 class Query:
     def __init__(self, db, table):
         self.db, self.table, self.filters, self.patch, self.window = db, table, [], None, None
+        self.columns = "*"
 
-    def select(self, *_):
+    def select(self, columns="*", *_):
+        self.columns = columns
+        return self
+
+    def in_(self, key, values):
+        self.filters.append(lambda r: r.get(key) in values)
         return self
 
     def order(self, *_):
@@ -81,7 +92,7 @@ class Query:
             return mock.Mock(data=rows)
         rows = sorted(rows, key=lambda r: r["id"])
         a, b = self.window or (0, len(rows))
-        return mock.Mock(data=copy.deepcopy(rows[a:b + 1]))
+        return mock.Mock(data=[project(r, self.columns) for r in rows[a:b + 1]])
 
 
 class Db:

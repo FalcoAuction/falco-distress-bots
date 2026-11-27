@@ -263,6 +263,10 @@ def build_user_message(lead: Dict[str, Any]) -> str:
 # ─── Decision engine ──────────────────────────────────────────────────────
 
 
+def _is_florida(row: Dict[str, Any]) -> bool:
+    return isinstance(row.get("raw_payload"), dict) and row["raw_payload"].get("state") == "FL"
+
+
 class DecisionEngineBot(BotBase):
     name = "decision_engine"
     description = "Autonomous lead-grading + action-recommendation via Claude Haiku"
@@ -350,8 +354,7 @@ class DecisionEngineBot(BotBase):
             # its Tennessee thresholds (focus counties, TN outreach rules) do
             # not apply. FL leads are ranked by the personal-property lane and
             # the DOR roll tags instead.
-            candidates = [c for c in candidates
-                          if not (isinstance(c.get("raw_payload"), dict) and c["raw_payload"].get("state") == "FL")]
+            candidates = [c for c in candidates if not _is_florida(c)]
             self.logger.info(f"{len(candidates)} leads to grade")
 
             # Pass 1: apply fast rules sequentially. Cheap, no LLM.
@@ -504,11 +507,14 @@ class DecisionEngineBot(BotBase):
                 start = page * PAGE_SIZE
                 end = start + PAGE_SIZE - 1
                 try:
+                    q = client.table(table).select(fields).is_("priority_score", "null")
+                    if table == "homeowner_requests_staging":
+                        # A rejected row is not a lead: do not read it, do
+                        # not grade it. It is graded again if it returns to
+                        # pending, because this filter reads today's status.
+                        q = q.neq("staging_status", "rejected")
                     q = (
-                        client.table(table)
-                        .select(fields)
-                        .is_("priority_score", "null")
-                        .order("id")           # stable ordering for pagination
+                        q.order("id")           # stable ordering for pagination
                         .range(start, end)
                         .execute()
                     )
@@ -520,6 +526,11 @@ class DecisionEngineBot(BotBase):
                         if "source" in r and "bot_source" not in r:
                             r["bot_source"] = r["source"]
                         out.append(r)
+                    # run() grades the first max_leads_per_run non-Florida
+                    # rows of this list and drops the rest, so stop reading
+                    # once it has them.
+                    if sum(1 for r in out if not _is_florida(r)) >= self.max_leads_per_run:
+                        return out
                     if len(rows) < PAGE_SIZE:
                         break  # last page
                 except Exception as e:

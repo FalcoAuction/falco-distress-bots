@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ._base import BotBase, _supabase
+from ._slim_read import STAGING, in_play, phone_metadata_now
 
 
 def _norm_address(address: Optional[str]) -> Optional[str]:
@@ -110,8 +111,12 @@ class StackedDistressAggregatorBot(BotBase):
                 f"{sum(1 for s in address_signals.values() if len(s) >= 2)} stacked"
             )
 
-            # Step 2: write stack metadata back to every row
+            # Step 2: write stack metadata back to every row. A rejected row
+            # still counts as a signal at its address (step 1) but is not
+            # tagged itself.
             for table, r in all_rows[: self.max_leads_per_run]:
+                if not in_play(r):
+                    continue
                 addr_key = _norm_address(r.get("property_address"))
                 if not addr_key:
                     skipped += 1
@@ -123,12 +128,14 @@ class StackedDistressAggregatorBot(BotBase):
                     "is_stacked": len(signals) >= 2,
                 }
 
-                existing_meta = r.get("phone_metadata") or {}
-                if not isinstance(existing_meta, dict):
-                    existing_meta = {}
                 # Idempotent — skip if same
-                if existing_meta.get("distress_stack") == stack_meta:
+                if r.get("pm_distress_stack") == stack_meta:
                     skipped += 1
+                    continue
+                # The scan carried only the prior tag: merge into the whole
+                # phone_metadata as it stands now.
+                existing_meta = phone_metadata_now(client, table, r["id"])
+                if existing_meta is None:
                     continue
                 existing_meta["distress_stack"] = stack_meta
 
@@ -181,7 +188,9 @@ class StackedDistressAggregatorBot(BotBase):
             try:
                 q = (
                     client.table(table)
-                    .select("id, property_address, distress_type, phone_metadata")
+                    # Light scan: the prior tag, not the whole phone_metadata.
+                    .select("id, property_address, distress_type, pm_distress_stack:phone_metadata->distress_stack"
+                            + (", staging_status" if table == STAGING else ""))
                     .not_.is_("property_address", "null")
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)

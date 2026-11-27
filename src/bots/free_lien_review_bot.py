@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from ._base import _supabase
 from ._free_data import tracked_run
+from ._slim_read import STAGING, full_rows
 from .free_county_completion_bot import apply
 from ..enrichment.shortlist import county_key
 
@@ -34,17 +35,21 @@ def _run(write=True):
     scanned = written = 0
     after = "00000000-0000-0000-0000-000000000000"
     while True:
-        rows = (client.table("homeowner_requests_staging")
-            .select("id,county,raw_payload,phone_metadata").gt("id", after).order("id")
-            .limit(500).execute().data) or []
-        if not rows:
+        # Light scan: only a queued lien check is work, and a rejected row is
+        # never worked. The payload is read for the queued rows alone.
+        page = (client.table(STAGING).select("id,lien_status:raw_payload->lien_check->>status")
+            .neq("staging_status", "rejected").gt("id", after).order("id")
+            .limit(1000).execute().data) or []
+        if not page:
             break
-        for row in rows:
+        queued = [r["id"] for r in page if r.get("lien_status") == "queued"]
+        rows = full_rows(client, STAGING, "id,county,raw_payload,phone_metadata", queued)
+        for row in (rows[i] for i in queued if i in rows):
             patch = review(row)
             scanned += bool(patch)
             if write and patch:
-                written += apply(client, "homeowner_requests_staging", row, patch)
-        after = rows[-1]["id"]
+                written += apply(client, STAGING, row, patch)
+        after = page[-1]["id"]
     return {"name": "free_lien_review", "status": "ok", "scanned": scanned, "written": written,
             "staged": written, "fetched": scanned}
 

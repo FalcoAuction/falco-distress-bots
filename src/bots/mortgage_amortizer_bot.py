@@ -35,6 +35,7 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
+from ._slim_read import STAGING, full_rows
 from ._provenance import record_field
 
 
@@ -165,6 +166,23 @@ def _resolve_origination(pm: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def _defensible_source(pm: Dict[str, Any]) -> bool:
+    """Only leads whose mortgage figure came from a recorded or matched
+    source are amortized: a Register of Deeds lookup, an anchored HMDA match,
+    or a figure printed in a Nashville Ledger notice."""
+    sig = pm.get("mortgage_signal") or {}
+    is_hmda_anchored = (
+        isinstance(sig, dict)
+        and sig.get("source") == "hmda_match"
+        and (sig.get("sale_anchored") or sig.get("year_anchored"))
+    )
+    is_nl = (
+        isinstance(sig, dict)
+        and sig.get("source") == "nashville_ledger_extracted"
+    )
+    return bool(pm.get("rod_lookup") or is_hmda_anchored or is_nl)
+
+
 class MortgageAmortizerBot(BotBase):
     name = "mortgage_amortizer"
     description = (
@@ -201,35 +219,32 @@ class MortgageAmortizerBot(BotBase):
             page = 0
             while True:
                 try:
-                    r = (
-                        client.table(table)
-                        .select(
-                            "id, county, phone_metadata, mortgage_balance, "
-                            "property_value, raw_payload, owner_name_records"
-                        )
-                        .range(page * 1000, (page + 1) * 1000 - 1)
-                        .execute()
+                    # Light scan: the two phone_metadata keys the gate
+                    # reads. Rejected staging rows are not read at all. The
+                    # full row is fetched only for leads that pass the gate.
+                    r = client.table(table).select(
+                        "id, rod_lookup:phone_metadata->rod_lookup, "
+                        "mortgage_signal:phone_metadata->mortgage_signal"
                     )
+                    if table == STAGING:
+                        r = r.neq("staging_status", "rejected")
+                    r = r.range(page * 1000, (page + 1) * 1000 - 1).execute()
                     rows = getattr(r, "data", None) or []
                     if not rows:
                         break
-                    for lead in rows:
+                    wanted = [x["id"] for x in rows if _defensible_source(x)]
+                    full = full_rows(
+                        client, table,
+                        "id, county, phone_metadata, mortgage_balance, "
+                        "property_value, raw_payload, owner_name_records",
+                        wanted,
+                    )
+                    for lead in (full[i] for i in wanted if i in full):
                         pm = lead.get("phone_metadata") or {}
                         if not isinstance(pm, dict):
                             continue
                         # Only process defensible-source leads
-                        is_rod = bool(pm.get("rod_lookup"))
-                        sig = pm.get("mortgage_signal") or {}
-                        is_hmda_anchored = (
-                            isinstance(sig, dict)
-                            and sig.get("source") == "hmda_match"
-                            and (sig.get("sale_anchored") or sig.get("year_anchored"))
-                        )
-                        is_nl = (
-                            isinstance(sig, dict)
-                            and sig.get("source") == "nashville_ledger_extracted"
-                        )
-                        if not (is_rod or is_hmda_anchored or is_nl):
+                        if not _defensible_source(pm):
                             continue
 
                         attempted += 1
