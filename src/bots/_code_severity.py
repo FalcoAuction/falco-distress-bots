@@ -37,6 +37,12 @@ SEVERE_RX = re.compile(
 )
 
 
+# The same terms plus three that are applied only to the fields the Memphis,
+# Chattanooga, Mt. Juliet and Johnson City bots write ("boarding house" is a
+# zoning term in Nashville). Site migration 20261127000100.
+OTHER_CITY_RX = re.compile(SEVERE_RX.pattern[:-1] + r"|DANGEROUS STRUCTURE|BOARDING|BURNOUT)")
+
+
 def _text(value: Any) -> Optional[str]:
     """jsonb ->> : a JSON null or a missing key is NULL, anything else is text."""
     if value is None:
@@ -46,7 +52,7 @@ def _text(value: Any) -> Optional[str]:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (dict, list)):
-        return json.dumps(value)
+        return json.dumps(value, ensure_ascii=False)
     return str(value)
 
 
@@ -78,11 +84,35 @@ def severity_text(raw: Any) -> str:
     ])
 
 
+def other_city_text(raw: Any) -> str:
+    """The text of the second test: each other city's own violation field."""
+    raw = raw if isinstance(raw, dict) else {}
+    chattanooga = raw.get("chattanooga_codes")
+    # (jsonb -> 'descriptions')::text is NULL only when the key is absent.
+    descriptions = (json.dumps(chattanooga["descriptions"], ensure_ascii=False)
+                    if isinstance(chattanooga, dict) and "descriptions" in chattanooga else None)
+    return _concat_ws([
+        _field(raw.get("memphis_311"), "REQUEST_TYPE"), descriptions,
+        _field(raw.get("mt_juliet_issue_review"), "condition_excerpt"),
+        _field(raw.get("johnson_city_bdsr"), "violations"),
+    ])
+
+
 def code_severity(lead: Any) -> Optional[str]:
     """'severe', 'nuisance' or None, for a LeadPayload or a row-shaped dict."""
     if str(_get(lead, "distress_type") or "").upper() not in CODE_TYPES:
         return None
-    return "severe" if SEVERE_RX.search(severity_text(_get(lead, "raw_payload")).upper()) else "nuisance"
+    raw = _get(lead, "raw_payload")
+    if SEVERE_RX.search(severity_text(raw).upper()):
+        return "severe"
+    if isinstance(raw, dict):
+        # A Knoxville Public Officer Hearing case and a Johnson City Board of
+        # Dwelling Standards hearing are unfit-structure proceedings.
+        if "poh_section" in raw or _field(raw.get("johnson_city_bdsr"), "stage") == "hearing_listed":
+            return "severe"
+        if OTHER_CITY_RX.search(other_city_text(raw).upper()):
+            return "severe"
+    return "nuisance"
 
 
 def door_filter(leads: List[Any]) -> Tuple[List[Any], int]:
