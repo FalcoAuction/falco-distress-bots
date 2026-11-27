@@ -51,6 +51,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
 from ._provenance import record_field
+from ._slim_read import STAGING, in_play, paths, phone_metadata_now, unpack
+
+# The raw_payload keys _compute reads for the owner mailing address.
+MAILING_KEYS = ("rutherford_arcgis", "shelby_arcgis", "williamson_inigo", "padctn", "tpad", "mailing_address")
 
 
 # Approximate latitude/longitude for major TN cities (zip-prefix based)
@@ -177,16 +181,20 @@ class SkipTraceEnricherBot(BotBase):
                 self.logger.info(f"{table}: {len(rows)} candidates")
 
                 for row in rows[:self.max_leads_per_run]:
+                    if not in_play(row):
+                        continue
                     skip_meta = self._compute(row)
                     if skip_meta is None:
                         skipped += 1
                         continue
 
-                    existing_meta = row.get("phone_metadata") or {}
-                    if not isinstance(existing_meta, dict):
-                        existing_meta = {}
-                    if existing_meta.get("skip_trace") == skip_meta:
+                    if row.get("pm_skip_trace") == skip_meta:
                         skipped += 1
+                        continue
+                    # The scan carried only the prior tag: merge into the
+                    # whole phone_metadata as it stands now.
+                    existing_meta = phone_metadata_now(client, table, row["id"])
+                    if existing_meta is None:
                         continue
                     existing_meta["skip_trace"] = skip_meta
 
@@ -238,14 +246,21 @@ class SkipTraceEnricherBot(BotBase):
     def _candidates(self, client, table: str) -> List[Dict[str, Any]]:
         # PostgREST caps .limit() at 1000 — paginate so the full corpus
         # gets skip-traced.
+        #
+        # Light scan: the mailing-address records _compute reads and the
+        # prior tag, not the whole raw_payload and phone_metadata. Rows past
+        # max_leads_per_run were never worked, so they are not read.
         out = []
         PAGE_SIZE = 1000
         MAX_PAGES = 10
+        cols = ("id, property_address, " + paths("raw_payload", MAILING_KEYS, "rp_")
+                + ", pm_skip_trace:phone_metadata->skip_trace"
+                + (", staging_status" if table == STAGING else ""))
         for page in range(MAX_PAGES):
             try:
                 q = (
                     client.table(table)
-                    .select("id, property_address, raw_payload, phone_metadata")
+                    .select(cols)
                     .not_.is_("property_address", "null")
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
@@ -254,8 +269,10 @@ class SkipTraceEnricherBot(BotBase):
                 rows = getattr(q, "data", None) or []
                 if not rows:
                     break
+                for r in rows:
+                    r["raw_payload"] = unpack(r, MAILING_KEYS, "rp_")
                 out.extend(rows)
-                if len(rows) < PAGE_SIZE:
+                if len(rows) < PAGE_SIZE or len(out) >= self.max_leads_per_run:
                     break
             except Exception as e:
                 self.logger.warning(f"candidate query on {table} page {page} failed: {e}")

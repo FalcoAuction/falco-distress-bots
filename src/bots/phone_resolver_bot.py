@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._slim_read import STAGING, full_rows, in_play
 from ._field_confidence import phone_trust
 from ._provenance import record_field
 
@@ -305,9 +306,12 @@ class PhoneResolverBot(BotBase):
         )
         for page in range(MAX_PAGES):
             try:
+                # Staging: page over id and status only, then read the
+                # payload for the rows that are not rejected. The window
+                # (first rows by id) is the same as before.
                 q = (
                     client.table(table)
-                    .select(select)
+                    .select("id, staging_status" if table == STAGING else select)
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
                     .execute()
@@ -315,12 +319,19 @@ class PhoneResolverBot(BotBase):
                 rows = getattr(q, "data", None) or []
                 if not rows:
                     break
+                fetched = len(rows)
+                if table == STAGING:
+                    room = self.max_leads_per_run - page * PAGE_SIZE
+                    wanted = [r["id"] for r in rows[:room] if in_play(r)]
+                    full = full_rows(client, table, select, wanted)
+                    rows = [full[i] for i in wanted if i in full]
                 # Normalize so callers can read .bot_source uniformly
                 for r in rows:
                     if "source" in r and "bot_source" not in r:
                         r["bot_source"] = r["source"]
                 out.extend(rows)
-                if len(rows) < PAGE_SIZE:
+                # Rows past max_leads_per_run were never worked.
+                if fetched < PAGE_SIZE or (page + 1) * PAGE_SIZE >= self.max_leads_per_run:
                     break
             except Exception as e:
                 self.logger.warning(f"candidate query on {table} page {page} failed: {e}")

@@ -32,6 +32,33 @@ from ._field_confidence import deep_merge_dict
 from ._provenance import record_field
 from ._value_guard import (XREF_EXACT, XREF_KEY, XREF_SOURCE, copy_decision, norm_county, own_parcel_value,
                            row_parcels)
+from ._slim_read import full_rows, paths, unpack
+
+# Everything the parcel rule reads off a row (tax_roll_parcel and, in
+# _value_guard, _doc_parcels and value_evidence). The scan selects these
+# paths instead of the whole raw_payload and phone_metadata.
+RAW_KEYS = ("parcel", "alt_parcel", "parcel_id", "county", "cumulative_owed", "hamilton_roll_valuation",
+            "comptroller_parcel", "hamilton_assessor", "metro_parcel", "padctn", "rutherford_arcgis",
+            "shelby_arcgis", "williamson_inigo", "trustee_detail", "preforeclosure_evidence", "code_case_parcel")
+# One field of a larger record: (record, field).
+RAW_FIELDS = (("extracted", "parcel"), ("nashville_codes", "Property_APN"), ("davidson_demolition_permit", "Parcel"))
+META_KEYS = ("metro_parcel_checked", "shelby_trustee_value_review", XREF_KEY)
+SCAN_COLUMNS = ("id, property_address, property_value, owner_name_records, county, property_value_source, "
+                "property_value_as_of, " + paths("raw_payload", RAW_KEYS, "rp_") + ", "
+                + ", ".join(f"rf_{rec}:raw_payload->{rec}->{field}" for rec, field in RAW_FIELDS) + ", "
+                + paths("phone_metadata", META_KEYS, "pm_"))
+
+
+def _light_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Put the selected paths back where the parcel rule looks for them."""
+    raw = unpack(row, RAW_KEYS, "rp_")
+    for rec, field in RAW_FIELDS:
+        value = row.pop(f"rf_{rec}", None)
+        if value is not None:
+            raw[rec] = {field: value}
+    row["raw_payload"] = raw
+    row["phone_metadata"] = unpack(row, META_KEYS, "pm_")
+    return row
 
 
 def _normalize_address(addr: str) -> str:
@@ -200,6 +227,15 @@ class XrefAvmEnricherBot(BotBase):
                 if "owner_name_records" in update:
                     owner_propagated += 1
                 try:
+                    if "phone_metadata" in update:
+                        # The scan held three phone_metadata keys. Merge the
+                        # proof into the whole object as it stands now.
+                        held = full_rows(client, rcpt_table, "id,phone_metadata", [rcpt_row["id"]])
+                        if rcpt_row["id"] not in held:
+                            skipped += 1
+                            continue
+                        update["phone_metadata"] = deep_merge_dict(
+                            held[rcpt_row["id"]].get("phone_metadata"), {XREF_KEY: patch["proof"]})
                     q = client.table(rcpt_table).update(update).eq("id", rcpt_row["id"])
                     # Fill a gap only: refuse the write if a value landed meanwhile.
                     written = q.is_("property_value", "null").execute()
@@ -257,17 +293,15 @@ class XrefAvmEnricherBot(BotBase):
         PAGE_SIZE = 1000
         while True:
             try:
-                r = client.table(table).select(
-                    "id, property_address, property_value, "
-                    "owner_name_records, county, property_value_source, "
-                    "property_value_as_of, raw_payload, phone_metadata"
-                ).order("id").range(
+                # Every status is read on purpose: a rejected row that holds
+                # a verified parcel value can still supply it to a live lead.
+                r = client.table(table).select(SCAN_COLUMNS).order("id").range(
                     page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1
                 ).execute()
                 rows = getattr(r, "data", None) or []
                 if not rows:
                     break
-                out.extend(rows)
+                out.extend(_light_row(x) for x in rows)
                 if len(rows) < PAGE_SIZE:
                     break
                 page += 1

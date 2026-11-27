@@ -53,6 +53,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
 from ._provenance import record_field
+from ._slim_read import STAGING, in_play, paths, phone_metadata_now, unpack
+
+# The assessor records _extract_signals reads out of raw_payload.
+SIGNAL_KEYS = ("williamson_inigo", "padctn", "tpad", "hamilton_assessor", "shelby_arcgis", "rutherford_arcgis")
 
 
 # Average annual TN 30-year fixed mortgage rates (Freddie Mac PMMS
@@ -294,6 +298,8 @@ class MortgageEstimatorBot(BotBase):
                 self.logger.info(f"{table}: {len(rows)} candidates")
 
                 for row in rows[:self.max_leads_per_run]:
+                    if not in_play(row):
+                        continue
                     sale_price, sale_date, avm, year_built = self._extract_signals(row)
                     # Allow AVM-only / AVM+age fallbacks — only bail when we
                     # have literally nothing (no sale, no AVM).
@@ -344,9 +350,11 @@ class MortgageEstimatorBot(BotBase):
                     # unknown balance is better than a wrong one.
                     update: Dict[str, Any] = {}
 
-                    existing_meta = row.get("phone_metadata") or {}
-                    if not isinstance(existing_meta, dict):
-                        existing_meta = {}
+                    # The scan carried only the prior estimate: merge into
+                    # the whole phone_metadata as it stands now.
+                    existing_meta = phone_metadata_now(client, table, row["id"])
+                    if existing_meta is None:
+                        continue
                     existing_meta["mortgage_estimate"] = estimate
                     update["phone_metadata"] = existing_meta
 
@@ -403,14 +411,21 @@ class MortgageEstimatorBot(BotBase):
         # PostgREST caps any .limit() at 1000 silently. Paginate so the
         # full corpus gets covered (Hamilton-tax-delinquent alone has
         # 2000+ rows in staging).
+        #
+        # Light scan: the six assessor records the estimate reads and the
+        # prior estimate, not the whole raw_payload and phone_metadata. Rows
+        # past max_leads_per_run were never worked, so they are not read.
         out = []
         PAGE_SIZE = 1000
         MAX_PAGES = 10
+        cols = ("id, mortgage_balance, property_value, " + paths("raw_payload", SIGNAL_KEYS, "rp_")
+                + ", pm_estimate:phone_metadata->mortgage_estimate"
+                + (", staging_status" if table == STAGING else ""))
         for page in range(MAX_PAGES):
             try:
                 q = (
                     client.table(table)
-                    .select("id, mortgage_balance, property_value, raw_payload, phone_metadata")
+                    .select(cols)
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
                     .execute()
@@ -418,8 +433,11 @@ class MortgageEstimatorBot(BotBase):
                 rows = getattr(q, "data", None) or []
                 if not rows:
                     break
+                for r in rows:
+                    r["raw_payload"] = unpack(r, SIGNAL_KEYS, "rp_")
+                    r["phone_metadata"] = {"mortgage_estimate": r.pop("pm_estimate", None)}
                 out.extend(rows)
-                if len(rows) < PAGE_SIZE:
+                if len(rows) < PAGE_SIZE or len(out) >= self.max_leads_per_run:
                     break
             except Exception as e:
                 self.logger.warning(f"candidate query on {table} page {page} failed: {e}")

@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ._base import BotBase, _supabase
+from ._slim_read import STAGING, in_play, phone_metadata_now
 
 
 # Patterns are ALL UPPERCASE — we uppercase the input for matching.
@@ -192,16 +193,20 @@ class OwnerClassifierBot(BotBase):
                 self.logger.info(f"{table}: {len(rows)} unclassified leads")
 
                 for row in rows[:self.max_leads_per_run]:
+                    if not in_play(row):
+                        continue
                     owner = (row.get("owner_name_records") or row.get("full_name") or "")
                     klass, marker = classify_owner(owner)
                     per_class[klass] = per_class.get(klass, 0) + 1
 
-                    existing_meta = row.get("phone_metadata") or {}
-                    if not isinstance(existing_meta, dict):
-                        existing_meta = {}
                     # Skip if already classified the same way (idempotent)
-                    if existing_meta.get("owner_class") == klass:
+                    if row.get("pm_owner_class") == klass:
                         skipped += 1
+                        continue
+                    # The scan carried only the prior class: merge into the
+                    # whole phone_metadata as it stands now.
+                    existing_meta = phone_metadata_now(client, table, row["id"])
+                    if existing_meta is None:
                         continue
                     existing_meta["owner_class"] = klass
                     if marker:
@@ -259,8 +264,10 @@ class OwnerClassifierBot(BotBase):
         for filter_kind in ("has_owner", "has_full_name"):
             for page in range(MAX_PAGES):
                 try:
+                    # Light scan: the prior class, not the whole phone_metadata.
                     q = (client.table(table)
-                            .select("id, full_name, owner_name_records, phone_metadata")
+                            .select("id, full_name, owner_name_records, pm_owner_class:phone_metadata->owner_class"
+                                    + (", staging_status" if table == STAGING else ""))
                             .order("id")
                             .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1))
                     if filter_kind == "has_owner":
@@ -274,6 +281,9 @@ class OwnerClassifierBot(BotBase):
                     rows.extend(page_rows)
                     if len(page_rows) < PAGE_SIZE:
                         break
+                    # Rows past max_leads_per_run were never worked.
+                    if len(rows) >= self.max_leads_per_run:
+                        return rows
                 except Exception as e:
                     self.logger.warning(
                         f"candidate query on {table} page {page} ({filter_kind}) failed: {e}"

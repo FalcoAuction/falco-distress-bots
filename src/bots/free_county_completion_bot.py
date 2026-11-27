@@ -11,6 +11,28 @@ from urllib.parse import quote
 from collections import Counter
 from ._base import _supabase
 from ._free_data import county_patch, hmda_principal_repair, notice_phone_repair, tracked_run
+from ._slim_read import STAGING, full_rows, paths, unpack
+
+COLUMNS = ("id,county,property_address,owner_name_records,property_value,"
+           "property_value_source,year_built,mortgage_balance,phone")
+# The keys changes() reads (county_patch, hmda_principal_repair and
+# notice_phone_repair in _free_data). The staging scan selects these instead
+# of the whole raw_payload and phone_metadata.
+RAW_KEYS = ("comptroller_parcel", "source", "metro_parcel", "rutherford_arcgis", "hamilton_assessor",
+            "williamson_inigo", "padctn", "montgomery_gis", "public_contact_candidates")
+META_KEYS = ("mortgage_signal", "rod_lookup", "mortgage_estimate", "free_data_repair", "phone_resolver",
+             "batchdata_skip_trace", "enformion", "enformion_skip_trace", "dialer_feedback")
+SCAN_COLUMNS = (COLUMNS + ",bot_source,rp_permit_cost:raw_payload->permit->Const_Cost,"
+                + paths("raw_payload", RAW_KEYS, "rp_") + "," + paths("phone_metadata", META_KEYS, "pm_"))
+
+
+def _light_row(row):
+    cost = row.pop("rp_permit_cost", None)
+    row["raw_payload"] = unpack(row, RAW_KEYS, "rp_")
+    if cost is not None:
+        row["raw_payload"]["permit"] = {"Const_Cost": cost}
+    row["phone_metadata"] = unpack(row, META_KEYS, "pm_")
+    return row
 
 
 def changes(row):
@@ -19,6 +41,15 @@ def changes(row):
     contact = notice_phone_repair({**row, **patch})
     patch.update(contact)
     return patch
+
+
+def _may_change(light_row):
+    """Does the light row show anything to change? A row the rules cannot
+    read is sent on to the full pass, which fails on it as it always did."""
+    try:
+        return bool(changes(_light_row(light_row)))
+    except Exception:
+        return True
 
 
 def apply(client, table, row, patch):
@@ -70,13 +101,24 @@ def _run(write=True):
         while True:
             # Live has source, not bot_source. Other fields are shared.
             src = "bot_source" if table.endswith("staging") else "source"
-            rows = (client.table(table).select("id,county,property_address,owner_name_records,property_value,"
-                    "property_value_source,year_built,mortgage_balance,phone,phone_metadata,raw_payload," + src)
-                    .gt("id", after).order("id").limit(250).execute().data) or []
-            if not rows:
+            full = COLUMNS + ",phone_metadata,raw_payload," + src
+            if table == STAGING:
+                # Light scan, no rejected rows. A row is read in full only
+                # when the light columns show there is something to change.
+                size = 1000
+                page = (client.table(table).select(SCAN_COLUMNS).neq("staging_status", "rejected")
+                        .gt("id", after).order("id").limit(size).execute().data) or []
+                due = [r["id"] for r in page if _may_change(r)]
+                held = full_rows(client, table, full, due)
+                rows = [held[i] for i in due if i in held]
+            else:
+                size = 250
+                page = rows = (client.table(table).select(full)
+                               .gt("id", after).order("id").limit(size).execute().data) or []
+            if not page:
                 break
+            stats["scanned"] += len(page)
             for row in rows:
-                stats["scanned"] += 1
                 patch = changes(row)
                 if not patch:
                     continue
@@ -85,8 +127,8 @@ def _run(write=True):
                 if write:
                     n = apply(client, table, row, patch)
                     stats["written" if n else "guarded_skip"] += n or 1
-            after = rows[-1]["id"]
-            if len(rows) < 250:
+            after = page[-1]["id"]
+            if len(page) < size:
                 break
     return {"name": "free_county_completion", "status": "ok", "write": write,
             "staged": stats["written"], "fetched": stats["scanned"], **stats}

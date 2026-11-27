@@ -25,10 +25,13 @@ from typing import Any, Dict, List, Optional
 
 from ._base import BotBase, _supabase
 from ._field_confidence import equity_trust, phone_trust
+from ._slim_read import STAGING, full_rows, in_play
 
 
 # How long a grade is considered "fresh enough" before we re-check.
 STALE_DAYS = 7
+FULL_COLUMNS = ("id, priority_score, property_value, property_value_source, "
+                "mortgage_balance, phone, owner_name_records, phone_metadata, raw_payload")
 
 
 class StaleRegradeBot(BotBase):
@@ -64,10 +67,14 @@ class StaleRegradeBot(BotBase):
 
         try:
             for table in ("homeowner_requests_staging", "homeowner_requests"):
-                rows = self._candidates(client, table)
+                rows = [r for r in self._candidates(client, table) if in_play(r)]
                 self.logger.info(f"{table}: {len(rows)} graded leads to inspect")
-                for row in rows:
-                    scanned += 1
+                scanned += len(rows)
+                # The scan is light. Only a row the light columns cannot rule
+                # out is read in full and put through the real test.
+                due = [r["id"] for r in rows if self._may_be_stale(r, cutoff)]
+                full = full_rows(client, table, FULL_COLUMNS, due)
+                for row in (full[i] for i in due if i in full):
                     if not self._should_regrade(row, cutoff):
                         continue
                     pm = row.get("phone_metadata") or {}
@@ -115,9 +122,10 @@ class StaleRegradeBot(BotBase):
             try:
                 q = (
                     client.table(table)
-                    .select("id, priority_score, property_value, property_value_source, "
-                            "mortgage_balance, phone, owner_name_records, "
-                            "phone_metadata, raw_payload")
+                    .select("id, property_value, mortgage_balance, phone, owner_name_records, "
+                            "de_action:phone_metadata->decision_engine->>action, "
+                            "de_decided_at:phone_metadata->decision_engine->>decided_at"
+                            + (", staging_status" if table == STAGING else ""))
                     .not_.is_("priority_score", "null")
                     .order("id")
                     .range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1)
@@ -133,6 +141,30 @@ class StaleRegradeBot(BotBase):
                 self.logger.warning(f"candidate fetch on {table} page {page} failed: {e}")
                 break
         return out
+
+    @staticmethod
+    def _may_be_stale(row: Dict[str, Any], cutoff: datetime) -> bool:
+        """False only when _should_regrade is certain to say no from the
+        light columns alone: the grade is newer than the cutoff and neither
+        early trigger (REJECT_NO_EQUITY, HOLD_FOR_DATA with data) applies.
+        Anything else is read in full and decided by _should_regrade."""
+        action = row.get("de_action")
+        if action == "REJECT_NO_EQUITY":
+            return True
+        if action == "HOLD_FOR_DATA" and (
+            row.get("property_value")
+            or row.get("mortgage_balance")
+            or row.get("phone")
+            or row.get("owner_name_records")
+        ):
+            return True
+        try:
+            gat = datetime.fromisoformat(str(row.get("de_decided_at") or "").replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return True
+        if gat.tzinfo is None:
+            gat = gat.replace(tzinfo=timezone.utc)
+        return gat < cutoff
 
     @staticmethod
     def _should_regrade(row: Dict[str, Any], cutoff: datetime) -> bool:
