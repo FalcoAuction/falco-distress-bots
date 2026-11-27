@@ -147,6 +147,7 @@ from . import fl_roll_enricher_bot
 from . import tn_boat_notice_bot
 from . import court_contacts_bot
 from . import boat_owner_skiptrace_bot
+from . import staging_slim_backfill
 
 # Each entry is the module's `run()` function. Add new scrapers here.
 # Order matters: lead-source scrapers first; enrichers run AFTER so they
@@ -338,6 +339,10 @@ NEW_BOTS = [
     # Owner phones for marina-lien boats. PAID: parked with the rest of
     # paid data until FALCO_PAID_DATA_ENABLED=1.
     ("boat_owner_skiptrace", boat_owner_skiptrace_bot.run),
+    # Housekeeping: strips unread detail from long-rejected staging rows and
+    # keeps the row as a placeholder. At most 200 rows a run, and a dry run
+    # unless STAGING_SLIM_WRITE=1 (see staging_slim_backfill.py).
+    ("staging_slim", staging_slim_backfill.run),
     # MTN-focused enrichment chain — graduates staged leads into the dialer.
     # Order matters: HMDA must run before mortgage_amortizer (amortizer reads
     # HMDA's mortgage_signal); skip-trace before Twilio lookup (validates
